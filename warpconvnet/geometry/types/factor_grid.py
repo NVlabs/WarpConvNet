@@ -12,7 +12,8 @@ import torch
 from torch import Tensor
 
 from warpconvnet.geometry.features.grid import GridMemoryFormat
-from warpconvnet.geometry.types.grid import Grid, points_to_grid
+from warpconvnet.geometry.types.grid import Grid
+from warpconvnet.geometry.types.conversion.to_grid import points_to_grid
 from warpconvnet.geometry.types.points import Points
 
 
