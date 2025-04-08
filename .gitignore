@@ -29,6 +29,5 @@ site/
 data/
 
 # Temporary ignores. Restore before committing.
-docs/
 figconvnet/
 scratch/
