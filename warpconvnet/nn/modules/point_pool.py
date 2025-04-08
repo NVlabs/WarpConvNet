@@ -3,8 +3,6 @@
 
 from typing import Literal, Optional, Tuple, Union
 
-import torch.nn as nn
-
 from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 from warpconvnet.geometry.types.points import Points

@@ -9,7 +9,7 @@ import torch
 from warpconvnet.geometry.base.coords import Coords
 from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig
-from warpconvnet.geometry.coords.sample import random_downsample
+from warpconvnet.geometry.coords.sample import random_sample_per_batch
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, morton_code
 from warpconvnet.geometry.coords.search.continuous import (
     neighbor_search,
@@ -38,7 +38,7 @@ class RealCoords(Coords):
         """
         Downsample the coordinates to the specified number of points
         """
-        sampled_indices, sample_offsets = random_downsample(self.offsets, sample_points)
+        sampled_indices, sample_offsets = random_sample_per_batch(self.offsets, sample_points)
         return self.__class__(
             batched_tensor=self.batched_tensor[sampled_indices], offsets=sample_offsets
         )

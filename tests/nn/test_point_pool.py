@@ -65,7 +65,7 @@ def test_point_avg_pool(setup_points):
     # Verify output
     assert isinstance(out, Points)
     assert out.num_channels == pc.num_channels
-    assert len(out) <= max_points
+    assert len(out) <= max_points * pc.batch_size
     assert out.device == device
 
 

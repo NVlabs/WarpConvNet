@@ -155,7 +155,7 @@ def test_patch_transformer_block(setup_points):
     assert len(out) == len(pc)
 
     # Test with voxels
-    st = pc.to_sparse(voxel_size=0.02)
+    st = pc.to_voxels(voxel_size=0.02)
     out = patch_attn(st)
     assert out.feature_tensor.shape[-1] == dim
     assert len(out) == len(st)

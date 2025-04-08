@@ -93,7 +93,7 @@ class UseAllConvNet(nn.Module):
     def forward(self, x: Float[Tensor, "B N 3"]) -> Float[Tensor, "B 40"]:
         pc: Points = Points.from_list_of_coordinates(x, encoding_channels=8, encoding_range=1)
         pc = self.point_conv(pc)
-        st: Voxels = pc.to_sparse(reduction=REDUCTIONS.MAX, voxel_size=self.voxel_size)
+        st: Voxels = pc.to_voxels(reduction=REDUCTIONS.MAX, voxel_size=self.voxel_size)
         st = self.sparse_conv(st)
         dt: Tensor = st.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=(4, 4, 4))
         return self.dense_conv(dt)

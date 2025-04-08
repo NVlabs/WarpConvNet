@@ -13,7 +13,7 @@ from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 from warpconvnet.geometry.coords.search.knn import (
     batched_knn_search,
 )
-from warpconvnet.geometry.coords.sample import random_downsample
+from warpconvnet.geometry.coords.sample import random_sample_per_batch
 from warpconvnet.geometry.coords.ops.voxel import (
     voxel_downsample_csr_mapping,
     voxel_downsample_random_indices,
@@ -30,7 +30,7 @@ __all__ = ["point_pool"]
 
 def _generate_batched_coords(
     coordinate_tensor: Float[Tensor, "N 3"],
-    return_type: Literal["point", "sparse"],
+    return_type: Literal["point", "voxel"],
     csr_indices: Int[Tensor, "M"],  # noqa: F821
     csr_offsets: Int[Tensor, "B+1"],  # noqa: F821
     to_unique_indices: Int[Tensor, "M"],  # noqa: F821
@@ -68,12 +68,12 @@ def _generate_batched_coords(
 def _pool_by_random_sample(
     pc: "Points",  # noqa: F821
     downsample_voxel_size: Optional[float] = None,
-    return_type: Literal["point", "sparse"] = "point",
+    return_type: Literal["point", "voxel"] = "point",
 ) -> Geometry:
     from warpconvnet.geometry.types.points import Points
     from warpconvnet.geometry.types.voxels import Voxels
 
-    if return_type == "sparse":
+    if return_type == "voxel":
         RETURN_CLS = Voxels
     else:
         RETURN_CLS = Points
@@ -106,7 +106,7 @@ def _pool_by_max_num_points(
     pc: "Points",  # noqa: F821
     reduction: Union[REDUCTIONS | REDUCTION_TYPES_STR],
     downsample_max_num_points: Optional[int] = None,
-    return_type: Literal["point", "sparse"] = "point",
+    return_type: Literal["point", "voxel"] = "point",
     return_neighbor_search_result: bool = False,
 ) -> Geometry:
     from warpconvnet.geometry.types.points import Points
@@ -114,20 +114,20 @@ def _pool_by_max_num_points(
 
     if isinstance(reduction, str):
         reduction = REDUCTIONS(reduction)
-    if return_type == "sparse":
+    if return_type == "voxel":
         RETURN_CLS = Voxels
     else:
         RETURN_CLS = Points
 
-    sample_idx, unique_offsets = random_downsample(
+    sample_idx, sampled_offsets = random_sample_per_batch(
         offsets=pc.offsets,
-        sample_points=downsample_max_num_points,
+        num_samples=downsample_max_num_points,
     )
-    unique_coords = pc.coordinate_tensor[sample_idx]
+    sampled_coords = pc.coordinate_tensor[sample_idx]
     # nearest neighbor of all points to down_coords
     knn_down_indices = batched_knn_search(
-        ref_positions=unique_coords,
-        ref_offsets=unique_offsets,
+        ref_positions=sampled_coords,
+        ref_offsets=sampled_offsets,
         query_positions=pc.coordinate_tensor,
         query_offsets=pc.offsets,
         k=1,
@@ -149,11 +149,12 @@ def _pool_by_max_num_points(
     )
     if len(unique_indices) != len(sample_idx):
         # select survived indices
-        unique_coords = unique_coords[unique_indices]
-        unique_batch_indices = batch_index_from_offset(unique_offsets, backend="torch")
+        sampled_coords = sampled_coords[unique_indices]
+        unique_batch_indices = batch_index_from_offset(sampled_offsets, backend="torch")
         unique_batch_indices = unique_batch_indices.to(unique_indices.device)[unique_indices]
         _, unique_counts = torch.unique_consecutive(unique_batch_indices, return_counts=True)
-        unique_offsets = torch.cat(
+        # Update the offsets
+        sampled_offsets = torch.cat(
             [
                 torch.zeros(1, dtype=unique_counts.dtype),
                 torch.cumsum(unique_counts.cpu(), dim=0),
@@ -178,9 +179,9 @@ def _pool_by_max_num_points(
             knn_down_indices = mapping[knn_down_indices]
 
     out_pc = RETURN_CLS(
-        batched_coordinates=unique_coords,
+        batched_coordinates=sampled_coords,
         batched_features=down_features,
-        offsets=unique_offsets,
+        offsets=sampled_offsets,
         num_points=downsample_max_num_points,
     )
     if return_neighbor_search_result:
@@ -193,7 +194,7 @@ def point_pool(
     reduction: Union[REDUCTIONS | REDUCTION_TYPES_STR],
     downsample_max_num_points: Optional[int] = None,
     downsample_voxel_size: Optional[float] = None,
-    return_type: Literal["point", "sparse"] = "point",
+    return_type: Literal["point", "voxel"] = "point",
     avereage_pooled_coordinates: bool = False,
     return_neighbor_search_result: bool = False,
     return_to_unique: bool = False,
@@ -225,10 +226,10 @@ def point_pool(
     assert (
         downsample_max_num_points is not None or downsample_voxel_size is not None
     ), "Either downsample_num_points or downsample_voxel_size must be provided."
-    if return_type == "sparse":
+    if return_type == "voxel":
         assert (
             not avereage_pooled_coordinates
-        ), "averaging pooled coordinates is not supported for sparse return type"
+        ), "averaging pooled coordinates is not supported for Voxels return type"
         RETURN_CLS = Voxels
     else:
         RETURN_CLS = Points

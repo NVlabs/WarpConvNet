@@ -24,6 +24,7 @@ Documentation = "https://gitlab.nvidia.com/3dmmllm/warpconvnet/docs"
 
 [project.optional-dependencies]
 dev = [
+    "ipdb",
     "pre-commit",
     "pytest>=7.4.0",
     "pytest-benchmark>=4.0.0",

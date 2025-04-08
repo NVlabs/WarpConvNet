@@ -13,7 +13,7 @@ from warpconvnet.geometry.coords.real import RealCoords
 from warpconvnet.geometry.coords.search.cache import RealSearchCache
 from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig
-from warpconvnet.geometry.coords.sample import random_downsample
+from warpconvnet.geometry.coords.sample import random_sample_per_batch
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, morton_code
 from warpconvnet.geometry.features.cat import CatFeatures
 from warpconvnet.geometry.features.pad import PadFeatures
@@ -26,8 +26,8 @@ from warpconvnet.geometry.coords.ops.voxel import (
 )
 from warpconvnet.geometry.features.ops.convert import to_batched_features
 from warpconvnet.nn.functional.encodings import sinusoidal_encoding
-from warpconvnet.nn.functional.point_pool import point_pool
 from warpconvnet.ops.reductions import REDUCTIONS, REDUCTION_TYPES_STR, row_reduction
+from warpconvnet.geometry.types.conversion.to_voxels import points_to_voxels
 
 
 class Points(Geometry):
@@ -184,11 +184,13 @@ class Points(Geometry):
             **extra_args,
         )
 
-    def downsample(self, sample_points: int) -> "Points":
+    def random_downsample(self, num_sample_points: int) -> "Points":
         """
-        Downsample the coordinates to the specified number of points
+        Downsample the coordinates to the specified number of points.
+
+        If the batch size is N, the total number of output points is N * num_sample_points.
         """
-        sampled_indices, sample_offsets = random_downsample(self.offsets, sample_points)
+        sampled_indices, sample_offsets = random_sample_per_batch(self.offsets, num_sample_points)
         return self.__class__(
             batched_coordinates=RealCoords(
                 batched_tensor=self.coordinate_tensor[sampled_indices],
@@ -298,22 +300,8 @@ class Points(Geometry):
 
         return cls(batched_coordinates, batched_features)
 
-    def to_sparse(
-        self,
-        voxel_size: Optional[float] = None,
-        reduction: Union[REDUCTIONS | REDUCTION_TYPES_STR] = REDUCTIONS.RANDOM,
-        unique_method: Literal["torch", "ravel"] = "torch",
-        return_to_unique: bool = False,
-    ):
+    def to_voxels(self, voxel_size: float) -> "Voxels":
         """
         Convert the point collection to a spatially sparse tensor.
         """
-        st = point_pool(
-            self,
-            reduction=reduction,
-            downsample_voxel_size=voxel_size,
-            return_type="sparse",
-            unique_method=unique_method,
-            return_to_unique=return_to_unique,
-        )
-        return st
+        return points_to_voxels(self, voxel_size)
