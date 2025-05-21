@@ -77,7 +77,7 @@ class IntSearchResult:
     def __getitem__(self, idx: int) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821
         start, end = self.offsets[idx], self.offsets[idx + 1]
         return self.in_maps[start:end], self.out_maps[start:end]
-
+    
     @torch.no_grad()
     def get_batch(
         self,
@@ -122,6 +122,12 @@ class IntSearchResult:
 
     def __repr__(self):
         return f"{self.__class__.__name__}(len={len(self)})"
+    
+    def numel(self, i: int) -> int:
+        """
+        Return the number of elements in the i-th map.
+        """
+        return (self.offsets[i + 1] - self.offsets[i]).item()
 
     @torch.no_grad()
     def to_csr(
@@ -154,3 +160,7 @@ class IntSearchResult:
 
     def clone(self):
         return IntSearchResult(self.in_maps.clone(), self.out_maps.clone(), self.offsets.clone())
+
+    @property
+    def device(self):
+        return self.in_maps.device

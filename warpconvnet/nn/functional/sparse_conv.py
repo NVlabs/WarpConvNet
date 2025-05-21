@@ -1398,7 +1398,7 @@ def generate_output_coords_and_kernel_map(
     transposed: bool,
     output_spatially_sparse_tensor: Optional[Voxels],
     kernel_search_batch_size: int,
-    stride_mode: STRIDED_CONV_MODE,
+    stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
     out_code_backend: Literal["hashmap", "unique", "ravel", "morton"] = "hashmap",
 ) -> Tuple[IntCoords, Int[Tensor, "B+1"], IntSearchResult]:
     batch_indexed_in_coords = input_sparse_tensor.batch_indexed_coordinates
