@@ -26,7 +26,6 @@ def sparse_reduce(
     kernel_size: Union[int, Tuple[int, ...]],
     stride: Optional[Union[int, Tuple[int, ...]]] = None,
     reduction: Union[REDUCTIONS, str] = REDUCTIONS.MAX,
-    kernel_search_batch_size: Optional[int] = None,
     out_code_backend: Literal["hashmap", "ravel", "unique", "morton"] = "hashmap",
 ) -> Voxels:
     """
@@ -58,6 +57,7 @@ def sparse_reduce(
         transposed=False,
         generative=False,
         stride_mode=str(STRIDED_CONV_MODE.STRIDE_ONLY),
+        skip_symmetric_kernel_map=False,
         in_offsets=spatially_sparse_tensor.offsets,
         out_offsets=output_offsets,
     )
@@ -73,7 +73,7 @@ def sparse_reduce(
             in_to_out_stride_ratio=stride,
             kernel_size=kernel_size,
             kernel_dilation=ntuple(1, ndim=ndim),
-            kernel_search_batch_size=kernel_search_batch_size,
+            skip_symmetric_kernel_map=False,
         )
 
     if spatially_sparse_tensor.cache is None:
@@ -158,6 +158,7 @@ def sparse_unpool(
         transposed=False,
         generative=False,
         stride_mode=str(STRIDED_CONV_MODE.STRIDE_ONLY),
+        skip_symmetric_kernel_map=False,
         in_offsets=unpooled_st.offsets,
         out_offsets=pooled_st.offsets,
     )

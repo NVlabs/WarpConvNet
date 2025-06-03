@@ -33,7 +33,6 @@ class SpatiallySparseConv(BaseSpatialModule):
         bias: bool = True,
         transposed: bool = False,
         generative: bool = False,
-        kernel_search_batch_size: int = 8,
         kernel_matmul_batch_size: int = 2,
         num_spatial_dims: Optional[int] = 3,
         fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.AUTO,
@@ -43,6 +42,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         compute_dtype: Optional[torch.dtype] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
+        skip_symmetric_kernel_map: bool = True,
     ):
         super().__init__()
         self.num_spatial_dims = num_spatial_dims
@@ -60,7 +60,6 @@ class SpatiallySparseConv(BaseSpatialModule):
 
         self.transposed = transposed
         self.generative = generative
-        self.kernel_search_batch_size = kernel_search_batch_size
         self.kernel_matmul_batch_size = kernel_matmul_batch_size
 
         self.fwd_algo = fwd_algo
@@ -70,6 +69,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.compute_dtype = compute_dtype
         self.implicit_matmul_fwd_block_size = implicit_matmul_fwd_block_size
         self.implicit_matmul_bwd_block_size = implicit_matmul_bwd_block_size
+        self.skip_symmetric_kernel_map = skip_symmetric_kernel_map
 
         self.bias: Optional[nn.Parameter] = None
 
@@ -139,7 +139,6 @@ class SpatiallySparseConv(BaseSpatialModule):
             stride=self.stride,
             kernel_dilation=self.dilation,
             bias=self.bias,
-            kernel_search_batch_size=self.kernel_search_batch_size,
             kernel_matmul_batch_size=self.kernel_matmul_batch_size,
             output_spatially_sparse_tensor=output_spatially_sparse_tensor,
             transposed=self.transposed,
@@ -151,6 +150,7 @@ class SpatiallySparseConv(BaseSpatialModule):
             compute_dtype=self.compute_dtype,
             implicit_matmul_fwd_block_size=self.implicit_matmul_fwd_block_size,
             implicit_matmul_bwd_block_size=self.implicit_matmul_bwd_block_size,
+            skip_symmetric_kernel_map=self.skip_symmetric_kernel_map,
         )
 
 
@@ -165,7 +165,6 @@ class SparseConv2d(SpatiallySparseConv):
         bias=True,
         transposed=False,
         generative: bool = False,
-        kernel_search_batch_size=8,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.AUTO,
         bwd_algo: SPARSE_CONV_BWD_ALGO_MODE = SPARSE_CONV_BWD_ALGO_MODE.AUTO,
@@ -174,6 +173,7 @@ class SparseConv2d(SpatiallySparseConv):
         compute_dtype: Optional[torch.dtype] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
+        skip_symmetric_kernel_map: bool = True,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -184,7 +184,6 @@ class SparseConv2d(SpatiallySparseConv):
             bias=bias,
             transposed=transposed,
             generative=generative,
-            kernel_search_batch_size=kernel_search_batch_size,
             num_spatial_dims=2,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
@@ -194,6 +193,7 @@ class SparseConv2d(SpatiallySparseConv):
             compute_dtype=compute_dtype,
             implicit_matmul_fwd_block_size=implicit_matmul_fwd_block_size,
             implicit_matmul_bwd_block_size=implicit_matmul_bwd_block_size,
+            skip_symmetric_kernel_map=skip_symmetric_kernel_map,
         )
 
 
@@ -208,7 +208,6 @@ class SparseConv3d(SpatiallySparseConv):
         bias=True,
         transposed=False,
         generative: bool = False,
-        kernel_search_batch_size=8,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.AUTO,
         bwd_algo: SPARSE_CONV_BWD_ALGO_MODE = SPARSE_CONV_BWD_ALGO_MODE.AUTO,
@@ -217,6 +216,7 @@ class SparseConv3d(SpatiallySparseConv):
         compute_dtype: Optional[torch.dtype] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
+        skip_symmetric_kernel_map: bool = True,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -227,7 +227,6 @@ class SparseConv3d(SpatiallySparseConv):
             bias=bias,
             transposed=transposed,
             generative=generative,
-            kernel_search_batch_size=kernel_search_batch_size,
             num_spatial_dims=3,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
@@ -237,4 +236,5 @@ class SparseConv3d(SpatiallySparseConv):
             compute_dtype=compute_dtype,
             implicit_matmul_fwd_block_size=implicit_matmul_fwd_block_size,
             implicit_matmul_bwd_block_size=implicit_matmul_bwd_block_size,
+            skip_symmetric_kernel_map=skip_symmetric_kernel_map,
         )

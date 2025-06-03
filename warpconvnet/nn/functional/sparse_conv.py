@@ -39,6 +39,7 @@ _MAX_GRID_Y = 65535
 
 # Dtype mapping for kernel template
 _DTYPE_TO_CPP_STR = {
+    torch.float16: "half",
     torch.float32: "float",
     torch.float64: "double",
 }
@@ -115,6 +116,7 @@ class SpatiallySparseConvConfig:
     in_channels: int
     out_channels: int
     kernel_volume: int
+    skip_symmetric_kernel_map: bool
     # explicit_matmul_batch_size: Optional[int] = None # TODO: Add if supporting batched explicit
 
     def __init__(
@@ -124,6 +126,7 @@ class SpatiallySparseConvConfig:
         in_channels: int,
         out_channels: int,
         kernel_volume: int,
+        skip_symmetric_kernel_map: bool,
         # explicit_matmul_batch_size: Optional[int] = None, # TODO
     ):
         self.log_num_in_coords = math.ceil(math.log2(num_in_coords)) if num_in_coords > 0 else 0
@@ -131,6 +134,7 @@ class SpatiallySparseConvConfig:
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_volume = kernel_volume
+        self.skip_symmetric_kernel_map = skip_symmetric_kernel_map
         # self.explicit_matmul_batch_size = explicit_matmul_batch_size # TODO
 
     def __hash__(self):
@@ -141,6 +145,7 @@ class SpatiallySparseConvConfig:
                 self.in_channels,
                 self.out_channels,
                 self.kernel_volume,
+                int(self.skip_symmetric_kernel_map),
             ]
         )
 
@@ -153,6 +158,7 @@ class SpatiallySparseConvConfig:
             self.in_channels == other.in_channels
             and self.out_channels == other.out_channels
             and self.kernel_volume == other.kernel_volume
+            and self.skip_symmetric_kernel_map == other.skip_symmetric_kernel_map
         )
 
 
@@ -212,6 +218,7 @@ def _explicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
+    skip_symmetric_kernel_map: bool,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype] = None,
 ) -> Float[Tensor, "M C_out"]:
@@ -221,7 +228,22 @@ def _explicit_gemm_forward_logic(
     output_feature_tensor = torch.zeros(
         num_out_coords, weight.shape[-1], device=device, dtype=comp_in_feats.dtype
     )
-    for i, (in_map, out_map) in enumerate(kernel_map):
+
+    skip_symmetric_kernel_map = (
+        skip_symmetric_kernel_map and kernel_map.identity_map_index is not None
+    )
+    for i in range(len(kernel_map)):
+        if skip_symmetric_kernel_map:
+            if i == kernel_map.identity_map_index:
+                assert (
+                    num_out_coords == in_features.shape[0]
+                ), "Identity map index must be the same as the number of output coordinates"
+                output_feature_tensor += torch.matmul(comp_in_feats, comp_weight[i])
+                continue
+            elif i > kernel_map.identity_map_index:
+                break
+
+        in_map, out_map = kernel_map[i]
         in_map = in_map.to(device)
         out_map = out_map.to(device)
         num_active_pairs = in_map.shape[0]
@@ -237,6 +259,7 @@ def _explicit_gemm_backward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
+    skip_symmetric_kernel_map: bool,
     compute_dtype: Optional[torch.dtype],
     device: torch.device,
 ) -> Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]]:
@@ -246,7 +269,23 @@ def _explicit_gemm_backward_logic(
     comp_grad_output = grad_output.to(device=device, dtype=dtype_to_use)
     grad_in_features = torch.zeros_like(comp_in_feats, device=device)
     grad_weight = torch.zeros_like(comp_weight, device=device)
-    for i, (in_map, out_map) in enumerate(kernel_map):
+
+    skip_symmetric_kernel_map = (
+        skip_symmetric_kernel_map and kernel_map.identity_map_index is not None
+    )
+    for i in range(len(kernel_map)):
+        if skip_symmetric_kernel_map:
+            if i == kernel_map.identity_map_index:
+                assert (
+                    grad_output.shape[0] == in_features.shape[0]
+                ), "Gradient output and input features must have the same number of coordinates for identity map index"
+                grad_in_features += torch.matmul(comp_grad_output, comp_weight[i].T)
+                grad_weight += torch.matmul(comp_in_feats.T, comp_grad_output)
+                continue
+            elif i > kernel_map.identity_map_index:
+                break
+
+        in_map, out_map = kernel_map[i]
         curr_grad_output = comp_grad_output[out_map]
         curr_in_feats = comp_in_feats[in_map]
         curr_weight = comp_weight[i]
@@ -262,6 +301,7 @@ def _implicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
+    skip_symmetric_kernel_map: bool,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
     fwd_block_size: int,
@@ -293,16 +333,26 @@ def _implicit_gemm_forward_logic(
     # Use detached tensors for DLPack conversion
     in_features_cp = cp.from_dlpack(torch_to_dlpack(_in_features_detached.to(dtype=feature_dtype)))
 
-    for k_idx, (in_map_k, out_map_k) in enumerate(kernel_map):
-        kernel_map_offset = kernel_map.offsets[k_idx]
+    skip_symmetric_kernel_map = (
+        skip_symmetric_kernel_map and kernel_map.identity_map_index is not None
+    )
+    for k_idx in range(len(kernel_map)):
+
         # Ensure weight[k_idx] is converted to the correct compute_dtype for CuPy
         current_weight_k_detached = _weight_detached[k_idx].to(dtype=feature_dtype)
         current_weight_k_cp = cp.from_dlpack(torch_to_dlpack(current_weight_k_detached))
 
-        if torch.all(kernel_map_offset == 0) and in_map_k.shape[0] == N_in:
-            output_feature_tensor_cp += cp.matmul(in_features_cp, current_weight_k_cp)
-            continue
+        if skip_symmetric_kernel_map:
+            if k_idx == kernel_map.identity_map_index:
+                assert (
+                    num_out_coords == in_features.shape[0]
+                ), "Identity map index must be the same as the number of output coordinates"
+                output_feature_tensor_cp += cp.matmul(in_features_cp, current_weight_k_cp)
+                continue
+            elif k_idx > kernel_map.identity_map_index:
+                break
 
+        in_map_k, out_map_k = kernel_map[k_idx]
         in_map_k = in_map_k.to(device=device, dtype=index_dtype).contiguous()
         out_map_k = out_map_k.to(device=device, dtype=index_dtype).contiguous()
 
@@ -365,6 +415,7 @@ def _implicit_gemm_backward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
+    skip_symmetric_kernel_map: bool,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
     bwd_block_size: int,
@@ -401,21 +452,26 @@ def _implicit_gemm_backward_logic(
     grad_output_cp = cp.from_dlpack(torch_to_dlpack(_grad_output_detached))
     in_features_cp = cp.from_dlpack(torch_to_dlpack(_in_features_detached))
 
-    for k_idx, (in_map_k, out_map_k) in enumerate(kernel_map):
-        kernel_map_offset = kernel_map.offsets[k_idx]
+    skip_symmetric_kernel_map = (
+        skip_symmetric_kernel_map and kernel_map.identity_map_index is not None
+    )
+    for k_idx in range(len(kernel_map)):
         # Ensure weight_k is on correct device and dtype for CuPy
         current_weight_k_detached = _weight_detached[k_idx]  # Already compute_dtype
         current_weight_k_cp = cp.from_dlpack(torch_to_dlpack(current_weight_k_detached))
 
-        if torch.all(kernel_map_offset == 0) and in_map_k.shape[0] == N_in:
-            # grad_w = X^T @ dY
-            # grad_x = dY @ W^T
-            grad_weight_tensor_cp[k_idx] += cp.matmul(
-                in_features_cp.T, grad_output_cp
-            )  # Note: grad_output_cp here might need indexing if it's sparse.
-            grad_in_features_cp += cp.matmul(grad_output_cp, current_weight_k_cp.T)
-            continue
+        if skip_symmetric_kernel_map:
+            if k_idx == kernel_map.identity_map_index:
+                assert (
+                    num_out_coords == in_features.shape[0]
+                ), "Identity map index must be the same as the number of output coordinates"
+                grad_weight_tensor_cp[k_idx] += cp.matmul(in_features_cp.T, grad_output_cp)
+                grad_in_features_cp += cp.matmul(grad_output_cp, current_weight_k_cp.T)
+                continue
+            elif k_idx > kernel_map.identity_map_index:
+                break
 
+        in_map_k, out_map_k = kernel_map[k_idx]
         in_map_k = in_map_k.to(device=device, dtype=index_dtype).contiguous()
         out_map_k = out_map_k.to(device=device, dtype=index_dtype).contiguous()
         num_active_pairs = in_map_k.shape[0]
@@ -490,14 +546,21 @@ class SpatiallySparseConvExplicitGEMMFunction(Function):
         in_features: Float[Tensor, "N C_in"],
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
+        skip_symmetric_kernel_map: bool,
         num_out_coords: int,
         compute_dtype: Optional[torch.dtype] = None,
     ) -> Float[Tensor, "M C_out"]:
         output_feature_tensor = _explicit_gemm_forward_logic(
-            in_features, weight, kernel_map, num_out_coords, compute_dtype
+            in_features,
+            weight,
+            kernel_map,
+            skip_symmetric_kernel_map,
+            num_out_coords,
+            compute_dtype,
         )
         ctx.save_for_backward(in_features, weight)
         ctx.kernel_map = kernel_map
+        ctx.skip_symmetric_kernel_map = skip_symmetric_kernel_map
         ctx.compute_dtype = compute_dtype
         ctx.device = in_features.device
         return output_feature_tensor
@@ -512,6 +575,7 @@ class SpatiallySparseConvExplicitGEMMFunction(Function):
     ]:
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
+        skip_symmetric_kernel_map = ctx.skip_symmetric_kernel_map
         compute_dtype = ctx.compute_dtype
         device = ctx.device
 
@@ -528,7 +592,13 @@ class SpatiallySparseConvExplicitGEMMFunction(Function):
             return grad_in_final, grad_weight_final, None, None, None
 
         grad_in_features, grad_weight = _explicit_gemm_backward_logic(
-            grad_output, in_features, weight, kernel_map, compute_dtype, device
+            grad_output,
+            in_features,
+            weight,
+            kernel_map,
+            skip_symmetric_kernel_map,
+            compute_dtype,
+            device,
         )
 
         if not ctx.needs_input_grad[0]:
@@ -546,16 +616,24 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
         in_features: Float[Tensor, "N C_in"],
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
+        skip_symmetric_kernel_map: bool,
         num_out_coords: int,
         compute_dtype: Optional[torch.dtype] = None,
         fwd_block_size: int = 16,
         bwd_block_size: int = 16,  # Saved for backward
     ) -> Float[Tensor, "M C_out"]:
         output_feature_tensor = _implicit_gemm_forward_logic(
-            in_features, weight, kernel_map, num_out_coords, compute_dtype, fwd_block_size
+            in_features,
+            weight,
+            kernel_map,
+            skip_symmetric_kernel_map,
+            num_out_coords,
+            compute_dtype,
+            fwd_block_size,
         )
         ctx.save_for_backward(in_features, weight)
         ctx.kernel_map = kernel_map
+        ctx.skip_symmetric_kernel_map = skip_symmetric_kernel_map
         ctx.num_out_coords = num_out_coords
         ctx.compute_dtype = compute_dtype
         ctx.bwd_block_size = bwd_block_size
@@ -571,16 +649,18 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
         None,
         None,
         None,
+        None,
     ]:
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
+        skip_symmetric_kernel_map = ctx.skip_symmetric_kernel_map
         num_out_coords = ctx.num_out_coords
         compute_dtype = ctx.compute_dtype
         bwd_block_size = ctx.bwd_block_size
         device = ctx.device
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
 
         N_in, C_in = in_features.shape
         K, _, C_out = weight.shape
@@ -594,13 +674,14 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
         ):
             grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            return grad_in_final, grad_weight_final, None, None, None, None, None
+            return grad_in_final, grad_weight_final, None, None, None, None, None, None
 
         grad_in_features, grad_weight = _implicit_gemm_backward_logic(
             grad_output,
             in_features,
             weight,
             kernel_map,
+            skip_symmetric_kernel_map,
             num_out_coords,
             compute_dtype,
             bwd_block_size,
@@ -612,7 +693,7 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
         if not ctx.needs_input_grad[1]:
             grad_weight = None
 
-        return grad_in_features, grad_weight, None, None, None, None, None
+        return grad_in_features, grad_weight, None, None, None, None, None, None
 
 
 class SpatiallySparseConvBatchedExplicitGEMMFunction(Function):
@@ -830,6 +911,7 @@ def _run_forward_benchmarks(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
+    skip_symmetric_kernel_map: bool,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
     warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
@@ -857,11 +939,22 @@ def _run_forward_benchmarks(
 
         if algo_mode == SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM:
             _ = _explicit_gemm_forward_logic(
-                in_features, weight, kernel_map, num_out_coords, compute_dtype
+                in_features,
+                weight,
+                kernel_map,
+                skip_symmetric_kernel_map,
+                num_out_coords,
+                compute_dtype,
             )
         elif algo_mode == SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM:
             _ = _implicit_gemm_forward_logic(
-                in_features, weight, kernel_map, num_out_coords, compute_dtype, **params_config
+                in_features,
+                weight,
+                kernel_map,
+                skip_symmetric_kernel_map,
+                num_out_coords,
+                compute_dtype,
+                **params_config,
             )
         else:
             # Should not happen with current _BENCHMARK_FORWARD_PARAMS
@@ -927,6 +1020,7 @@ def _run_backward_benchmarks(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
+    skip_symmetric_kernel_map: bool,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
     device: torch.device,
@@ -952,7 +1046,13 @@ def _run_backward_benchmarks(
 
         if algo_mode == SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM:
             _, _ = _explicit_gemm_backward_logic(
-                grad_output, in_features, weight, kernel_map, compute_dtype, device
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                skip_symmetric_kernel_map,
+                compute_dtype,
+                device,
             )
         elif algo_mode == SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM:
             _, _ = _implicit_gemm_backward_logic(
@@ -960,6 +1060,7 @@ def _run_backward_benchmarks(
                 in_features,
                 weight,
                 kernel_map,
+                skip_symmetric_kernel_map,
                 num_out_coords,
                 compute_dtype,
                 device=device,
@@ -1022,6 +1123,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         in_features: Float[Tensor, "N C_in"],
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
+        skip_symmetric_kernel_map: bool,
         num_out_coords: int,
         fwd_algo: SPARSE_CONV_FWD_ALGO_MODE,
         bwd_algo: SPARSE_CONV_BWD_ALGO_MODE,
@@ -1043,6 +1145,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 in_channels=in_features.shape[1],
                 out_channels=weight.shape[2],
                 kernel_volume=weight.shape[0],
+                skip_symmetric_kernel_map=skip_symmetric_kernel_map,
             )
             global _BENCHMARK_FORWARD_RESULTS  # noqa: F824
             cached_result = _BENCHMARK_FORWARD_RESULTS.get(config)
@@ -1052,7 +1155,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
             else:
                 # print(f"Running fwd benchmark for config: {config}")
                 all_fwd_benchmark_results = _run_forward_benchmarks(
-                    in_features, weight, kernel_map, num_out_coords, compute_dtype
+                    in_features,
+                    weight,
+                    kernel_map,
+                    skip_symmetric_kernel_map,
+                    num_out_coords,
+                    compute_dtype,
                 )
                 _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results
                 chosen_fwd_algo, chosen_fwd_params, min_time = all_fwd_benchmark_results[
@@ -1062,7 +1170,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if chosen_fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM:
             output_feature_tensor = _explicit_gemm_forward_logic(
-                in_features, weight, kernel_map, num_out_coords, compute_dtype
+                in_features,
+                weight,
+                kernel_map,
+                skip_symmetric_kernel_map,
+                num_out_coords,
+                compute_dtype,
             )
         elif chosen_fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM:
             current_fwd_block_size = chosen_fwd_params.get("fwd_block_size")
@@ -1077,6 +1190,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 in_features,
                 weight,
                 kernel_map,
+                skip_symmetric_kernel_map,
                 num_out_coords,
                 compute_dtype,
                 current_fwd_block_size,
@@ -1090,28 +1204,23 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         ctx.save_for_backward(in_features, weight)
         ctx.kernel_map = kernel_map
-        ctx.num_out_coords = num_out_coords
-        ctx.compute_dtype = compute_dtype
-        ctx.device = in_features.device
-
-        ctx.initial_bwd_algo = bwd_algo  # User's original bwd choice
-        # Store relevant params for bwd based on fwd choice OR user's direct bwd params
-        # If fwd was AUTO and picked implicit, its fwd_block_size isn't bwd_block_size.
-        # We need the user's intended bwd_block_size if bwd_algo is IMPLICIT (or AUTO to test implicit)
-        ctx.initial_bwd_block_size = bwd_block_size
-        # ctx.explicit_matmul_batch_size = explicit_matmul_batch_size # TODO
 
         # For SpatiallySparseConvConfig in backward if bwd_algo is AUTO
-        ctx.config_params_for_bwd_benchmark = {
+        ctx.config_params_for_bwd = {
             "num_in_coords": in_features.shape[0],
             "num_out_coords": num_out_coords,
             "in_channels": in_features.shape[1],
             "out_channels": weight.shape[2],
             "kernel_volume": weight.shape[0],
+            "skip_symmetric_kernel_map": skip_symmetric_kernel_map,
             "implicit_matmul_fwd_block_size": chosen_fwd_params.get(
                 "fwd_block_size", fwd_block_size
             ),  # from fwd decision
             "implicit_matmul_bwd_block_size": bwd_block_size,  # from user input for bwd
+            "compute_dtype": compute_dtype,
+            "device": in_features.device,
+            "initial_bwd_algo": bwd_algo,
+            "initial_bwd_block_size": bwd_block_size,
         }
 
         # Return structure for backward:
@@ -1129,21 +1238,23 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
         None,
+        None,
     ]:
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
-        num_out_coords = ctx.num_out_coords
-        compute_dtype = ctx.compute_dtype
-        device = ctx.device
-
-        initial_bwd_algo = ctx.initial_bwd_algo
-        initial_bwd_block_size = ctx.initial_bwd_block_size
+        config_params = ctx.config_params_for_bwd
+        skip_symmetric_kernel_map = config_params["skip_symmetric_kernel_map"]
+        num_out_coords = config_params["num_out_coords"]
+        compute_dtype = config_params["compute_dtype"]
+        device = config_params["device"]
+        initial_bwd_algo = config_params["initial_bwd_algo"]
+        initial_bwd_block_size = config_params["initial_bwd_block_size"]
         # explicit_matmul_batch_size = ctx.explicit_matmul_batch_size # TODO
 
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return None, None, None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None, None, None
 
         N_in, C_in = in_features.shape
         K, _, C_out = weight.shape
@@ -1157,7 +1268,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            return grad_in_final, grad_weight_final, None, None, None, None, None, None, None
+            return grad_in_final, grad_weight_final, None, None, None, None, None, None, None, None
 
         chosen_bwd_algo = initial_bwd_algo
         chosen_bwd_params = {}
@@ -1168,7 +1279,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             chosen_bwd_params = {"bwd_block_size": initial_bwd_block_size}
         elif initial_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.AUTO:
-            config_params = ctx.config_params_for_bwd_benchmark
+            config_params = ctx.config_params_for_bwd
             # Use fwd_block_size from chosen_fwd_params if available for config consistency
             # If fwd was EXPLICIT, this would be None.
             # The bwd_block_size in config_params is the user-provided one.
@@ -1178,6 +1289,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 in_channels=config_params["in_channels"],
                 out_channels=config_params["out_channels"],
                 kernel_volume=config_params["kernel_volume"],
+                skip_symmetric_kernel_map=skip_symmetric_kernel_map,
             )
             global _BENCHMARK_BACKWARD_RESULTS  # noqa: F824
             cached_result = _BENCHMARK_BACKWARD_RESULTS.get(config)
@@ -1191,6 +1303,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     in_features,
                     weight,
                     kernel_map,
+                    skip_symmetric_kernel_map,
                     num_out_coords,
                     compute_dtype,
                     device,
@@ -1203,7 +1316,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if chosen_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM:
             grad_in_features, grad_weight = _explicit_gemm_backward_logic(
-                grad_output, in_features, weight, kernel_map, compute_dtype, device
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                skip_symmetric_kernel_map,
+                compute_dtype,
+                device,
             )
         elif chosen_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM:
             current_bwd_block_size = chosen_bwd_params.get("bwd_block_size")
@@ -1219,6 +1338,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 in_features,
                 weight,
                 kernel_map,
+                skip_symmetric_kernel_map,
                 num_out_coords,
                 compute_dtype,
                 current_bwd_block_size,
@@ -1236,7 +1356,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         if not ctx.needs_input_grad[1]:
             grad_weight = None
 
-        return grad_in_features, grad_weight, None, None, None, None, None, None, None
+        return grad_in_features, grad_weight, None, None, None, None, None, None, None, None
 
 
 def spatially_sparse_conv(
@@ -1246,7 +1366,6 @@ def spatially_sparse_conv(
     stride: Union[int, List[int], Tuple[int, ...]] = 1,
     kernel_dilation: Union[int, List[int], Tuple[int, ...]] = 1,
     bias: Optional[Float[Tensor, "C_out"]] = None,  # noqa: F821
-    kernel_search_batch_size: Optional[int] = None,
     kernel_matmul_batch_size: int = 2,
     generative: bool = False,
     output_spatially_sparse_tensor: Optional[Geometry] = None,
@@ -1259,6 +1378,7 @@ def spatially_sparse_conv(
     compute_dtype: Optional[torch.dtype] = None,  # Use None to default to in_features.dtype
     implicit_matmul_fwd_block_size: Optional[int] = 16,  # Default, can be None if not implicit
     implicit_matmul_bwd_block_size: Optional[int] = 16,  # Default, can be None if not implicit
+    skip_symmetric_kernel_map: bool = False,
 ) -> Geometry:  # Should return Voxels or a base Geometry type compatible with Voxels
     """
     Perform spatially sparse convolution on the input tensor using the native backend.
@@ -1295,13 +1415,6 @@ def spatially_sparse_conv(
             out_feature_tensor += bias
         return input_sparse_tensor.replace(
             batched_features=out_feature_tensor,
-        )
-
-    if kernel_search_batch_size is None:
-        kernel_search_batch_size = (
-            max(num_total_kernels // _kernel_size[0], 8)
-            if _kernel_size and _kernel_size[0] > 0
-            else 8
         )
 
     in_tensor_stride = input_sparse_tensor.tensor_stride
@@ -1357,9 +1470,9 @@ def spatially_sparse_conv(
         generative=generative,
         transposed=transposed,
         output_spatially_sparse_tensor=output_spatially_sparse_tensor,
-        kernel_search_batch_size=kernel_search_batch_size,
         stride_mode=stride_mode,
         out_code_backend=out_code_backend,
+        skip_symmetric_kernel_map=skip_symmetric_kernel_map,
     )
     num_out_coords = batch_indexed_out_coords.shape[0]
 
@@ -1367,6 +1480,7 @@ def spatially_sparse_conv(
         current_input_features_for_gemm,
         weight,
         kernel_map,
+        skip_symmetric_kernel_map,
         num_out_coords,
         fwd_algo,
         bwd_algo,
@@ -1397,10 +1511,25 @@ def generate_output_coords_and_kernel_map(
     generative: bool,
     transposed: bool,
     output_spatially_sparse_tensor: Optional[Voxels],
-    kernel_search_batch_size: int,
     stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
     out_code_backend: Literal["hashmap", "unique", "ravel", "morton"] = "hashmap",
+    skip_symmetric_kernel_map: bool = False,
 ) -> Tuple[IntCoords, Int[Tensor, "B+1"], IntSearchResult]:
+    """
+    Perform spatially sparse convolution on the input tensor using the native backend.
+    Spatially sparse and feature sparse is not supported yet.
+
+    If stride is not 1, the kernel map will be generated by stride_mode.
+
+    If generative, the output coordinates will be expanded by (kernel size // 2) all directions.
+
+    For transposed convolution, the output coordinates should be provided along with the
+    output coordinate stride.
+
+    Args:
+        skip_symmetric_kernel_map: If True, skip the symmetric parts of the kernel map
+            for odd-sized kernels (e.g., for 3x3x3 kernels, only use half of the kernel positions).
+    """
     batch_indexed_in_coords = input_sparse_tensor.batch_indexed_coordinates
     in_to_out_stride_ratio = stride
 
@@ -1423,7 +1552,6 @@ def generate_output_coords_and_kernel_map(
             batch_indexed_in_coords,
             kernel_size=kernel_size,
             kernel_dilation=kernel_dilation,
-            kernel_batch=kernel_search_batch_size,
         )
     elif any(s != 1 for s in stride):
         batch_indexed_out_coords, out_offsets = stride_coords(
@@ -1437,14 +1565,12 @@ def generate_output_coords_and_kernel_map(
                 batch_indexed_out_coords,
                 kernel_size=kernel_size,
                 kernel_dilation=kernel_dilation,
-                kernel_batch=kernel_search_batch_size,
             )
         elif generative and stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE:
             batch_indexed_expanded_coords, expanded_offsets = expand_coords(
                 batch_indexed_out_coords,
                 kernel_size=kernel_size,
                 kernel_dilation=kernel_dilation,
-                kernel_batch=kernel_search_batch_size,
             )
             # rename
             batch_indexed_in_coords = batch_indexed_out_coords
@@ -1467,6 +1593,7 @@ def generate_output_coords_and_kernel_map(
         transposed=transposed,
         generative=generative,
         stride_mode=str(stride_mode),
+        skip_symmetric_kernel_map=skip_symmetric_kernel_map,
         in_offsets=input_sparse_tensor.offsets,
         out_offsets=out_offsets,
     )
@@ -1485,6 +1612,7 @@ def generate_output_coords_and_kernel_map(
                 transposed=False,
                 generative=generative,
                 stride_mode=str(stride_mode),
+                skip_symmetric_kernel_map=skip_symmetric_kernel_map,
                 in_offsets=out_offsets,
                 out_offsets=input_sparse_tensor.offsets,
             )
@@ -1498,6 +1626,8 @@ def generate_output_coords_and_kernel_map(
                     out_maps=kernel_map_non_transposed.in_maps,
                     offsets=kernel_map_non_transposed.offsets,
                 )
+                if skip_symmetric_kernel_map:
+                    kernel_map = _skip_symmetric_kernel_parts(kernel_map, kernel_size)
                 return batch_indexed_out_coords, out_offsets, kernel_map
 
         # Swap in and out maps for transposed kernel map generation and swap it back
@@ -1507,7 +1637,6 @@ def generate_output_coords_and_kernel_map(
             in_to_out_stride_ratio,
             kernel_size,
             kernel_dilation,
-            kernel_search_batch_size,
         )
         kernel_map = IntSearchResult(
             in_maps=kernel_map.out_maps,
@@ -1521,7 +1650,6 @@ def generate_output_coords_and_kernel_map(
             in_to_out_stride_ratio,
             kernel_size,
             kernel_dilation,
-            kernel_search_batch_size,
         )
     elif stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and not generative:
         # Compute mapping from output to output since it will be reduced
@@ -1531,7 +1659,6 @@ def generate_output_coords_and_kernel_map(
             ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
             kernel_size,
             kernel_dilation,
-            kernel_search_batch_size,
         )
     elif stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and generative:
         kernel_map = generate_kernel_map(
@@ -1540,12 +1667,15 @@ def generate_output_coords_and_kernel_map(
             ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
             kernel_size,
             kernel_dilation,
-            kernel_search_batch_size,
         )
     else:
         raise ValueError(
             f"Unsupported case. stride_mode: {stride_mode}, generative: {generative}, transposed: {transposed}"
         )
+
+    # Apply symmetric kernel skipping if requested
+    if skip_symmetric_kernel_map:
+        kernel_map = _skip_symmetric_kernel_parts(kernel_map, kernel_size)
 
     # put the kernel map in the cache
 
@@ -1554,3 +1684,39 @@ def generate_output_coords_and_kernel_map(
 
     input_sparse_tensor.cache.put(kernel_map_cache_key, kernel_map)
     return batch_indexed_out_coords, out_offsets, kernel_map
+
+
+def _skip_symmetric_kernel_parts(
+    kernel_map: IntSearchResult, kernel_size: Tuple[int, ...]
+) -> IntSearchResult:
+    """
+    Skip symmetric parts of the kernel map for odd-sized kernels.
+    For example, for a 3x3x3 kernel, only use the first half of the kernel positions.
+    """
+    # Check if kernel is odd and potentially symmetric
+    is_odd_and_cubic = all(k % 2 == 1 for k in kernel_size) and len(set(kernel_size)) == 1
+
+    if not is_odd_and_cubic:
+        # If not odd and cubic, return the original kernel map
+        return kernel_map
+
+    kv = int(np.prod(kernel_size))
+    if kv <= 1:
+        return kernel_map
+
+    # For symmetric kernels, keep only the first half (excluding center if odd volume)
+    center_idx = kv // 2
+
+    # Update offsets to match the reduced number of kernels
+    new_offsets = kernel_map.offsets[: center_idx + 1].clone()
+
+    # Create a new kernel map with only the first half of kernels
+    tot_num_kernels = new_offsets[-1].item()
+    in_maps_filtered = kernel_map.in_maps[:tot_num_kernels]
+    out_maps_filtered = kernel_map.out_maps[:tot_num_kernels]
+
+    return IntSearchResult(
+        in_maps=in_maps_filtered,
+        out_maps=out_maps_filtered,
+        offsets=new_offsets,
+    )

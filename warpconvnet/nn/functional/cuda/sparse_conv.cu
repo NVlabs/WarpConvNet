@@ -27,6 +27,8 @@
  * of the code.
  */
 
+#include <cuda_fp16.h>
+
 /**
  * Matrix multiplication (CUDA Kernel) on the device: C = A * B
  * wA is A's width and wB is B's width
@@ -72,8 +74,8 @@ matmul(const Dtype *__restrict__ A, const int wA, const int hA, //
     // Load the matrices from device memory
     // to shared memory; each thread loads
     // one element of each matrix
-    As[ty][tx] = ((s + tx) < wA && y < hA) ? A[wA * in_row + s + tx] : 0;
-    Bs[ty][tx] = ((s + ty) < hB && x < wB) ? B[wB * (s + ty) + x] : 0;
+    As[ty][tx] = ((s + tx) < wA && y < hA) ? A[wA * in_row + s + tx] : Dtype(0);
+    Bs[ty][tx] = ((s + ty) < hB && x < wB) ? B[wB * (s + ty) + x] : Dtype(0);
 
     // Synchronize to make sure the matrices are loaded
     __syncthreads();
@@ -157,7 +159,7 @@ matmul2(const Dtype *__restrict__ A, const int wA, const int hA, //
   __shared__ Dtype DTs[BLOCK_SIZE][BLOCK_SIZE];
 
   // For Ds = D^T[...:..., ...:...], use the transposed grid dimension for A
-  DTs[ty][tx] = (x < wD && y < hD) ? D[wD * in_row + x] : 0;
+  DTs[ty][tx] = (x < wD && y < hD) ? D[wD * in_row + x] : Dtype(0);
 
   // Loop over all the sub-matrices of A and B
   // required to compute the block sub-matrix
@@ -165,10 +167,10 @@ matmul2(const Dtype *__restrict__ A, const int wA, const int hA, //
     // Load the matrices from device memory
     // to shared memory; each thread loads
     // one element of each matrix
-    As[ty][tx] = ((s + tx) < wA && y < hA) ? A[wA * out_row + s + tx] : 0;
+    As[ty][tx] = ((s + tx) < wA && y < hA) ? A[wA * out_row + s + tx] : Dtype(0);
 
     // Transposed kernel
-    BTs[ty][tx] = ((s + ty) < wB && x < hB) ? B[wB * x + s + ty] : 0;
+    BTs[ty][tx] = ((s + ty) < wB && x < hB) ? B[wB * x + s + ty] : Dtype(0);
 
     // Synchronize to make sure the matrices are loaded
     __syncthreads();
@@ -445,4 +447,101 @@ extern "C" __global__ void matmul_double_int_b48(
 //     double *__restrict__ C, double *__restrict__ E,
 //     const int *__restrict__ in_map, const int *__restrict__ out_map) {
 //   matmul2<double, int, 64>(A, wA, hA, B, wB, hB, D, wD, hD, C, E, in_map, out_map);
+// }
+
+// Half precision types
+// For Dtype = __half, Itype = int, BLOCK_SIZE = 8
+
+extern "C" __global__ void matmul_half_int_b8(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    __half *__restrict__ C,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul<__half, int, 8>(A, wA, hA, B, wB, hB, C, in_map, out_map);
+}
+
+extern "C" __global__ void matmul2_half_int_b8(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    const __half *__restrict__ D, const int wD, const int hD,
+    __half *__restrict__ C, __half *__restrict__ E,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul2<__half, int, 8>(A, wA, hA, B, wB, hB, D, wD, hD, C, E, in_map, out_map);
+}
+
+// For Dtype = __half, Itype = int, BLOCK_SIZE = 16
+
+extern "C" __global__ void matmul_half_int_b16(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    __half *__restrict__ C,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul<__half, int, 16>(A, wA, hA, B, wB, hB, C, in_map, out_map);
+}
+
+extern "C" __global__ void matmul2_half_int_b16(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    const __half *__restrict__ D, const int wD, const int hD,
+    __half *__restrict__ C, __half *__restrict__ E,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul2<__half, int, 16>(A, wA, hA, B, wB, hB, D, wD, hD, C, E, in_map, out_map);
+}
+
+// For Dtype = __half, Itype = int, BLOCK_SIZE = 24
+
+extern "C" __global__ void matmul_half_int_b24(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    __half *__restrict__ C,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul<__half, int, 24>(A, wA, hA, B, wB, hB, C, in_map, out_map);
+}
+
+extern "C" __global__ void matmul2_half_int_b24(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    const __half *__restrict__ D, const int wD, const int hD,
+    __half *__restrict__ C, __half *__restrict__ E,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul2<__half, int, 24>(A, wA, hA, B, wB, hB, D, wD, hD, C, E, in_map, out_map);
+}
+
+// For Dtype = __half, Itype = int, BLOCK_SIZE = 32
+
+extern "C" __global__ void matmul_half_int_b32(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    __half *__restrict__ C,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul<__half, int, 32>(A, wA, hA, B, wB, hB, C, in_map, out_map);
+}
+
+extern "C" __global__ void matmul2_half_int_b32(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    const __half *__restrict__ D, const int wD, const int hD,
+    __half *__restrict__ C, __half *__restrict__ E,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul2<__half, int, 32>(A, wA, hA, B, wB, hB, D, wD, hD, C, E, in_map, out_map);
+}
+
+// For Dtype = __half, Itype = int, BLOCK_SIZE = 48
+
+extern "C" __global__ void matmul_half_int_b48(
+    const __half *__restrict__ A, const int wA, const int hA,
+    const __half *__restrict__ B, const int wB, const int hB,
+    __half *__restrict__ C,
+    const int *__restrict__ in_map, const int *__restrict__ out_map) {
+  matmul<__half, int, 48>(A, wA, hA, B, wB, hB, C, in_map, out_map);
+}
+
+// Shared memory limit
+// extern "C" __global__ void matmul2_half_int_b48(
+//     const __half *__restrict__ A, const int wA, const int hA,
+//     const __half *__restrict__ B, const int wB, const int hB,
+//     const __half *__restrict__ D, const int wD, const int hD,
+//     __half *__restrict__ C, __half *__restrict__ E,
+//     const int *__restrict__ in_map, const int *__restrict__ out_map) {
+//   matmul2<__half, int, 48>(A, wA, hA, B, wB, hB, D, wD, hD, C, E, in_map, out_map);
 // }

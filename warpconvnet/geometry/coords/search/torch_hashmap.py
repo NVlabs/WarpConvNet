@@ -166,6 +166,8 @@ class TorchHashTable:
                 self._capacity,
             ),  # int table_capacity
         )
+
+        # TODO(cchoy): Use dlpack to skip explicit synchronization
         torch.cuda.synchronize(self.device)  # Synchronize
 
     @classmethod

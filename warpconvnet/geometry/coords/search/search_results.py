@@ -61,23 +61,26 @@ class IntSearchResult:
     in_maps: Int[Tensor, "L"]  # noqa: F821
     out_maps: Int[Tensor, "L"]  # noqa: F821
     offsets: Int[Tensor, "K + 1"]  # noqa: F821
+    identity_map_index: Optional[int] = None
 
     def __init__(
         self,
         in_maps: Int[Tensor, "L"],  # noqa: F821
         out_maps: Int[Tensor, "L"],  # noqa: F821
         offsets: Int[Tensor, "K + 1"],  # noqa: F821
+        identity_map_index: Optional[int] = None,
     ):
         assert len(in_maps) == len(out_maps) == offsets[-1].item()
         self.in_maps = in_maps
         self.out_maps = out_maps
         self.offsets = offsets.cpu()
+        self.identity_map_index = identity_map_index
 
     @torch.no_grad()
     def __getitem__(self, idx: int) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821
         start, end = self.offsets[idx], self.offsets[idx + 1]
         return self.in_maps[start:end], self.out_maps[start:end]
-    
+
     @torch.no_grad()
     def get_batch(
         self,
@@ -122,7 +125,7 @@ class IntSearchResult:
 
     def __repr__(self):
         return f"{self.__class__.__name__}(len={len(self)})"
-    
+
     def numel(self, i: int) -> int:
         """
         Return the number of elements in the i-th map.
@@ -159,7 +162,12 @@ class IntSearchResult:
         return in_maps_sorted, unique_out_maps_sorted, offsets
 
     def clone(self):
-        return IntSearchResult(self.in_maps.clone(), self.out_maps.clone(), self.offsets.clone())
+        return IntSearchResult(
+            self.in_maps.clone(),
+            self.out_maps.clone(),
+            self.offsets.clone(),
+            self.identity_map_index,
+        )
 
     @property
     def device(self):

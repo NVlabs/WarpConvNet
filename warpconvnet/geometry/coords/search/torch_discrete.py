@@ -80,10 +80,16 @@ def kernel_offsets_from_size(
 @torch.no_grad()
 def _kernel_map_search_to_result(
     found_in_coord_index: Int[Tensor, "K M"],
+    identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
     threads_per_block: int = 256,
 ) -> Int[Tensor, "K M"] | IntSearchResult:
-    """Processes the raw found_in_coord_index tensor into the desired format."""
+    """Processes the raw found_in_coord_index tensor into the desired format.
+
+    The found_in_coord_index is a tensor of shape (K, M) where K is the number of kernel offsets and M is the number of query coordinates. The value is the index of the query coordinate if the kernel offset is found in the query coordinate, otherwise -1. We remove the -1 values and return valid indices for each kernel offset.
+
+    The return_type offset means the offsets will contain [0, K_0, K_0 + K_1, ...] where K_i is the number of valid maps for the i-th kernel offset.
+    """
     # assert found_in_coord_index_wp.shape[0] == kernel_offsets.shape[0]
     # assert found_in_coord_index_wp.shape[1] == batched_query_coords.shape[0]
     target_device = found_in_coord_index.device
@@ -143,7 +149,12 @@ def _kernel_map_search_to_result(
         )
         # torch.cuda.synchronize(target_device) # Optional sync needed?
 
-    return IntSearchResult(torch.from_dlpack(in_maps), torch.from_dlpack(out_maps), offsets)
+    return IntSearchResult(
+        torch.from_dlpack(in_maps),
+        torch.from_dlpack(out_maps),
+        offsets,
+        identity_map_index=identity_map_index,
+    )
 
 
 @torch.no_grad()
@@ -151,8 +162,10 @@ def _kernel_map_from_offsets(
     hashtable: TorchHashTable,  # Use TorchHashTable
     batched_query_coords: Int[Tensor, "N D_1"],
     kernel_offsets: Int[Tensor, "K D_1"],
+    identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block: int = 256,
+    threads_per_block_x: int = 128,
+    threads_per_block_y: int = 8,
 ) -> Int[Tensor, "K N"] | IntSearchResult:
     """
     Compute the kernel map (input index, output index) for each kernel offset using TorchHashTable.
@@ -174,13 +187,25 @@ def _kernel_map_from_offsets(
             "Input TorchHashTable must be populated before calling kernel map functions."
         )
 
+    if identity_map_index is not None:
+        # Assert that the number of elements in the hashtable and the query coordinates are the same
+        assert (
+            identity_map_index < kernel_offsets.shape[0]
+        ), "Identity map index must be less than the number of kernel offsets"
+        iden_offset = kernel_offsets[identity_map_index]
+        # assert that iden_offset is all zeros
+        assert torch.all(iden_offset == 0), "Identity map offset must be all zeros"
+
     num_query_coords = batched_query_coords.shape[0]
     key_dim = batched_query_coords.shape[1]
     num_kernel_offsets = kernel_offsets.shape[0]
 
     # Get the appropriate kernel based on hash method
     kernel = _get_kernel_map_offset_kernel(hashtable.hash_method)
-    grid_size = math.ceil(num_query_coords / threads_per_block)
+
+    # Calculate 2D grid size
+    grid_size_x = math.ceil(num_query_coords / threads_per_block_x)
+    grid_size_y = math.ceil(num_kernel_offsets / threads_per_block_y)
 
     # Ensure contiguous tensors for kernel launch
     table_kvs_cont = cp.from_dlpack(hashtable._table_kvs.contiguous())
@@ -194,10 +219,10 @@ def _kernel_map_from_offsets(
         dtype=table_kvs_cont.dtype,
     )
 
-    # Launch the kernel
+    # Launch the kernel with 2D grid (x: query coords, y: kernel offsets)
     kernel(
-        (grid_size,),
-        (threads_per_block,),
+        (grid_size_x, grid_size_y),
+        (threads_per_block_x, threads_per_block_y),
         (
             table_kvs_cont,
             vector_keys_cont,
@@ -206,13 +231,15 @@ def _kernel_map_from_offsets(
             found_in_coord_index,  # Output
             num_query_coords,  # N
             key_dim,  # D+1
-            num_kernel_offsets,  # K
+            num_kernel_offsets,  # K (effective count after symmetric reduction)
             hashtable.capacity,
         ),
     )
     # torch.cuda.synchronize(target_device) # Optional
 
-    return _kernel_map_search_to_result(torch.from_dlpack(found_in_coord_index), return_type)
+    return _kernel_map_search_to_result(
+        torch.from_dlpack(found_in_coord_index), return_type, identity_map_index=identity_map_index
+    )
 
 
 @torch.no_grad()
@@ -220,13 +247,20 @@ def _kernel_map_from_size(
     hashtable: TorchHashTable,  # Use TorchHashTable
     batched_query_coords: Int[Tensor, "N D_1"],
     kernel_sizes: Tuple[int, ...],
+    identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block: int = 256,
+    threads_per_block_x: int = 128,
+    threads_per_block_y: int = 8,
+    skip_symmetric_kernel_map: bool = False,
 ) -> Int[Tensor, "K N"] | IntSearchResult:
     """
     Compute the kernel map using kernel_size. Uses _kernel_map_from_offsets internally,
     or a specialized kernel if coordinates are 4D.
     Assumes D_1 includes batch dimension.
+
+    Args:
+        skip_symmetric_kernel_map: If True, skip symmetric parts of the kernel map
+            for odd-sized kernels (e.g., for 3x3x3 kernels, only use half of the kernel positions). You can only use this if the input coordinates and output coordinates are the same.
     """
     target_device = hashtable.device
     assert str(target_device) == str(batched_query_coords.device)
@@ -242,13 +276,29 @@ def _kernel_map_from_size(
         len(kernel_sizes) == num_dims - 1
     ), f"kernel_size ({len(kernel_sizes)}) must match spatial dims ({num_dims - 1})"
 
+    # Check if we should skip symmetric kernel parts
+    is_odd_and_cubic = all(k % 2 == 1 for k in kernel_sizes) and len(set(kernel_sizes)) == 1
+    should_skip_symmetric = skip_symmetric_kernel_map and is_odd_and_cubic
+
+    if should_skip_symmetric:
+        # Must set the identity map index
+        identity_map_index = torch.prod(torch.tensor(kernel_sizes)) // 2
+
     # --- Specialized 4D Case ---
     if num_dims == 4:
         num_query_coords = batched_query_coords.shape[0]
         num_kernels = kernel_sizes[0] * kernel_sizes[1] * kernel_sizes[2]
 
+        if should_skip_symmetric:
+            # For symmetric kernels, only use the first half (excluding center)
+            num_kernels = num_kernels // 2
+
+        # Get the appropriate kernel based on symmetric skipping
         kernel = _get_kernel_map_size_4d_kernel(hashtable.hash_method)
-        grid_size = math.ceil(num_query_coords / threads_per_block)
+
+        # Calculate 2D grid size
+        grid_size_x = math.ceil(num_query_coords / threads_per_block_x)
+        grid_size_y = math.ceil(num_kernels / threads_per_block_y)
 
         # Prepare kernel arguments
         table_kvs_cont = cp.from_dlpack(hashtable._table_kvs.contiguous())
@@ -262,9 +312,10 @@ def _kernel_map_from_size(
             dtype=table_kvs_cont.dtype,
         )
 
+        # Launch the kernel with 2D grid (x: query coords, y: kernel positions)
         kernel(
-            (grid_size,),
-            (threads_per_block,),
+            (grid_size_x, grid_size_y),
+            (threads_per_block_x, threads_per_block_y),
             (
                 table_kvs_cont,
                 vector_keys_cont,
@@ -273,11 +324,16 @@ def _kernel_map_from_size(
                 found_in_coord_index,
                 num_query_coords,
                 hashtable.capacity,
+                skip_symmetric_kernel_map,
             ),
         )
         # torch.cuda.synchronize(target_device)
 
-        return _kernel_map_search_to_result(torch.from_dlpack(found_in_coord_index), return_type)
+        return _kernel_map_search_to_result(
+            torch.from_dlpack(found_in_coord_index),
+            return_type=return_type,
+            identity_map_index=identity_map_index,
+        )
 
     # --- Generic Case (Fallback to offset method) ---
     else:
@@ -290,104 +346,20 @@ def _kernel_map_from_size(
             kernel_sizes, (1,) * len(kernel_sizes), device=target_device
         )
 
+        # If skipping symmetric parts, reduce the kernel offsets
+        if should_skip_symmetric:
+            total_kernels = int(np.prod(kernel_sizes))
+            center_idx = total_kernels // 2
+            kernel_offsets_tensor = kernel_offsets_tensor[:center_idx]
+
         # Call the offset-based function
         return _kernel_map_from_offsets(
-            hashtable, batched_query_coords, kernel_offsets_tensor, return_type=return_type
+            hashtable,
+            batched_query_coords,
+            kernel_offsets_tensor,
+            return_type=return_type,
+            identity_map_index=identity_map_index,
         )
-
-
-def _kernel_map_from_direct_queries(
-    hashtable: TorchHashTable,  # Use TorchHashTable
-    batch_indexed_out_coords: Int[Tensor, "M D_1"],
-    kernel_size: Tuple[int, ...],
-    kernel_dilation: Optional[Tuple[int, ...]] = None,
-    kernel_search_batch_size: Optional[int] = None,
-    kernel_center_offset: Optional[Tuple[int, ...]] = None,
-) -> IntSearchResult:
-    """Computes kernel map by applying offsets and directly querying the hash table in batches."""
-    target_device = hashtable.device
-    num_spatial_dims = batch_indexed_out_coords.shape[1] - 1
-
-    if kernel_dilation is None:
-        kernel_dilation = (1,) * num_spatial_dims
-
-    assert len(kernel_size) == num_spatial_dims
-    assert len(kernel_dilation) == num_spatial_dims
-    assert target_device == batch_indexed_out_coords.device
-    assert batch_indexed_out_coords.dtype == torch.int32
-
-    num_total_kernels = np.prod(kernel_size)
-    if kernel_search_batch_size is None or kernel_search_batch_size <= 0:
-        # Heuristic: aim for around 1M-4M queries per batch, avoid tiny/huge batches
-        N_out = batch_indexed_out_coords.shape[0]
-        approx_queries_per_batch = 2 * 1024 * 1024  # Aim for 2M
-        kernel_search_batch_size = max(
-            1, min(num_total_kernels, approx_queries_per_batch // N_out)
-        )
-    # Ensure it doesn't exceed total kernels
-    kernel_search_batch_size = min(kernel_search_batch_size, num_total_kernels)
-
-    N_out = batch_indexed_out_coords.shape[0]
-
-    # Found indices and offsets for each kernel offset
-    in_maps_list = []
-    out_maps_list = []
-    num_valid_maps_list = []
-
-    # Generate all kernel offsets once
-    all_offsets = kernel_offsets_from_size(
-        kernel_size, kernel_dilation, center_offset=kernel_center_offset, device=target_device
-    )
-
-    for batch_start in range(0, num_total_kernels, kernel_search_batch_size):
-        batch_end = min(batch_start + kernel_search_batch_size, num_total_kernels)
-        num_kernels_in_batch = batch_end - batch_start
-        curr_offsets = all_offsets[batch_start:batch_end]
-
-        # Apply offsets and reshape for batch search
-        # Unsqueeze dims: [K_batch, 1, D+1] + [1, M, D+1] -> [K_batch, M, D+1]
-        coords_to_search = curr_offsets.unsqueeze(1) + batch_indexed_out_coords.unsqueeze(0)
-        coords_to_search = coords_to_search.view(-1, num_spatial_dims + 1).contiguous()
-
-        # Query the hashtable for all new coordinates at once
-        # Note: This uses the TorchHashTable's search method, which launches its own kernel.
-        in_indices = hashtable.search(coords_to_search)
-
-        # Get the valid indices and offsets
-        valid_in_indices_bool = in_indices >= 0
-        num_valid_in_batch = valid_in_indices_bool.sum().item()
-
-        if num_valid_in_batch > 0:
-            # Calculate corresponding output indices (original query indices)
-            # Create indices [0, 1, ..., N_out-1] repeated K_batch times
-            out_indices_base = torch.arange(N_out, device=target_device)
-            out_indices_expanded = out_indices_base.repeat(num_kernels_in_batch)
-
-            # Filter based on valid search results
-            valid_in_indices_int = in_indices[valid_in_indices_bool]
-            valid_out_indices_int = out_indices_expanded[valid_in_indices_bool]
-
-            in_maps_list.append(valid_in_indices_int)
-            out_maps_list.append(valid_out_indices_int)
-        else:
-            # Append empty tensors if no hits in this batch for correct shape later
-            in_maps_list.append(torch.empty((0,), dtype=torch.int32, device=target_device))
-            out_maps_list.append(torch.empty((0,), dtype=torch.int32, device=target_device))
-
-        # Count valid per kernel offset for the final offset calculation
-        num_valid_per_kernel = valid_in_indices_bool.view(num_kernels_in_batch, N_out).sum(dim=1)
-        num_valid_maps_list.append(num_valid_per_kernel)
-
-    # Concatenate all the maps
-    in_maps = torch.cat(in_maps_list, dim=0)
-    out_maps = torch.cat(out_maps_list, dim=0)
-    num_valid_maps = torch.cat(num_valid_maps_list, dim=0)
-
-    # Convert the num_valid_maps to offsets
-    offsets = torch.cumsum(num_valid_maps, dim=0, dtype=torch.int32)
-    offsets = torch.cat([torch.zeros(1, dtype=torch.int32, device=target_device), offsets], dim=0)
-
-    return IntSearchResult(in_maps, out_maps, offsets)
 
 
 @torch.no_grad()
@@ -397,10 +369,10 @@ def generate_kernel_map(
     in_to_out_stride_ratio: Tuple[int, ...],
     kernel_size: Tuple[int, ...],
     kernel_dilation: Optional[Tuple[int, ...]] = None,
-    kernel_search_batch_size: Optional[int] = None,
     kernel_center_offset: Optional[Tuple[int, ...]] = None,
-    method: Literal["query", "offset", "size"] = "size",  # Size is the default fastest method
+    method: Literal["offset", "size"] = "size",  # Size is the default fastest method
     hash_method: HashMethod = HashMethod.CITY,  # Allow selecting hash method
+    skip_symmetric_kernel_map: bool = False,
 ) -> IntSearchResult:
     """
     Generate the kernel map for the spatially sparse convolution using TorchHashTable.
@@ -409,11 +381,16 @@ def generate_kernel_map(
     method: 'query' directly queries the hash table for each offset point (can be slower for large kernels but flexible).
             'offset' pre-calculates all kernel offsets and uses a custom kernel to find matches (generally faster).
             'size' uses a specialized kernel for 4D coordinates if applicable, otherwise falls back to 'offset'.
+    skip_symmetric_kernel_map: If True, skip symmetric parts of the kernel map for odd-sized kernels.
     """
     target_device = batch_indexed_in_coords.device
     assert target_device == batch_indexed_out_coords.device
     assert batch_indexed_in_coords.dtype == torch.int32
     assert batch_indexed_out_coords.dtype == torch.int32
+    if skip_symmetric_kernel_map:
+        assert len(batch_indexed_in_coords) == len(
+            batch_indexed_out_coords
+        ), "You can only skip symmetric kernel map if the input and output coordinates are the same."
 
     # Create a TorchHashTable for the input coordinates
     hashtable = TorchHashTable.from_keys(
@@ -435,17 +412,20 @@ def generate_kernel_map(
     else:
         strided_out_coords = batch_indexed_out_coords
 
-    if method == "query":
-        # This method applies offsets and calls hashtable.search directly
-        return _kernel_map_from_direct_queries(
-            hashtable,
-            strided_out_coords,
-            kernel_size,
-            kernel_dilation=kernel_dilation,
-            kernel_search_batch_size=kernel_search_batch_size,
-            kernel_center_offset=kernel_center_offset,
-        )
-    elif method == "offset":
+    identity_map_index = None
+    # Apply symmetric kernel skipping if requested
+    if skip_symmetric_kernel_map:
+        # Check if kernel is odd and potentially symmetric
+        is_odd_kernel = all(k % 2 == 1 for k in kernel_size)
+        if is_odd_kernel:
+            total_kernels = int(np.prod(kernel_size))
+            center_idx = total_kernels // 2
+            identity_map_index = center_idx
+        else:
+            # Force the symmetric kernel skipping to be False if the kernel is not odd
+            skip_symmetric_kernel_map = False
+
+    if method == "offset":
         # This method generates offsets and launches the custom kernel_map_offset kernel
         if kernel_dilation is None:
             kernel_dilation = (1,) * num_spatial_dims
@@ -453,11 +433,15 @@ def generate_kernel_map(
         kernel_offsets_tensor = kernel_offsets_from_size(
             kernel_size, kernel_dilation, center_offset=kernel_center_offset, device=target_device
         )
+        if identity_map_index is not None:
+            kernel_offsets_tensor = kernel_offsets_tensor[:center_idx]
+
         return _kernel_map_from_offsets(
             hashtable,
             strided_out_coords,  # Use strided coordinates
             kernel_offsets_tensor,
             return_type="offsets",
+            identity_map_index=identity_map_index,
         )
     elif method == "size":
         # This method uses _kernel_map_from_size, which has the 4D specialization
@@ -472,6 +456,8 @@ def generate_kernel_map(
             strided_out_coords,
             kernel_size,
             return_type="offsets",
+            skip_symmetric_kernel_map=skip_symmetric_kernel_map,
+            identity_map_index=identity_map_index,
         )
     else:
         raise ValueError(f"Invalid method: {method}. Choose 'query', 'offset', or 'size'.")

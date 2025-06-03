@@ -87,7 +87,6 @@ def test_generate_kernel_map(setup_voxels):
         in_to_out_stride_ratio=(2, 2, 2),
         kernel_size=(3, 3, 3),
         kernel_dilation=(1, 1, 1),
-        kernel_search_batch_size=8,
     )
 
     # Verify kernel map properties
@@ -175,6 +174,7 @@ def test_sparse_conv_explicit_backward(setup_small_voxels):
     C_in, C_out = voxels.num_channels, 13
     kernel_size = (3, 3, 3)
     stride = (2, 2, 2)
+    skip_symmetric_kernel_map = False
 
     # Setup convolution parameters
     num_kernels = kernel_size[0] * kernel_size[1] * kernel_size[2]
@@ -196,7 +196,13 @@ def test_sparse_conv_explicit_backward(setup_small_voxels):
     # Run gradient check
     torch.autograd.gradcheck(
         SpatiallySparseConvExplicitGEMMFunction.apply,
-        (feature_tensor, weights, kernel_map, batch_indexed_out_coords.shape[0]),
+        (
+            feature_tensor,
+            weights,
+            kernel_map,
+            skip_symmetric_kernel_map,
+            batch_indexed_out_coords.shape[0],
+        ),
         eps=1e-3,
         atol=1e-3,
         rtol=1e-3,
@@ -209,6 +215,7 @@ def test_sparse_conv_implicit_backward(setup_small_voxels):
     C_in, C_out = voxels.num_channels, 13
     kernel_size = (3, 3, 3)
     stride = (2, 2, 2)
+    skip_symmetric_kernel_map = False
 
     # Setup convolution parameters
     num_kernels = kernel_size[0] * kernel_size[1] * kernel_size[2]
@@ -234,6 +241,7 @@ def test_sparse_conv_implicit_backward(setup_small_voxels):
             feature_tensor,
             weights,
             kernel_map,
+            skip_symmetric_kernel_map,
             batch_indexed_out_coords.shape[0],
         ),
         eps=1e-3,

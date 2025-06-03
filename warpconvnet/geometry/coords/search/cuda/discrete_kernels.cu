@@ -138,9 +138,16 @@ __global__ void kernel_map_offset_templated(
     int num_kernel_offsets,
     int table_capacity)
 {
-    // Thread ID corresponds to the query coordinate index
+    // Thread ID corresponds to the query coordinate index (x dimension)
     int query_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Thread ID corresponds to the kernel offset index (y dimension)
+    int kernel_idx = blockIdx.y * blockDim.y + threadIdx.y;
+
     if (query_idx >= num_query_coords) {
+        return;
+    }
+
+    if (kernel_idx >= num_kernel_offsets) {
         return;
     }
 
@@ -150,29 +157,26 @@ __global__ void kernel_map_offset_templated(
     int temp_coord[16]; // Max key_dim assumed <= 16; adjust if necessary
 
     const int* base_query_coord = &query_coords[query_idx * key_dim];
+    const int* offset = &kernel_offsets[kernel_idx * key_dim];
 
-    for (int k = 0; k < num_kernel_offsets; ++k) {
-        const int* offset = &kernel_offsets[k * key_dim];
-
-        // Calculate query_coord + offset
-        for (int dim = 0; dim < key_dim; ++dim) {
-            temp_coord[dim] = base_query_coord[dim] + offset[dim];
-        }
-
-        // Search for the calculated coordinate in the hash table
-        int found_index = search_hash_table<HashFuncT>(
-            table_kvs,
-            vector_keys,
-            temp_coord,
-            key_dim,
-            table_capacity
-        );
-
-        // Store the result in the output array [k, query_idx]
-        // Note: CuPy/PyTorch tensors are row-major by default.
-        // Accessing found_in_coord_index[k][query_idx] corresponds to index k * num_query_coords + query_idx
-        found_in_coord_index[k * num_query_coords + query_idx] = found_index;
+    // Calculate query_coord + offset
+    for (int dim = 0; dim < key_dim; ++dim) {
+        temp_coord[dim] = base_query_coord[dim] + offset[dim];
     }
+
+    // Search for the calculated coordinate in the hash table
+    int found_index = search_hash_table<HashFuncT>(
+        table_kvs,
+        vector_keys,
+        temp_coord,
+        key_dim,
+        table_capacity
+    );
+
+    // Store the result in the output array [kernel_idx, query_idx]
+    // Note: CuPy/PyTorch tensors are row-major by default.
+    // Accessing found_in_coord_index[kernel_idx][query_idx] corresponds to index kernel_idx * num_query_coords + query_idx
+    found_in_coord_index[kernel_idx * num_query_coords + query_idx] = found_index;
 }
 
 // Kernel to map found indices to flattened in/out maps and offsets
@@ -221,21 +225,23 @@ extern "C" __global__ void kernel_map_offset_fnv1a(
         table_kvs, vector_keys, query_coords, kernel_offsets, found_in_coord_index,
         num_query_coords, key_dim, num_kernel_offsets, table_capacity);
 }
+
 extern "C" __global__ void kernel_map_offset_city(
-     const int* table_kvs, const int* vector_keys, const int* query_coords,
+    const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_offsets, int* found_in_coord_index,
     int num_query_coords, int key_dim, int num_kernel_offsets, int table_capacity)
 {
-     kernel_map_offset_templated<CityHash>(
+    kernel_map_offset_templated<CityHash>(
         table_kvs, vector_keys, query_coords, kernel_offsets, found_in_coord_index,
         num_query_coords, key_dim, num_kernel_offsets, table_capacity);
 }
+
 extern "C" __global__ void kernel_map_offset_murmur(
-     const int* table_kvs, const int* vector_keys, const int* query_coords,
+    const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_offsets, int* found_in_coord_index,
     int num_query_coords, int key_dim, int num_kernel_offsets, int table_capacity)
 {
-     kernel_map_offset_templated<MurmurHash>(
+    kernel_map_offset_templated<MurmurHash>(
         table_kvs, vector_keys, query_coords, kernel_offsets, found_in_coord_index,
         num_query_coords, key_dim, num_kernel_offsets, table_capacity);
 }
@@ -263,10 +269,14 @@ __global__ void kernel_map_size_4d_templated(
     const int* __restrict__ kernel_sizes,                           // Kernel dimensions (kx, ky, kz)
     int* __restrict__ found_in_coord_index, // Output array (kx*ky*kz, num_query_coords)
     int num_query_coords,
-    int table_capacity)
+    int table_capacity,
+    bool skip_symmetric_kernel_map)  // Added parameter
 {
-    // Thread ID corresponds to the query coordinate index
+    // Thread ID corresponds to the query coordinate index (x dimension)
     int query_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Thread ID corresponds to the kernel position index (y dimension)
+    int kernel_map_idx = blockIdx.y * blockDim.y + threadIdx.y;
+
     if (query_idx >= num_query_coords) {
         return;
     }
@@ -281,67 +291,74 @@ __global__ void kernel_map_size_4d_templated(
     center.y = (kernel_sizes[1] % 2 != 0) ? kernel_sizes[1] / 2 : 0;
     center.z = (kernel_sizes[2] % 2 != 0) ? kernel_sizes[2] / 2 : 0;
 
-    int kernel_map_idx = 0; // Index into the K dimension of the output
+    // Calculate total number of kernel positions and effective limit for symmetric skipping
+    int total_kernel_positions = kernel_sizes[0] * kernel_sizes[1] * kernel_sizes[2];
+    int effective_kernel_limit = skip_symmetric_kernel_map ? total_kernel_positions / 2 : total_kernel_positions;
+
+    // Check if this kernel position should be processed
+    if (kernel_map_idx >= effective_kernel_limit) {
+        return;
+    }
+
+    // Convert linear kernel_map_idx back to 3D indices (i, j, k)
+    int k = kernel_map_idx % kernel_sizes[2];
+    int j = (kernel_map_idx / kernel_sizes[2]) % kernel_sizes[1];
+    int i = kernel_map_idx / (kernel_sizes[2] * kernel_sizes[1]);
+
     int temp_coord[4]; // Stack allocation for the temporary coordinate
 
     // Set batch index (doesn't change)
     temp_coord[0] = base_query_coord_ptr[0];
 
-    // Iterate through the 3D kernel dimensions
-    for (int i = 0; i < kernel_sizes[0]; ++i) {
-        for (int j = 0; j < kernel_sizes[1]; ++j) {
-            for (int k = 0; k < kernel_sizes[2]; ++k) {
+    // Calculate the coordinate to search for
+    temp_coord[1] = base_query_coord_ptr[1] + i - center.x;
+    temp_coord[2] = base_query_coord_ptr[2] + j - center.y;
+    temp_coord[3] = base_query_coord_ptr[3] + k - center.z;
 
-                // Calculate the coordinate to search for
-                temp_coord[1] = base_query_coord_ptr[1] + i - center.x;
-                temp_coord[2] = base_query_coord_ptr[2] + j - center.y;
-                temp_coord[3] = base_query_coord_ptr[3] + k - center.z;
+    // Search for the calculated coordinate in the hash table
+    int found_index = search_hash_table<HashFuncT>(
+        table_kvs,
+        vector_keys,
+        temp_coord,
+        key_dim, // key_dim is 4
+        table_capacity
+    );
 
-                // Search for the calculated coordinate in the hash table
-                int found_index = search_hash_table<HashFuncT>(
-                    table_kvs,
-                    vector_keys,
-                    temp_coord,
-                    key_dim, // key_dim is 4
-                    table_capacity
-                );
-
-                // Store the result in the output array [kernel_map_idx, query_idx]
-                // Output is K * M, index = kernel_map_idx * M + query_idx
-                found_in_coord_index[kernel_map_idx * num_query_coords + query_idx] = found_index;
-                kernel_map_idx++;
-            }
-        }
-    }
+    // Store the result in the output array [kernel_map_idx, query_idx]
+    // Output is K * M, index = kernel_map_idx * M + query_idx
+    found_in_coord_index[kernel_map_idx * num_query_coords + query_idx] = found_index;
 }
 
 // --- Extern "C" Wrappers ---
 
 // kernel_map_size_4d wrappers
+// kernel_map_size_4d wrappers with skip_symmetric_kernel_map
 extern "C" __global__ void kernel_map_size_4d_fnv1a(
     const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_sizes, int* found_in_coord_index,
-    int num_query_coords, int table_capacity)
+    int num_query_coords, int table_capacity, bool skip_symmetric_kernel_map)
 {
     kernel_map_size_4d_templated<FNV1AHash>(
         table_kvs, vector_keys, query_coords, kernel_sizes, found_in_coord_index,
-        num_query_coords, table_capacity);
+        num_query_coords, table_capacity, skip_symmetric_kernel_map);
 }
+
 extern "C" __global__ void kernel_map_size_4d_city(
     const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_sizes, int* found_in_coord_index,
-    int num_query_coords, int table_capacity)
+    int num_query_coords, int table_capacity, bool skip_symmetric_kernel_map)
 {
     kernel_map_size_4d_templated<CityHash>(
         table_kvs, vector_keys, query_coords, kernel_sizes, found_in_coord_index,
-        num_query_coords, table_capacity);
+        num_query_coords, table_capacity, skip_symmetric_kernel_map);
 }
+
 extern "C" __global__ void kernel_map_size_4d_murmur(
     const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_sizes, int* found_in_coord_index,
-    int num_query_coords, int table_capacity)
+    int num_query_coords, int table_capacity, bool skip_symmetric_kernel_map)
 {
     kernel_map_size_4d_templated<MurmurHash>(
         table_kvs, vector_keys, query_coords, kernel_sizes, found_in_coord_index,
-        num_query_coords, table_capacity);
+        num_query_coords, table_capacity, skip_symmetric_kernel_map);
 }

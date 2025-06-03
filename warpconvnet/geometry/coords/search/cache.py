@@ -89,6 +89,7 @@ class IntSearchCacheKey:
     transposed: bool
     generative: bool
     stride_mode: str
+    skip_symmetric_kernel_map: bool
     in_offsets: Int[Tensor, "B+1"]  # noqa: F821
     out_offsets: Int[Tensor, "B+1"]  # noqa: F821
 
@@ -99,6 +100,7 @@ class IntSearchCacheKey:
         transposed,
         generative,
         stride_mode,
+        skip_symmetric_kernel_map,
         in_offsets,
         out_offsets,
     ):
@@ -107,6 +109,7 @@ class IntSearchCacheKey:
         self.transposed = transposed
         self.generative = generative
         self.stride_mode = stride_mode
+        self.skip_symmetric_kernel_map = skip_symmetric_kernel_map
         self.in_offsets = in_offsets.detach().cpu().int()
         self.out_offsets = out_offsets.detach().cpu().int()
 
@@ -117,6 +120,7 @@ class IntSearchCacheKey:
             ^ hash(self.transposed)
             ^ hash(self.generative)
             ^ string_hash(self.stride_mode)  # Use string_hash for stride_mode
+            ^ hash(self.skip_symmetric_kernel_map)
             ^ _int_sequence_hash(self.in_offsets.tolist())
             ^ _int_sequence_hash(self.out_offsets.tolist())
         )
@@ -128,12 +132,13 @@ class IntSearchCacheKey:
             and self.transposed == other.transposed
             and self.generative == other.generative
             and self.stride_mode == other.stride_mode
+            and self.skip_symmetric_kernel_map == other.skip_symmetric_kernel_map
             and self.in_offsets.equal(other.in_offsets)
             and self.out_offsets.equal(other.out_offsets)
         )
 
     def __repr__(self):
-        return f"IntSearchCacheKey(kernel_size={self.kernel_size}, kernel_dilation={self.kernel_dilation}, transposed={self.transposed}, generative={self.generative}, stride_mode={self.stride_mode}, in_offsets={self.in_offsets}, out_offsets={self.out_offsets})"
+        return f"IntSearchCacheKey(kernel_size={self.kernel_size}, kernel_dilation={self.kernel_dilation}, transposed={self.transposed}, generative={self.generative}, stride_mode={self.stride_mode}, skip_symmetric_kernel_map={self.skip_symmetric_kernel_map}, in_offsets={self.in_offsets}, out_offsets={self.out_offsets})"
 
 
 @dataclass
