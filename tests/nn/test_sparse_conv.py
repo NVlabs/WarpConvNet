@@ -16,6 +16,10 @@ from warpconvnet.nn.functional.sparse_conv import (
     SPARSE_CONV_FWD_ALGO_MODE,
     SPARSE_CONV_BWD_ALGO_MODE,
     STRIDED_CONV_MODE,
+    _implicit_gemm_forward_logic,
+    _implicit_gemm_backward_logic,
+    _explicit_gemm_forward_logic,
+    _explicit_gemm_backward_logic,
     SpatiallySparseConvBatchedExplicitGEMMFunction,
     SpatiallySparseConvExplicitGEMMFunction,
     SpatiallySparseConvImplicitGEMMFunction,
@@ -160,6 +164,12 @@ def test_generate_kernel_map_with_skip_symmetric_kernel_map(setup_voxels):
         skip_symmetric_kernel_map=True,
     )
 
+    assert kernel_map.identity_map_index is None
+    assert (
+        kernel_map_skip.identity_map_index is not None
+        and kernel_map_skip.identity_map_index == 27 // 2
+    )
+
     # Verify kernel map properties
     num_skip_offsets = len(kernel_map_skip.offsets)
     assert torch.all(kernel_map.offsets[:num_skip_offsets] == kernel_map_skip.offsets)
@@ -213,6 +223,54 @@ def test_sparse_conv(setup_voxels):
     # assert torch.allclose(out_implicit.feature_tensor, out_batched_explicit.feature_tensor)
 
 
+def test_sparse_conv_forward_with_skip_symmetric_kernel_map(setup_voxels):
+    """Test sparse convolution forward with skip symmetric kernel map."""
+    voxels = setup_voxels
+    C_in, C_out = voxels.num_channels, 13
+    kernel_size = (3, 3, 3)
+    stride = (1, 1, 1)
+
+    # Setup convolution parameters
+    num_kernels = kernel_size[0] * kernel_size[1] * kernel_size[2]
+    weights = torch.randn(num_kernels, C_in, C_out).to(voxels.device)
+
+    # Generate kernel map
+    batch_indexed_in_coords = batch_indexed_coordinates(voxels.coordinate_tensor, voxels.offsets)
+
+    # Forward pass with skip symmetric kernel map
+    kernel_map_skip = generate_kernel_map(
+        batch_indexed_in_coords,
+        batch_indexed_in_coords,
+        stride,
+        kernel_size,
+        skip_symmetric_kernel_map=True,
+    )
+    out_skip = _implicit_gemm_forward_logic(
+        voxels.feature_tensor,
+        weights,
+        kernel_map_skip,
+        batch_indexed_in_coords.shape[0],
+        compute_dtype=torch.float32,
+        fwd_block_size=16,
+    )
+
+    # Forward pass without skip symmetric kernel map
+    kernel_map = generate_kernel_map(
+        batch_indexed_in_coords,
+        batch_indexed_in_coords,
+        stride,
+        kernel_size,
+    )
+    out = _implicit_gemm_forward_logic(
+        voxels.feature_tensor,
+        weights,
+        kernel_map,
+        batch_indexed_in_coords.shape[0],
+        compute_dtype=torch.float32,
+        fwd_block_size=16,
+    )
+
+
 def test_sparse_conv_explicit_backward(setup_small_voxels):
     """Test sparse convolution gradients."""
     voxels = setup_small_voxels
@@ -231,13 +289,12 @@ def test_sparse_conv_explicit_backward(setup_small_voxels):
     feature_tensor = voxels.feature_tensor.detach().requires_grad_(True)
 
     # Run gradient check
-    skip_symmetric_kernel_map = True
     kernel_map = generate_kernel_map(
         batch_indexed_in_coords,
         batch_indexed_out_coords,
         stride,
         kernel_size,
-        skip_symmetric_kernel_map=skip_symmetric_kernel_map,
+        skip_symmetric_kernel_map=True,
     )
     torch.autograd.gradcheck(
         SpatiallySparseConvExplicitGEMMFunction.apply,
@@ -245,7 +302,6 @@ def test_sparse_conv_explicit_backward(setup_small_voxels):
             feature_tensor,
             weights,
             kernel_map,
-            skip_symmetric_kernel_map,
             batch_indexed_out_coords.shape[0],
         ),
         eps=1e-3,
@@ -253,13 +309,12 @@ def test_sparse_conv_explicit_backward(setup_small_voxels):
         rtol=1e-3,
     )
 
-    skip_symmetric_kernel_map = False
     kernel_map = generate_kernel_map(
         batch_indexed_in_coords,
         batch_indexed_out_coords,
         stride,
         kernel_size,
-        skip_symmetric_kernel_map=skip_symmetric_kernel_map,
+        skip_symmetric_kernel_map=False,
     )
     torch.autograd.gradcheck(
         SpatiallySparseConvExplicitGEMMFunction.apply,
@@ -267,7 +322,6 @@ def test_sparse_conv_explicit_backward(setup_small_voxels):
             feature_tensor,
             weights,
             kernel_map,
-            skip_symmetric_kernel_map,
             batch_indexed_out_coords.shape[0],
         ),
         eps=1e-3,
@@ -290,25 +344,24 @@ def test_sparse_conv_implicit_backward(setup_small_voxels):
     # Generate kernel map
     batch_indexed_in_coords = batch_indexed_coordinates(voxels.coordinate_tensor, voxels.offsets)
     batch_indexed_out_coords, offsets = stride_coords(batch_indexed_in_coords, stride=stride)
-    kernel_map = generate_kernel_map(
-        batch_indexed_in_coords,
-        batch_indexed_out_coords,
-        stride,
-        kernel_size,
-    )
 
     # Prepare for gradient check
     feature_tensor = voxels.feature_tensor.detach().requires_grad_(True)
 
     # Run gradient check
-    skip_symmetric_kernel_map = False
+    kernel_map = generate_kernel_map(
+        batch_indexed_in_coords,
+        batch_indexed_out_coords,
+        stride,
+        kernel_size,
+        skip_symmetric_kernel_map=False,
+    )
     torch.autograd.gradcheck(
         SpatiallySparseConvImplicitGEMMFunction.apply,
         (
             feature_tensor,
             weights,
             kernel_map,
-            skip_symmetric_kernel_map,
             batch_indexed_out_coords.shape[0],
         ),
         eps=1e-3,
@@ -316,14 +369,19 @@ def test_sparse_conv_implicit_backward(setup_small_voxels):
         rtol=1e-3,
     )
 
-    skip_symmetric_kernel_map = True
+    kernel_map = generate_kernel_map(
+        batch_indexed_in_coords,
+        batch_indexed_out_coords,
+        stride,
+        kernel_size,
+        skip_symmetric_kernel_map=True,
+    )
     torch.autograd.gradcheck(
         SpatiallySparseConvImplicitGEMMFunction.apply,
         (
             feature_tensor,
             weights,
             kernel_map,
-            skip_symmetric_kernel_map,
             batch_indexed_out_coords.shape[0],
         ),
         eps=1e-3,

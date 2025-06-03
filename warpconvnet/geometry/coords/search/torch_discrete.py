@@ -235,7 +235,6 @@ def _kernel_map_from_offsets(
             hashtable.capacity,
         ),
     )
-    # torch.cuda.synchronize(target_device) # Optional
 
     return _kernel_map_search_to_result(
         torch.from_dlpack(found_in_coord_index), return_type, identity_map_index=identity_map_index
@@ -281,16 +280,13 @@ def _kernel_map_from_size(
         assert all(
             k % 2 == 1 for k in kernel_sizes
         ), f"Kernel sizes must be odd for symmetric skipping. Got {kernel_sizes}"
-        assert (
-            identity_map_index is not None
-        ), "Identity map index must be provided for symmetric skipping."
 
     num_offsets = np.prod(kernel_sizes)
+    identity_map_index = num_offsets // 2
 
     # --- Specialized 4D Case ---
     if num_dims == 4:
         num_query_coords = batched_query_coords.shape[0]
-        num_offsets = kernel_sizes[0] * kernel_sizes[1] * kernel_sizes[2]
 
         if skip_symmetric_kernel_map:
             # For symmetric kernels, only use the first half (excluding center)
