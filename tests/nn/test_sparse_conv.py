@@ -223,9 +223,9 @@ def test_sparse_conv(setup_voxels):
     # assert torch.allclose(out_implicit.feature_tensor, out_batched_explicit.feature_tensor)
 
 
-def test_sparse_conv_forward_with_skip_symmetric_kernel_map(setup_voxels):
+def test_sparse_conv_forward_with_skip_symmetric(setup_small_voxels):
     """Test sparse convolution forward with skip symmetric kernel map."""
-    voxels = setup_voxels
+    voxels = setup_small_voxels
     C_in, C_out = voxels.num_channels, 13
     kernel_size = (3, 3, 3)
     stride = (1, 1, 1)
@@ -233,6 +233,9 @@ def test_sparse_conv_forward_with_skip_symmetric_kernel_map(setup_voxels):
     # Setup convolution parameters
     num_kernels = kernel_size[0] * kernel_size[1] * kernel_size[2]
     weights = torch.randn(num_kernels, C_in, C_out).to(voxels.device)
+    # Set the weights after the identity to be zero
+    iden_map_idx = kernel_size[0] * kernel_size[1] * kernel_size[2] // 2
+    weights[iden_map_idx + 1 :] = 0
 
     # Generate kernel map
     batch_indexed_in_coords = batch_indexed_coordinates(voxels.coordinate_tensor, voxels.offsets)
@@ -245,6 +248,15 @@ def test_sparse_conv_forward_with_skip_symmetric_kernel_map(setup_voxels):
         kernel_size,
         skip_symmetric_kernel_map=True,
     )
+    kernel_map = generate_kernel_map(
+        batch_indexed_in_coords,
+        batch_indexed_in_coords,
+        stride,
+        kernel_size,
+        skip_symmetric_kernel_map=False,
+    )
+
+    # Implicit GEMM
     out_skip = _implicit_gemm_forward_logic(
         voxels.feature_tensor,
         weights,
@@ -252,14 +264,6 @@ def test_sparse_conv_forward_with_skip_symmetric_kernel_map(setup_voxels):
         batch_indexed_in_coords.shape[0],
         compute_dtype=torch.float32,
         fwd_block_size=16,
-    )
-
-    # Forward pass without skip symmetric kernel map
-    kernel_map = generate_kernel_map(
-        batch_indexed_in_coords,
-        batch_indexed_in_coords,
-        stride,
-        kernel_size,
     )
     out = _implicit_gemm_forward_logic(
         voxels.feature_tensor,
@@ -269,6 +273,23 @@ def test_sparse_conv_forward_with_skip_symmetric_kernel_map(setup_voxels):
         compute_dtype=torch.float32,
         fwd_block_size=16,
     )
+
+    assert torch.allclose(out_skip, out)
+
+    # Explicit GEMM
+    out_skip_explicit = _explicit_gemm_forward_logic(
+        voxels.feature_tensor,
+        weights,
+        kernel_map_skip,
+        batch_indexed_in_coords.shape[0],
+    )
+    out_explicit = _explicit_gemm_forward_logic(
+        voxels.feature_tensor,
+        weights,
+        kernel_map,
+        batch_indexed_in_coords.shape[0],
+    )
+    assert torch.allclose(out_skip_explicit, out_explicit)
 
 
 def test_sparse_conv_explicit_backward(setup_small_voxels):

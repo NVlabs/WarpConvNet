@@ -416,17 +416,16 @@ def generate_kernel_map(
         strided_out_coords = batch_indexed_out_coords
 
     identity_map_index = None
-    # Apply symmetric kernel skipping if requested
-    if skip_symmetric_kernel_map:
-        # Check if kernel is odd and potentially symmetric
-        is_odd_kernel = all(k % 2 == 1 for k in kernel_size)
-        if is_odd_kernel:
-            total_kernels = int(np.prod(kernel_size))
-            center_idx = total_kernels // 2
-            identity_map_index = center_idx
-        else:
-            # Force the symmetric kernel skipping to be False if the kernel is not odd
-            skip_symmetric_kernel_map = False
+    # Check if kernel is odd and potentially symmetric
+    is_odd_kernel = all(k % 2 == 1 for k in kernel_size)
+    if is_odd_kernel:
+        total_kernels = int(np.prod(kernel_size))
+        center_idx = total_kernels // 2
+        identity_map_index = center_idx
+
+    # Force the symmetric kernel skipping to be False if the kernel is not odd
+    if skip_symmetric_kernel_map and not is_odd_kernel:
+        skip_symmetric_kernel_map = False
 
     if method == "offset":
         # This method generates offsets and launches the custom kernel_map_offset kernel

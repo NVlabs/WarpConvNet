@@ -1572,9 +1572,11 @@ def generate_output_coords_and_kernel_map(
                     out_maps=kernel_map_non_transposed.in_maps,
                     offsets=kernel_map_non_transposed.offsets,
                 )
-                if should_skip_symmetric_kernel_map:
-                    kernel_map = _skip_symmetric_kernel_parts(kernel_map, kernel_size)
                 return batch_indexed_out_coords, out_offsets, kernel_map
+            else:
+                logger.warning(
+                    "No kernel map found for non-transposed case. Generating new kernel map."
+                )
 
         # Swap in and out maps for transposed kernel map generation and swap it back
         kernel_map = generate_kernel_map(

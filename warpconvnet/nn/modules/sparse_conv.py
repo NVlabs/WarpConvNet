@@ -20,6 +20,7 @@ from warpconvnet.nn.functional.sparse_conv import (
     spatially_sparse_conv,
 )
 from warpconvnet.utils.ntuple import ntuple
+from warpconvnet.constants import WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP
 
 
 class SpatiallySparseConv(BaseSpatialModule):
@@ -42,7 +43,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         compute_dtype: Optional[torch.dtype] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
-        skip_symmetric_kernel_map: bool = True,
+        skip_symmetric_kernel_map: Optional[bool] = None,
     ):
         super().__init__()
         self.num_spatial_dims = num_spatial_dims
@@ -69,7 +70,14 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.compute_dtype = compute_dtype
         self.implicit_matmul_fwd_block_size = implicit_matmul_fwd_block_size
         self.implicit_matmul_bwd_block_size = implicit_matmul_bwd_block_size
-        self.skip_symmetric_kernel_map = skip_symmetric_kernel_map
+
+        is_odd_kernel = all(k % 2 == 1 for k in _kernel_size)
+        if skip_symmetric_kernel_map is None:
+            self.skip_symmetric_kernel_map = (
+                WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP and is_odd_kernel
+            )
+        else:
+            self.skip_symmetric_kernel_map = skip_symmetric_kernel_map and is_odd_kernel
 
         self.bias: Optional[nn.Parameter] = None
 
@@ -91,6 +99,8 @@ class SpatiallySparseConv(BaseSpatialModule):
             out_str += f", transposed={self.transposed}"
         if self.generative:
             out_str += f", generative={self.generative}"
+        if self.skip_symmetric_kernel_map:
+            out_str += f", skip_symmetric_kernel={self.skip_symmetric_kernel_map}"
         out_str += ")"
         return out_str
 
@@ -173,7 +183,7 @@ class SparseConv2d(SpatiallySparseConv):
         compute_dtype: Optional[torch.dtype] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
-        skip_symmetric_kernel_map: bool = True,
+        skip_symmetric_kernel_map: Optional[bool] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -216,7 +226,7 @@ class SparseConv3d(SpatiallySparseConv):
         compute_dtype: Optional[torch.dtype] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
-        skip_symmetric_kernel_map: bool = True,
+        skip_symmetric_kernel_map: Optional[bool] = None,
     ):
         super().__init__(
             in_channels=in_channels,
