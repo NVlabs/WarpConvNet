@@ -270,7 +270,9 @@ __global__ void kernel_map_size_4d_templated(
     int* __restrict__ found_in_coord_index, // Output array (kx*ky*kz, num_query_coords)
     int num_query_coords,
     int table_capacity,
-    bool skip_symmetric_kernel_map)  // Added parameter
+    int num_kernels
+    // int* __restrict__ debug_out_coords
+)
 {
     // Thread ID corresponds to the query coordinate index (x dimension)
     int query_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -291,12 +293,8 @@ __global__ void kernel_map_size_4d_templated(
     center.y = (kernel_sizes[1] % 2 != 0) ? kernel_sizes[1] / 2 : 0;
     center.z = (kernel_sizes[2] % 2 != 0) ? kernel_sizes[2] / 2 : 0;
 
-    // Calculate total number of kernel positions and effective limit for symmetric skipping
-    int total_kernel_positions = kernel_sizes[0] * kernel_sizes[1] * kernel_sizes[2];
-    int effective_kernel_limit = skip_symmetric_kernel_map ? total_kernel_positions / 2 : total_kernel_positions;
-
     // Check if this kernel position should be processed
-    if (kernel_map_idx >= effective_kernel_limit) {
+    if (kernel_map_idx >= num_kernels) {
         return;
     }
 
@@ -315,6 +313,12 @@ __global__ void kernel_map_size_4d_templated(
     temp_coord[2] = base_query_coord_ptr[2] + j - center.y;
     temp_coord[3] = base_query_coord_ptr[3] + k - center.z;
 
+    // DEBUG
+    // debug_out_coords[kernel_map_idx * num_query_coords * 4 + query_idx * 4 + 0] = temp_coord[0];
+    // debug_out_coords[kernel_map_idx * num_query_coords * 4 + query_idx * 4 + 1] = temp_coord[1];
+    // debug_out_coords[kernel_map_idx * num_query_coords * 4 + query_idx * 4 + 2] = temp_coord[2];
+    // debug_out_coords[kernel_map_idx * num_query_coords * 4 + query_idx * 4 + 3] = temp_coord[3];
+
     // Search for the calculated coordinate in the hash table
     int found_index = search_hash_table<HashFuncT>(
         table_kvs,
@@ -331,34 +335,36 @@ __global__ void kernel_map_size_4d_templated(
 
 // --- Extern "C" Wrappers ---
 
-// kernel_map_size_4d wrappers
 // kernel_map_size_4d wrappers with skip_symmetric_kernel_map
 extern "C" __global__ void kernel_map_size_4d_fnv1a(
     const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_sizes, int* found_in_coord_index,
-    int num_query_coords, int table_capacity, bool skip_symmetric_kernel_map)
+    int num_query_coords, int table_capacity, int num_kernels
+)
 {
     kernel_map_size_4d_templated<FNV1AHash>(
         table_kvs, vector_keys, query_coords, kernel_sizes, found_in_coord_index,
-        num_query_coords, table_capacity, skip_symmetric_kernel_map);
+        num_query_coords, table_capacity, num_kernels);
 }
 
 extern "C" __global__ void kernel_map_size_4d_city(
     const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_sizes, int* found_in_coord_index,
-    int num_query_coords, int table_capacity, bool skip_symmetric_kernel_map)
+    int num_query_coords, int table_capacity, int num_kernels
+)
 {
     kernel_map_size_4d_templated<CityHash>(
         table_kvs, vector_keys, query_coords, kernel_sizes, found_in_coord_index,
-        num_query_coords, table_capacity, skip_symmetric_kernel_map);
+        num_query_coords, table_capacity, num_kernels);
 }
 
 extern "C" __global__ void kernel_map_size_4d_murmur(
     const int* table_kvs, const int* vector_keys, const int* query_coords,
     const int* kernel_sizes, int* found_in_coord_index,
-    int num_query_coords, int table_capacity, bool skip_symmetric_kernel_map)
+    int num_query_coords, int table_capacity, int num_kernels
+)
 {
     kernel_map_size_4d_templated<MurmurHash>(
         table_kvs, vector_keys, query_coords, kernel_sizes, found_in_coord_index,
-        num_query_coords, table_capacity, skip_symmetric_kernel_map);
+        num_query_coords, table_capacity, num_kernels);
 }

@@ -30,9 +30,7 @@ def stride_coords(
 
     if all(s == 1 for s in stride):
         # Assume that the batch index is already sorted
-        return batch_indexed_coords, offsets_from_batch_index(
-            batch_indexed_coords[:, 0], backend="torch"
-        )
+        return batch_indexed_coords, offsets_from_batch_index(batch_indexed_coords[:, 0])
 
     # convert to wp array
     device = batch_indexed_coords.device

@@ -277,28 +277,31 @@ def _kernel_map_from_size(
     ), f"kernel_size ({len(kernel_sizes)}) must match spatial dims ({num_dims - 1})"
 
     # Check if we should skip symmetric kernel parts
-    is_odd_and_cubic = all(k % 2 == 1 for k in kernel_sizes) and len(set(kernel_sizes)) == 1
-    should_skip_symmetric = skip_symmetric_kernel_map and is_odd_and_cubic
+    if skip_symmetric_kernel_map:
+        assert all(
+            k % 2 == 1 for k in kernel_sizes
+        ), f"Kernel sizes must be odd for symmetric skipping. Got {kernel_sizes}"
+        assert (
+            identity_map_index is not None
+        ), "Identity map index must be provided for symmetric skipping."
 
-    if should_skip_symmetric:
-        # Must set the identity map index
-        identity_map_index = torch.prod(torch.tensor(kernel_sizes)) // 2
+    num_offsets = np.prod(kernel_sizes)
 
     # --- Specialized 4D Case ---
     if num_dims == 4:
         num_query_coords = batched_query_coords.shape[0]
-        num_kernels = kernel_sizes[0] * kernel_sizes[1] * kernel_sizes[2]
+        num_offsets = kernel_sizes[0] * kernel_sizes[1] * kernel_sizes[2]
 
-        if should_skip_symmetric:
+        if skip_symmetric_kernel_map:
             # For symmetric kernels, only use the first half (excluding center)
-            num_kernels = num_kernels // 2
+            num_offsets = num_offsets // 2
 
         # Get the appropriate kernel based on symmetric skipping
         kernel = _get_kernel_map_size_4d_kernel(hashtable.hash_method)
 
         # Calculate 2D grid size
         grid_size_x = math.ceil(num_query_coords / threads_per_block_x)
-        grid_size_y = math.ceil(num_kernels / threads_per_block_y)
+        grid_size_y = math.ceil(num_offsets / threads_per_block_y)
 
         # Prepare kernel arguments
         table_kvs_cont = cp.from_dlpack(hashtable._table_kvs.contiguous())
@@ -308,7 +311,7 @@ def _kernel_map_from_size(
 
         # Allocate output tensor
         found_in_coord_index = cp.empty(
-            (num_kernels, num_query_coords),  # Shape K x N
+            (num_offsets, num_query_coords),  # Shape K x N
             dtype=table_kvs_cont.dtype,
         )
 
@@ -324,10 +327,10 @@ def _kernel_map_from_size(
                 found_in_coord_index,
                 num_query_coords,
                 hashtable.capacity,
-                skip_symmetric_kernel_map,
+                num_offsets,
             ),
         )
-        # torch.cuda.synchronize(target_device)
+        torch.cuda.synchronize(target_device)
 
         return _kernel_map_search_to_result(
             torch.from_dlpack(found_in_coord_index),
@@ -347,10 +350,9 @@ def _kernel_map_from_size(
         )
 
         # If skipping symmetric parts, reduce the kernel offsets
-        if should_skip_symmetric:
-            total_kernels = int(np.prod(kernel_sizes))
-            center_idx = total_kernels // 2
-            kernel_offsets_tensor = kernel_offsets_tensor[:center_idx]
+        if skip_symmetric_kernel_map:
+            num_offsets = num_offsets // 2
+            kernel_offsets_tensor = kernel_offsets_tensor[:num_offsets]
 
         # Call the offset-based function
         return _kernel_map_from_offsets(
