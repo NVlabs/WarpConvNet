@@ -138,27 +138,16 @@ class IntSearchCacheKey:
         )
 
     def __repr__(self):
-        return f"IntSearchCacheKey(kernel_size={self.kernel_size}, kernel_dilation={self.kernel_dilation}, transposed={self.transposed}, generative={self.generative}, stride_mode={self.stride_mode}, skip_symmetric_kernel_map={self.skip_symmetric_kernel_map}, in_offsets={self.in_offsets}, out_offsets={self.out_offsets})"
+        return f"IntSearchCacheKey(kernel_size={self.kernel_size}, kernel_dilation={self.kernel_dilation}, transposed={self.transposed}, generative={self.generative}, stride_mode={self.stride_mode}, skip_symmetric_kernel_map={self.skip_symmetric_kernel_map}, num_in={self.in_offsets[-1]}, num_out={self.out_offsets[-1]})"
 
 
-@dataclass
-class IntSearchCache:
-    cache: dict[IntSearchCacheKey, IntSearchResult]
-
-    def __init__(self):
-        self.cache = {}
+class IntSearchCache(dict):
 
     def get(self, key: IntSearchCacheKey) -> Optional[IntSearchResult]:
-        return self.cache.get(key, None)
+        return super().get(key, None)
 
     def put(self, key: IntSearchCacheKey, value: IntSearchResult):
-        self.cache[key] = value
+        super().__setitem__(key, value)
 
     def __repr__(self):
-        return f"{self.__class__.__name__}({len(self.cache)} keys)"
-
-    def __getstate__(self):
-        return None
-
-    def __setstate__(self, state):
-        self.cache = {}
+        return f"{self.__class__.__name__}({len(self)} keys)"

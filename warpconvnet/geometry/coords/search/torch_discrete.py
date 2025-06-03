@@ -280,9 +280,9 @@ def _kernel_map_from_size(
         assert all(
             k % 2 == 1 for k in kernel_sizes
         ), f"Kernel sizes must be odd for symmetric skipping. Got {kernel_sizes}"
+        # Assert that the number of items in the hashtable is the same as the number of query coordinates
 
-    num_offsets = np.prod(kernel_sizes)
-    identity_map_index = num_offsets // 2
+    num_offsets = np.prod(kernel_sizes).item()
 
     # --- Specialized 4D Case ---
     if num_dims == 4:
@@ -291,6 +291,9 @@ def _kernel_map_from_size(
         if skip_symmetric_kernel_map:
             # For symmetric kernels, only use the first half (excluding center)
             num_offsets = num_offsets // 2
+            # Identity map is the center of the kernel
+            if identity_map_index is not None:
+                assert identity_map_index == num_offsets
 
         # Get the appropriate kernel based on symmetric skipping
         kernel = _get_kernel_map_size_4d_kernel(hashtable.hash_method)
@@ -326,7 +329,6 @@ def _kernel_map_from_size(
                 num_offsets,
             ),
         )
-        torch.cuda.synchronize(target_device)
 
         return _kernel_map_search_to_result(
             torch.from_dlpack(found_in_coord_index),
@@ -389,6 +391,9 @@ def generate_kernel_map(
         assert len(batch_indexed_in_coords) == len(
             batch_indexed_out_coords
         ), "You can only skip symmetric kernel map if the input and output coordinates are the same."
+        assert all(
+            k % 2 == 1 for k in kernel_size
+        ), "Kernel size must be odd for symmetric skipping."
 
     # Create a TorchHashTable for the input coordinates
     hashtable = TorchHashTable.from_keys(

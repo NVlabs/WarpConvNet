@@ -263,7 +263,7 @@ def _explicit_gemm_backward_logic(
         grad_in_features = torch.zeros_like(comp_in_feats, device=device)
 
     for i in range(len(kernel_map)):
-        if i == kernel_map.identity_map_index:
+        if i == iden_idx:
             continue
 
         in_map, out_map = kernel_map[i]
@@ -1528,6 +1528,10 @@ def generate_output_coords_and_kernel_map(
             f"Unsupported case. stride_mode: {stride_mode}, generative: {generative}, transposed: {transposed}"
         )
 
+    should_skip_symmetric_kernel_map = skip_symmetric_kernel_map and all(
+        k % 2 == 1 for k in kernel_size
+    )
+
     # if input_sparse_tensor.cache is not None, check the cache first
     kernel_map_cache_key = IntSearchCacheKey(
         kernel_size=kernel_size,
@@ -1535,7 +1539,7 @@ def generate_output_coords_and_kernel_map(
         transposed=transposed,
         generative=generative,
         stride_mode=str(stride_mode),
-        skip_symmetric_kernel_map=skip_symmetric_kernel_map,
+        skip_symmetric_kernel_map=should_skip_symmetric_kernel_map,
         in_offsets=input_sparse_tensor.offsets,
         out_offsets=out_offsets,
     )
@@ -1554,7 +1558,7 @@ def generate_output_coords_and_kernel_map(
                 transposed=False,
                 generative=generative,
                 stride_mode=str(stride_mode),
-                skip_symmetric_kernel_map=skip_symmetric_kernel_map,
+                skip_symmetric_kernel_map=should_skip_symmetric_kernel_map,
                 in_offsets=out_offsets,
                 out_offsets=input_sparse_tensor.offsets,
             )
@@ -1568,7 +1572,7 @@ def generate_output_coords_and_kernel_map(
                     out_maps=kernel_map_non_transposed.in_maps,
                     offsets=kernel_map_non_transposed.offsets,
                 )
-                if skip_symmetric_kernel_map:
+                if should_skip_symmetric_kernel_map:
                     kernel_map = _skip_symmetric_kernel_parts(kernel_map, kernel_size)
                 return batch_indexed_out_coords, out_offsets, kernel_map
 
@@ -1579,6 +1583,7 @@ def generate_output_coords_and_kernel_map(
             in_to_out_stride_ratio,
             kernel_size,
             kernel_dilation,
+            skip_symmetric_kernel_map=should_skip_symmetric_kernel_map,
         )
         kernel_map = IntSearchResult(
             in_maps=kernel_map.out_maps,
@@ -1592,6 +1597,7 @@ def generate_output_coords_and_kernel_map(
             in_to_out_stride_ratio,
             kernel_size,
             kernel_dilation,
+            skip_symmetric_kernel_map=should_skip_symmetric_kernel_map,
         )
     elif stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and not generative:
         # Compute mapping from output to output since it will be reduced
@@ -1601,6 +1607,7 @@ def generate_output_coords_and_kernel_map(
             ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
             kernel_size,
             kernel_dilation,
+            skip_symmetric_kernel_map=should_skip_symmetric_kernel_map,
         )
     elif stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and generative:
         kernel_map = generate_kernel_map(
@@ -1609,17 +1616,12 @@ def generate_output_coords_and_kernel_map(
             ntuple(1, ndim=input_sparse_tensor.num_spatial_dims),
             kernel_size,
             kernel_dilation,
+            skip_symmetric_kernel_map=should_skip_symmetric_kernel_map,
         )
     else:
         raise ValueError(
             f"Unsupported case. stride_mode: {stride_mode}, generative: {generative}, transposed: {transposed}"
         )
-
-    # Apply symmetric kernel skipping if requested
-    if skip_symmetric_kernel_map:
-        kernel_map = _skip_symmetric_kernel_parts(kernel_map, kernel_size)
-
-    # put the kernel map in the cache
 
     if input_sparse_tensor.cache is None:
         input_sparse_tensor._extra_attributes["_cache"] = IntSearchCache()
@@ -1636,10 +1638,10 @@ def _skip_symmetric_kernel_parts(
     For example, for a 3x3x3 kernel, only use the first half of the kernel positions.
     """
     # Check if kernel is odd and potentially symmetric
-    is_odd_and_cubic = all(k % 2 == 1 for k in kernel_size) and len(set(kernel_size)) == 1
+    is_odd = all(k % 2 == 1 for k in kernel_size)
 
-    if not is_odd_and_cubic:
-        # If not odd and cubic, return the original kernel map
+    if not is_odd:
+        # If not odd, return the original kernel map
         return kernel_map
 
     kv = int(np.prod(kernel_size))
@@ -1661,4 +1663,5 @@ def _skip_symmetric_kernel_parts(
         in_maps=in_maps_filtered,
         out_maps=out_maps_filtered,
         offsets=new_offsets,
+        identity_map_index=center_idx,
     )

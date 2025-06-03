@@ -124,7 +124,7 @@ class IntSearchResult:
             yield self[i]
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(len={len(self)})"
+        return f"{self.__class__.__name__}(len={len(self)}, iden_map={self.identity_map_index})"
 
     def numel(self, i: int) -> int:
         """
