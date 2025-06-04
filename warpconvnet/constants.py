@@ -2,26 +2,53 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from typing import List, Optional, Union
 from warpconvnet.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# VALID bools
-VALID_BOOLS = ["true", "false", "1", "0"]
-WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP = False
 
-# For bool, true, false, 0, 1 are all valid values
-env_skip_sym_kernel_map = os.environ.get("WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP")
-if env_skip_sym_kernel_map is not None:
-    env_skip_sym_kernel_map = env_skip_sym_kernel_map.lower()
-    if env_skip_sym_kernel_map not in VALID_BOOLS:
-        raise ValueError(
-            f"WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP must be one of {VALID_BOOLS}, got {env_skip_sym_kernel_map}"
-        )
-    WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP = env_skip_sym_kernel_map in ["true", "1"]
-    logger.info(
-        f"WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP is set to {WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP} by environment variable"
-    )
+def _get_env_bool(env_var_name: str, default_value: bool) -> bool:
+    """Helper function to read and validate boolean environment variables."""
+    valid_bools = ["true", "false", "1", "0"]
+    env_value = os.environ.get(env_var_name)
+
+    if env_value is None:
+        return default_value
+
+    env_value = env_value.lower()
+    if env_value not in valid_bools:
+        raise ValueError(f"{env_var_name} must be one of {valid_bools}, got {env_value}")
+
+    result = env_value in ["true", "1"]
+    logger.info(f"{env_var_name} is set to {result} by environment variable")
+    return result
+
+
+def _get_env_string(env_var_name: str, default_value: str, valid_values: List[str]) -> str:
+    """Helper function to read and validate string environment variables."""
+    env_value = os.environ.get(env_var_name)
+
+    if env_value is None:
+        return default_value
+
+    env_value = env_value.lower()
+    if env_value not in valid_values:
+        raise ValueError(f"{env_var_name} must be one of {valid_values}, got {env_value}")
+
+    logger.info(f"{env_var_name} is set to {env_value} by environment variable")
+    return env_value
+
+
+# Boolean constants
+WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP = _get_env_bool(
+    "WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP", False
+)
+
+# String constants with validation
+VALID_ALGOS = ["explicit_gemm", "implicit_gemm", "auto"]
+WARPCONVNET_FWD_ALGO_MODE = _get_env_string("WARPCONVNET_FWD_ALGO_MODE", "auto", VALID_ALGOS)
+WARPCONVNET_BWD_ALGO_MODE = _get_env_string("WARPCONVNET_BWD_ALGO_MODE", "auto", VALID_ALGOS)
 
 # --- Types ---
 

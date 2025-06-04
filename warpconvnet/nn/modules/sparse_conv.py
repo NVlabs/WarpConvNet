@@ -20,7 +20,11 @@ from warpconvnet.nn.functional.sparse_conv import (
     spatially_sparse_conv,
 )
 from warpconvnet.utils.ntuple import ntuple
-from warpconvnet.constants import WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP
+from warpconvnet.constants import (
+    WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP,
+    WARPCONVNET_FWD_ALGO_MODE,
+    WARPCONVNET_BWD_ALGO_MODE,
+)
 
 
 class SpatiallySparseConv(BaseSpatialModule):
@@ -36,8 +40,8 @@ class SpatiallySparseConv(BaseSpatialModule):
         generative: bool = False,
         kernel_matmul_batch_size: int = 2,
         num_spatial_dims: Optional[int] = 3,
-        fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.AUTO,
-        bwd_algo: SPARSE_CONV_BWD_ALGO_MODE = SPARSE_CONV_BWD_ALGO_MODE.AUTO,
+        fwd_algo: Optional[Union[SPARSE_CONV_FWD_ALGO_MODE, str]] = None,
+        bwd_algo: Optional[Union[SPARSE_CONV_BWD_ALGO_MODE, str]] = None,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         out_code_backend: Literal["hashmap", "unique", "ravel", "morton"] = "hashmap",
         compute_dtype: Optional[torch.dtype] = None,
@@ -63,21 +67,33 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.generative = generative
         self.kernel_matmul_batch_size = kernel_matmul_batch_size
 
-        self.fwd_algo = fwd_algo
-        self.bwd_algo = bwd_algo
+        # Use environment variable values if not explicitly provided
+        if fwd_algo is None:
+            fwd_algo = WARPCONVNET_FWD_ALGO_MODE
+        if bwd_algo is None:
+            bwd_algo = WARPCONVNET_BWD_ALGO_MODE
+
+        # If string, update to enum
+        self.fwd_algo = (
+            SPARSE_CONV_FWD_ALGO_MODE(fwd_algo) if isinstance(fwd_algo, str) else fwd_algo
+        )
+        self.bwd_algo = (
+            SPARSE_CONV_BWD_ALGO_MODE(bwd_algo) if isinstance(bwd_algo, str) else bwd_algo
+        )
         self.stride_mode = stride_mode
         self.out_code_backend = out_code_backend
         self.compute_dtype = compute_dtype
         self.implicit_matmul_fwd_block_size = implicit_matmul_fwd_block_size
         self.implicit_matmul_bwd_block_size = implicit_matmul_bwd_block_size
-
-        is_odd_kernel = all(k % 2 == 1 for k in _kernel_size)
+        # Skip symmetric kernel map
         if skip_symmetric_kernel_map is None:
-            self.skip_symmetric_kernel_map = (
-                WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP and is_odd_kernel
-            )
-        else:
-            self.skip_symmetric_kernel_map = skip_symmetric_kernel_map and is_odd_kernel
+            skip_symmetric_kernel_map = WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP
+        is_odd_kernel = all(k % 2 == 1 for k in _kernel_size)
+        no_stride = all(s == 1 for s in _stride)
+        is_same_in_out_coords = no_stride and not generative
+        self.skip_symmetric_kernel_map = (
+            skip_symmetric_kernel_map and is_same_in_out_coords and is_odd_kernel
+        )
 
         self.bias: Optional[nn.Parameter] = None
 
@@ -125,12 +141,22 @@ class SpatiallySparseConv(BaseSpatialModule):
         with torch.no_grad():
             return tensor.uniform_(-bound, bound)
 
+    @torch.no_grad()
     def reset_parameters(self):
         self._custom_kaiming_uniform_(
             self.weight,
             a=math.sqrt(5),
             mode="fan_out" if self.transposed else "fan_in",
         )
+
+        if self.skip_symmetric_kernel_map:
+            identity_map_idx = np.prod(self.kernel_size).item() // 2
+            # Add the symmetric kernel parts to the first half of the weight
+            for i in range(identity_map_idx):
+                self.weight[i] = self.weight[i] + self.weight[-1 - i]
+
+            # Remove the symmetric kernel parts from the second half of the weight
+            self.weight[identity_map_idx + 1 :] = 0
 
         if self.bias is not None:
             fan_in, _ = self._calculate_fan_in_and_fan_out()
@@ -176,8 +202,8 @@ class SparseConv2d(SpatiallySparseConv):
         transposed=False,
         generative: bool = False,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
-        fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.AUTO,
-        bwd_algo: SPARSE_CONV_BWD_ALGO_MODE = SPARSE_CONV_BWD_ALGO_MODE.AUTO,
+        fwd_algo: Optional[Union[SPARSE_CONV_FWD_ALGO_MODE, str]] = None,
+        bwd_algo: Optional[Union[SPARSE_CONV_BWD_ALGO_MODE, str]] = None,
         kernel_matmul_batch_size: int = 2,
         out_code_backend: Literal["hashmap", "unique", "ravel", "morton"] = "hashmap",
         compute_dtype: Optional[torch.dtype] = None,
@@ -219,8 +245,8 @@ class SparseConv3d(SpatiallySparseConv):
         transposed=False,
         generative: bool = False,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
-        fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.AUTO,
-        bwd_algo: SPARSE_CONV_BWD_ALGO_MODE = SPARSE_CONV_BWD_ALGO_MODE.AUTO,
+        fwd_algo: Optional[Union[SPARSE_CONV_FWD_ALGO_MODE, str]] = None,
+        bwd_algo: Optional[Union[SPARSE_CONV_BWD_ALGO_MODE, str]] = None,
         kernel_matmul_batch_size: int = 2,
         out_code_backend: Literal["hashmap", "unique", "ravel", "morton"] = "hashmap",
         compute_dtype: Optional[torch.dtype] = None,
