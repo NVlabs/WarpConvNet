@@ -155,29 +155,149 @@ def test_factorized_grid_shapes(setup_device):
         )
 
 
-def test_points_to_factor_grid(setup_point_geometry):
-    """Test points_to_factor_grid."""
+@pytest.mark.parametrize("search_type", ["radius", "knn", "voxel"])
+@pytest.mark.parametrize("reduction", ["mean", "max", "sum"])
+def test_points_to_factor_grid(setup_point_geometry, search_type, reduction):
+    """Test points_to_factor_grid with different search types and reductions."""
     points, Ns = setup_point_geometry
-    grid_shapes = [(2, 32, 64), (16, 2, 64), (16, 32, 2)]
+    grid_shapes = [(4, 8, 16), (8, 4, 16), (8, 16, 4)]
     memory_formats = [
         GridMemoryFormat.b_zc_x_y,
         GridMemoryFormat.b_xc_y_z,
         GridMemoryFormat.b_yc_x_z,
     ]
 
+    # Test with explicit bounds
+    min_coords = points.coordinate_tensor.min(dim=0)[0]
+    max_coords = points.coordinate_tensor.max(dim=0)[0]
+    padding = (max_coords - min_coords) * 0.1
+    bounds = (min_coords - padding, max_coords + padding)
+
     factorized = points_to_factor_grid(
         points,
         grid_shapes,
         memory_formats,
+        bounds=bounds,
+        search_radius=0.2,
+        k=8,
+        search_type=search_type,
+        reduction=reduction,
+    )
+
+    # Basic structure checks
+    assert isinstance(factorized, FactorGrid)
+    assert len(factorized) == 3
+    assert factorized.batch_size == points.batch_size
+    assert factorized.num_channels == points.num_channels
+    assert factorized.device == points.device
+
+    # Check each grid
+    for i, fmt in enumerate(memory_formats):
+        grid = factorized[i]
+        assert grid.memory_format == fmt
+        assert grid.grid_shape == grid_shapes[i]
+        assert grid.num_channels == points.num_channels
+        assert grid.batch_size == points.batch_size
+
+        # Check that features are not all zeros (should have some values from points)
+        features = grid.grid_features.batched_tensor
+        assert features.numel() > 0
+        # For most reduction methods, we should have some non-zero values
+        if reduction in ["mean", "sum"] and search_type != "voxel":
+            # Note: voxel search might result in all zeros if points don't align well
+            assert (
+                features.abs().sum() > 0
+            ), f"All features are zero for {fmt} with {search_type}-{reduction}"
+
+
+def test_points_to_factor_grid_memory_format_strings(setup_point_geometry):
+    """Test points_to_factor_grid with string memory format specifications."""
+    points, Ns = setup_point_geometry
+    grid_shapes = [(4, 8, 16), (8, 4, 16)]
+    memory_formats_str = ["b_zc_x_y", "b_xc_y_z"]  # String versions
+    memory_formats_enum = [GridMemoryFormat.b_zc_x_y, GridMemoryFormat.b_xc_y_z]  # Enum versions
+
+    factorized_str = points_to_factor_grid(
+        points,
+        grid_shapes,
+        memory_formats_str,
         search_radius=0.1,
         search_type="radius",
         reduction="mean",
     )
-    assert isinstance(factorized, FactorGrid)
-    assert len(factorized) == 3
-    for i, fmt in enumerate(memory_formats):
-        assert factorized[i].memory_format == fmt
-        assert factorized[i].grid_shape == grid_shapes[i]
+
+    factorized_enum = points_to_factor_grid(
+        points,
+        grid_shapes,
+        memory_formats_enum,
+        search_radius=0.1,
+        search_type="radius",
+        reduction="mean",
+    )
+
+    # Should produce identical results
+    assert len(factorized_str) == len(factorized_enum)
+    for i in range(len(factorized_str)):
+        assert factorized_str[i].memory_format == factorized_enum[i].memory_format
+        assert factorized_str[i].grid_shape == factorized_enum[i].grid_shape
+
+
+def test_points_to_factor_grid_bounds_handling(setup_point_geometry):
+    """Test points_to_factor_grid with different bounds settings."""
+    points, Ns = setup_point_geometry
+    grid_shapes = [(4, 8, 16)]
+    memory_formats = [GridMemoryFormat.b_zc_x_y]
+
+    # Test with None bounds (should auto-compute)
+    factorized_auto = points_to_factor_grid(
+        points,
+        grid_shapes,
+        memory_formats,
+        bounds=None,
+        search_radius=0.1,
+        search_type="radius",
+        reduction="mean",
+    )
+
+    # Test with explicit bounds
+    min_coords = torch.tensor([0.0, 0.0, 0.0], device=points.device)
+    max_coords = torch.tensor([1.0, 1.0, 1.0], device=points.device)
+    bounds = (min_coords, max_coords)
+
+    factorized_explicit = points_to_factor_grid(
+        points,
+        grid_shapes,
+        memory_formats,
+        bounds=bounds,
+        search_radius=0.1,
+        search_type="radius",
+        reduction="mean",
+    )
+
+    # Both should work and produce valid FactorGrid objects
+    assert isinstance(factorized_auto, FactorGrid)
+    assert isinstance(factorized_explicit, FactorGrid)
+    assert factorized_auto[0].grid_shape == factorized_explicit[0].grid_shape
+    assert factorized_auto[0].memory_format == factorized_explicit[0].memory_format
+
+
+def test_points_to_factor_grid_error_cases(setup_point_geometry):
+    """Test points_to_factor_grid error handling."""
+    points, Ns = setup_point_geometry
+
+    # Test mismatched lengths
+    grid_shapes = [(4, 8, 16), (8, 4, 16)]
+    memory_formats = [GridMemoryFormat.b_zc_x_y]  # Different length
+
+    with pytest.raises(AssertionError, match="must have the same length"):
+        points_to_factor_grid(
+            points,
+            grid_shapes,
+            memory_formats,
+            search_radius=0.1,
+            search_type="radius",
+            reduction="mean",
+        )
 
 
 def test_strided_vertices(setup_device):
