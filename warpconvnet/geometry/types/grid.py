@@ -243,8 +243,7 @@ class Grid(Geometry):
     ) -> "Grid":
         """Create a new instance with replaced coordinates and/or features."""
         # Convert the batched_features to a GridFeatures if it is a tensor
-        if isinstance(batched_features, Tensor):
-            assert batched_features.ndim == 5, "Batched features must be a 5D tensor"
+        if isinstance(batched_features, Tensor) and batched_features.ndim == 5:
             # Based on the memory format, we have to check the shape of the tensor
             if self.memory_format == GridMemoryFormat.b_x_y_z_c:
                 in_H, in_W, in_D, in_C = batched_features.shape[1:5]
@@ -274,4 +273,44 @@ class Grid(Geometry):
                 grid_shape=self.grid_shape,
                 num_channels=in_C,
             )
+        elif isinstance(batched_features, Tensor) and batched_features.ndim == 4:
+            # This is the compressed format
+            assert self.memory_format in [
+                GridMemoryFormat.b_zc_x_y,
+                GridMemoryFormat.b_xc_y_z,
+                GridMemoryFormat.b_yc_x_z,
+            ], f"Unsupported memory format: {self.memory_format} for feature tensor of shape {batched_features.shape}"
+            # Assert that the grid shape is consistent with the feature tensor shape
+            # Only the channel dim can change when using .replace()
+            # e.g. in_H, in_W, in_D == self.grid_shape[0], self.grid_shape[1], self.grid_shape[2]
+            compressed_dim = batched_features.shape[1]  # this is the compressed_dim * channels
+            new_channel_dim = None
+            if self.memory_format == GridMemoryFormat.b_zc_x_y:
+                assert batched_features.shape[2] == self.grid_shape[0]
+                assert batched_features.shape[3] == self.grid_shape[1]
+                new_channel_dim = compressed_dim // self.grid_shape[2]
+            elif self.memory_format == GridMemoryFormat.b_xc_y_z:
+                assert batched_features.shape[2] == self.grid_shape[1]
+                assert batched_features.shape[3] == self.grid_shape[2]
+                new_channel_dim = compressed_dim // self.grid_shape[0]
+            elif self.memory_format == GridMemoryFormat.b_yc_x_z:
+                assert batched_features.shape[2] == self.grid_shape[0]
+                assert batched_features.shape[3] == self.grid_shape[2]
+                new_channel_dim = compressed_dim // self.grid_shape[1]
+            else:
+                raise ValueError(f"Unsupported memory format: {self.memory_format}")
+
+            batched_features = GridFeatures(
+                batched_tensor=batched_features,
+                offsets=self.grid_features.offsets,
+                memory_format=self.memory_format,
+                grid_shape=self.grid_shape,
+                num_channels=new_channel_dim,
+            )
+        elif isinstance(batched_features, GridFeatures):
+            # no action needed
+            pass
+        else:
+            raise ValueError(f"Unsupported feature tensor shape: {batched_features.shape}")
+
         return super().replace(batched_coordinates, batched_features, **kwargs)
