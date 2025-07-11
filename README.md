@@ -32,7 +32,10 @@ pip install flash-attn --no-build-isolation
 pip install warpconvnet
 
 # Or install from source
-pip install git+https://github.com/NVlabs/warpconvnet.git
+git clone https://github.com/NVlabs/WarpConvNet.git
+cd WarpConvNet
+git submodule update --init 3rdparty/cutlass
+pip install .
 ```
 
 Available optional dependency groups:
@@ -46,33 +49,38 @@ Available optional dependency groups:
 
 ```
 ./
-├── docker/             # Docker build files
+├── 3rdparty/            # Third-party dependencies
+│   └── cutlass/         # CUDA kernels
+├── docker/              # Docker build files
 │   ├── build.sh
 │   └── Dockerfile
-├── examples/           # Example applications
-│   ├── mnist.py
-│   └── modelnet.py
-├── scripts/            # Development utilities
+├── docs/                # Documentation sources
+├── examples/            # Example applications
+├── scripts/             # Development utilities
 │   ├── build_docs.py
 │   ├── dir_struct.sh
 │   └── serve_docs.py
-├── tests/              # Test suite
-│   ├── base/           # Core functionality tests
-│   ├── coords/         # Coordinate operation tests
-│   ├── features/       # Feature processing tests
-│   ├── nn/             # Neural network tests
-│   └── types/          # Geometry type tests
-└── warpconvnet/        # Main package
-    ├── geometry/       # Geometric operations
-    │   ├── base/       # Core definitions
-    │   ├── coords/     # Coordinate operations
-    │   ├── features/   # Feature operations
-    │   └── types/      # Geometry types
-    ├── nn/             # Neural networks
-    │   ├── functional/ # Neural network functions
-    │   └── modules/    # Neural network modules
-    ├── ops/            # Basic operations
-    └── utils/          # Utility functions
+├── tests/               # Test suite
+│   ├── base/            # Core functionality tests
+│   ├── coords/          # Coordinate operation tests
+│   ├── features/        # Feature processing tests
+│   ├── nn/              # Neural network tests
+│   ├── csrc/            # C++/CUDA test utilities
+│   └── types/           # Geometry type tests
+└── warpconvnet/         # Main package
+    ├── csrc/            # C++/CUDA extensions
+    ├── dataset/         # Dataset utilities
+    ├── geometry/        # Geometric operations
+    │   ├── base/        # Core definitions
+    │   ├── coords/      # Coordinate operations
+    │   ├── features/    # Feature operations
+    │   └── types/       # Geometry types
+    ├── models/          # Sample models
+    ├── nn/              # Neural networks
+    │   ├── functional/  # Neural network functions
+    │   └── modules/     # Neural network modules
+    ├── ops/             # Basic operations
+    └── utils/           # Utility functions
 ```
 
 For complete directory structure, run `bash scripts/dir_struct.sh`.
@@ -99,7 +107,7 @@ Build and run with GPU support:
 
 ```bash
 # Build container
-cd warpconvnet/docker
+cd docker
 docker build -t warpconvnet .
 
 # Run container
