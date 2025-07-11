@@ -3,6 +3,9 @@
 
 from typing import List, Literal, Optional, Tuple, Union
 
+import torch
+from torch import Tensor
+
 
 def points_to_factor_grid(
     points: "Points",
