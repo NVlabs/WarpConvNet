@@ -13,11 +13,6 @@ WarpConvNet is a high-performance library for 3D deep learning, built on NVIDIA'
 
 Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies.
 
-WarpConvNet previously relied on the `warp_lang` toolkit for many GPU kernels,
-but these kernels are now included in the wheel. You no longer need to install
-`warp_lang` manually; simply install `warpconvnet` and its optional CUDA
-dependencies as shown below.
-
 ```bash
 # Install PyTorch first (specify your CUDA version)
 export CUDA=cu128  # For CUDA 12.8
@@ -37,7 +32,10 @@ pip install flash-attn --no-build-isolation
 pip install warpconvnet
 
 # Or install from source
-pip install git+https://github.com/NVlabs/warpconvnet.git
+git clone https://github.com/NVlabs/WarpConvNet.git
+cd WarpConvNet
+git submodule update --init 3rdparty/cutlass
+pip install .
 ```
 
 Available optional dependency groups:
@@ -109,7 +107,7 @@ Build and run with GPU support:
 
 ```bash
 # Build container
-cd warpconvnet/docker
+cd docker
 docker build -t warpconvnet .
 
 # Run container
