@@ -26,6 +26,9 @@ Documentation = "https://nvlabs.github.io/WarpConvNet"
 
 [project.optional-dependencies]
 flash-attn = ["flash-attn"]  # use `pip install flash-attn --no-build-isolation` when failing to install
+torch-scatter = ["torch-scatter"]  # follow the instruction on https://github.com/rusty1s/pytorch_scatter
+cuda11x = ["cupy-cuda11x"]  # Use if using CUDA version 11.x
+cuda12x = ["cupy-cuda12x"]  # Use if using CUDA version 12.x
 
 dev = [
     "ipdb",
@@ -50,11 +53,6 @@ models = [
     "omegaconf",
     "lightning",
     "torchmetrics",
-]
-
-torch270-cuda128 = [
-    "torch-scatter @ https://data.pyg.org/whl/torch-2.7.0%2Bcu128/torch_scatter-2.1.2%2Bpt27cu128-cp311-cp311-linux_x86_64.whl",
-    "cupy-cuda12x",
 ]
 
 all = [

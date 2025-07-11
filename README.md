@@ -11,27 +11,20 @@ WarpConvNet is a high-performance library for 3D deep learning, built on NVIDIA'
 
 ## Installation
 
-Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies.
+Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies. When using `uv`, prepend with `uv pip install ...`.
 
 ```bash
 # Install PyTorch first (specify your CUDA version)
 export CUDA=cu128  # For CUDA 12.8
 pip install torch torchvision --index-url https://download.pytorch.org/whl/${CUDA}
 
-# Install WarpConvNet with CUDA-specific dependencies (choose one):
-# For CUDA 12.8:
-pip install warpconvnet[torch270-cuda128]
-
-# Install Flash Attention (requires special installation)
-pip install flash-attn --no-build-isolation
-
-# Alternative: Install dependencies separately
+# Install core dependencies
+pip install build ninja
 pip install cupy-cuda12x  # use cupy-cuda11x for CUDA 11.x
 pip install git+https://github.com/rusty1s/pytorch_scatter.git
 pip install flash-attn --no-build-isolation
-pip install warpconvnet
 
-# Or install from source
+# Install warpconvnet from source
 git clone https://github.com/NVlabs/WarpConvNet.git
 cd WarpConvNet
 git submodule update --init 3rdparty/cutlass
@@ -43,7 +36,6 @@ Available optional dependency groups:
 - `warpconvnet[dev]`: Development tools (pytest, coverage, pre-commit)
 - `warpconvnet[docs]`: Documentation building tools
 - `warpconvnet[models]`: Additional dependencies for model training (wandb, hydra, etc.)
-- `warpconvnet[torch270-cuda128]`: torch-scatter and cupy for torch 2.7.0 and CUDA 12.8
 
 ## Directory Structure
 
@@ -75,7 +67,7 @@ Available optional dependency groups:
     │   ├── coords/      # Coordinate operations
     │   ├── features/    # Feature operations
     │   └── types/       # Geometry types
-    ├── models/          # Sample models
+    ├── models/          # Sample models (WIP)
     ├── nn/              # Neural networks
     │   ├── functional/  # Neural network functions
     │   └── modules/     # Neural network modules
