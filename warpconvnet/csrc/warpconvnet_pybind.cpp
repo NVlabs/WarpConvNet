@@ -11,8 +11,26 @@
 #include "driver_types.h"
 #include "include/gemm_error_codes.h"
 #include "include/gemm_mma_tiles.h"
+#include "include/helper.h"
 
 namespace py = pybind11;
+
+// Forward declaration for implicit FMA function (implemented in .cu file)
+namespace warpconvnet {
+namespace implicit_fma {
+template <typename ElementA, typename ElementB, typename ElementC>
+int run_implicit_fma_templated(const void *tensor_a,
+                               const void *tensor_b,
+                               void *tensor_c,
+                               const int *in_indices,
+                               const int *out_indices,
+                               int num_ops,
+                               int C,
+                               int N_A,
+                               int N_C,
+                               const std::string &kernel_type);
+}  // namespace implicit_fma
+}  // namespace warpconvnet
 
 // Forward declaration for unified CUB sort function
 py::object cub_segmented_sort(const torch::Tensor &keys,
@@ -27,6 +45,14 @@ torch::Tensor points_to_closest_voxel_mapping(torch::Tensor points,
                                               torch::Tensor grid_shape,
                                               torch::Tensor bounds_min,
                                               torch::Tensor bounds_max);
+
+// Forward declarations for implicit FMA functions
+void implicit_fma_cuda(torch::Tensor a,
+                       torch::Tensor b,
+                       torch::Tensor c,
+                       torch::Tensor in_indices,
+                       torch::Tensor out_indices,
+                       const std::string &kernel_type = "basic");
 
 // Type mapping from PyTorch scalar types to CUTLASS types
 template <torch::ScalarType T>
@@ -502,6 +528,98 @@ int cutlass_gemm_trAB_gather(torch::Tensor tensor_a,
   return status;
 }
 
+// Implementation of implicit FMA CUDA function
+void implicit_fma_cuda(torch::Tensor a,
+                       torch::Tensor b,
+                       torch::Tensor c,
+                       torch::Tensor in_indices,
+                       torch::Tensor out_indices,
+                       const std::string &kernel_type) {
+  // Validate input tensors
+  TORCH_CHECK(a.dim() == 2, "Matrix A must be 2D");
+  TORCH_CHECK(b.dim() == 1, "Vector B must be 1D");
+  TORCH_CHECK(c.dim() == 2, "Matrix C must be 2D");
+  TORCH_CHECK(in_indices.dim() == 1, "Input indices must be 1D");
+  TORCH_CHECK(out_indices.dim() == 1, "Output indices must be 1D");
+
+  TORCH_CHECK(in_indices.scalar_type() == torch::kInt32, "Indices must be int32");
+  TORCH_CHECK(out_indices.scalar_type() == torch::kInt32, "Indices must be int32");
+
+  TORCH_CHECK(a.scalar_type() == b.scalar_type(), "A and B must have the same data type");
+  TORCH_CHECK(a.scalar_type() == c.scalar_type(), "A and C must have the same data type");
+
+  // Validate dimensions
+  int N_A = a.size(0);
+  int C_dim = a.size(1);
+  int N_C = c.size(0);
+  int num_ops = in_indices.size(0);
+
+  TORCH_CHECK(b.size(0) == C_dim, "Vector B size must match number of columns in A");
+  TORCH_CHECK(c.size(1) == C_dim, "Matrix C must have same number of columns as A");
+  TORCH_CHECK(out_indices.size(0) == num_ops, "Index arrays must have same length");
+
+  // Ensure tensors are on CUDA and contiguous
+  TORCH_CHECK(a.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(b.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(c.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(in_indices.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(out_indices.is_cuda(), "All tensors must be on CUDA");
+
+  a = a.contiguous();
+  b = b.contiguous();
+  c = c.contiguous();
+  in_indices = in_indices.contiguous();
+  out_indices = out_indices.contiguous();
+
+  // Dispatch based on data type using template function
+  int status = 0;
+  if (a.scalar_type() == torch::kFloat32) {
+    status = warpconvnet::implicit_fma::run_implicit_fma_templated<float, float, float>(
+        a.data_ptr(),
+        b.data_ptr(),
+        c.data_ptr(),
+        in_indices.data_ptr<int>(),
+        out_indices.data_ptr<int>(),
+        num_ops,
+        C_dim,
+        N_A,
+        N_C,
+        kernel_type);
+  } else if (a.scalar_type() == torch::kFloat16) {
+    status = warpconvnet::implicit_fma::
+        run_implicit_fma_templated<cutlass::half_t, cutlass::half_t, cutlass::half_t>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            in_indices.data_ptr<int>(),
+            out_indices.data_ptr<int>(),
+            num_ops,
+            C_dim,
+            N_A,
+            N_C,
+            kernel_type);
+  } else if (a.scalar_type() == torch::kFloat64) {
+    status = warpconvnet::implicit_fma::run_implicit_fma_templated<double, double, double>(
+        a.data_ptr(),
+        b.data_ptr(),
+        c.data_ptr(),
+        in_indices.data_ptr<int>(),
+        out_indices.data_ptr<int>(),
+        num_ops,
+        C_dim,
+        N_A,
+        N_C,
+        kernel_type);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for implicit FMA");
+  }
+
+  // Check status (following the pattern from CUTLASS GEMM)
+  if (status != 0) {
+    TORCH_CHECK(false, "Implicit FMA kernel failed with status: " + std::to_string(status));
+  }
+}
+
 PYBIND11_MODULE(_C, m) {
   m.doc() = "CUDA kernels exposed through PyBind11";
 
@@ -563,6 +681,25 @@ PYBIND11_MODULE(_C, m) {
       },
       py::arg("status"),
       "Return the human-readable string associated with a GemmStatus value");
+
+  // Implicit FMA functions
+  gemm.def("implicit_fma",
+           &implicit_fma_cuda,
+           "Implicit FMA kernel: c[out_index] += a[in_index] * b\n"
+           "Performs gather-scatter FMA operation with broadcast multiplication\n"
+           "Args:\n"
+           "  a: Input matrix A (N_A x C)\n"
+           "  b: Input vector B (C,)\n"
+           "  c: Output matrix C (N_C x C), modified in-place\n"
+           "  in_indices: Input indices for gathering from A (num_ops,)\n"
+           "  out_indices: Output indices for scattering to C (num_ops,)\n"
+           "  kernel_type: 'basic', 'optimized', or 'rowwise'",
+           py::arg("a"),
+           py::arg("b"),
+           py::arg("c"),
+           py::arg("in_indices"),
+           py::arg("out_indices"),
+           py::arg("kernel_type") = "basic");
 
   // Create submodule 'utils' for utility functions
   py::module_ utils = m.def_submodule("utils", "Utility functions including sorting operations");
