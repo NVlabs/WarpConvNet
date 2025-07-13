@@ -39,6 +39,12 @@ class BenchmarkCache:
     Manages saving and loading of benchmark results to/from disk.
     Only rank 0 process saves to avoid conflicts in distributed training.
     Uses a background thread for periodic saving to avoid blocking the main computation.
+
+    Version 2.0 supports multiple benchmark result types:
+    - sparse_conv_forward_results
+    - sparse_conv_backward_results
+    - sparse_conv_depthwise_forward_results
+    - sparse_conv_depthwise_backward_results
     """
 
     def __init__(self, cache_dir: str = "~/.cache/warpconvnet"):
@@ -105,14 +111,26 @@ class BenchmarkCache:
                 _BENCHMARK_BACKWARD_RESULTS,
             )
 
+            # Try to import depthwise results, but don't fail if not available
+            try:
+                from warpconvnet.nn.functional.sparse_conv_depth import (
+                    _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
+                    _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
+                )
+            except ImportError:
+                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS = {}
+                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS = {}
+
             current_time = time.time()
 
-            # Prepare cache data
+            # Prepare cache data in version 2.0 format
             cache_data = {
-                "forward_results": _BENCHMARK_FORWARD_RESULTS,
-                "backward_results": _BENCHMARK_BACKWARD_RESULTS,
+                "sparse_conv_forward_results": _BENCHMARK_FORWARD_RESULTS,
+                "sparse_conv_backward_results": _BENCHMARK_BACKWARD_RESULTS,
+                "sparse_conv_depthwise_forward_results": _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
+                "sparse_conv_depthwise_backward_results": _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
                 "timestamp": current_time,
-                "version": "1.0",  # For future compatibility
+                "version": "2.0",  # For future compatibility
             }
 
             # Atomic write: write to temp file then rename
@@ -128,52 +146,97 @@ class BenchmarkCache:
 
             logger.debug(
                 f"Background saved benchmark cache: {len(_BENCHMARK_FORWARD_RESULTS)} forward, "
-                f"{len(_BENCHMARK_BACKWARD_RESULTS)} backward configurations"
+                f"{len(_BENCHMARK_BACKWARD_RESULTS)} backward, "
+                f"{len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward, "
+                f"{len(_BENCHMARK_DEPTHWISE_BACKWARD_RESULTS)} depthwise backward configurations"
             )
 
         except Exception as e:
             logger.warning(f"Failed to save benchmark cache in background: {e}")
 
-    def load_cache(self) -> Tuple[Dict, Dict]:
+    def load_cache(self) -> Dict[str, Dict]:
         """
         Load benchmark results from cache file.
-        Returns (forward_results, backward_results) dictionaries.
+        Returns a dictionary with all cached benchmark results.
         """
-        forward_results = {}
-        backward_results = {}
+        # Default empty results for all supported cache types
+        default_results = {
+            "sparse_conv_forward_results": {},
+            "sparse_conv_backward_results": {},
+            "sparse_conv_depthwise_forward_results": {},
+            "sparse_conv_depthwise_backward_results": {},
+        }
 
         if not self.cache_file.exists():
             logger.debug(f"No benchmark cache file found at {self.cache_file}")
-            return forward_results, backward_results
+            return default_results
 
         try:
             with open(self.cache_file, "rb") as f:
                 cache_data = pickle.load(f)
 
-            # Validate cache structure
-            if isinstance(cache_data, dict):
-                forward_results = cache_data.get("forward_results", {})
-                backward_results = cache_data.get("backward_results", {})
+            if not isinstance(cache_data, dict):
+                logger.warning("Invalid cache file format, starting with empty cache")
+                return default_results
+
+            # Determine cache version and handle accordingly
+            version = cache_data.get("version", "1.0")
+
+            if version == "2.0":
+                # Version 2.0 format - direct mapping
+                result = {
+                    "sparse_conv_forward_results": cache_data.get(
+                        "sparse_conv_forward_results", {}
+                    ),
+                    "sparse_conv_backward_results": cache_data.get(
+                        "sparse_conv_backward_results", {}
+                    ),
+                    "sparse_conv_depthwise_forward_results": cache_data.get(
+                        "sparse_conv_depthwise_forward_results", {}
+                    ),
+                    "sparse_conv_depthwise_backward_results": cache_data.get(
+                        "sparse_conv_depthwise_backward_results", {}
+                    ),
+                }
+
+                total_configs = sum(len(results) for results in result.values())
+                logger.info(f"Loaded benchmark cache v2.0: {total_configs} total configurations")
+
+            else:
+                # Version 1.0 format - legacy compatibility
+                result = {
+                    "sparse_conv_forward_results": cache_data.get("forward_results", {}),
+                    "sparse_conv_backward_results": cache_data.get("backward_results", {}),
+                    "sparse_conv_depthwise_forward_results": cache_data.get(
+                        "depthwise_forward_results", {}
+                    ),
+                    "sparse_conv_depthwise_backward_results": cache_data.get(
+                        "depthwise_backward_results", {}
+                    ),
+                }
 
                 logger.info(
-                    f"Loaded benchmark cache: {len(forward_results)} forward, "
-                    f"{len(backward_results)} backward configurations"
+                    f"Loaded benchmark cache v1.0: {len(result['sparse_conv_forward_results'])} forward, "
+                    f"{len(result['sparse_conv_backward_results'])} backward configurations"
                 )
-            else:
-                logger.warning("Invalid cache file format, starting with empty cache")
+
+            return result
 
         except Exception as e:
             logger.warning(f"Failed to load benchmark cache: {e}. Starting with empty cache.")
+            return default_results
 
-        return forward_results, backward_results
-
-    def save_cache(
-        self, forward_results: Dict, backward_results: Dict, force: bool = False
-    ) -> None:
+    def save_cache(self, cache_results: Dict[str, Dict], force: bool = False) -> None:
         """
-        Save benchmark results to cache file.
-        This method is deprecated in favor of background saving.
-        Only used for forced saves (e.g., on exit).
+        Save benchmark results to cache file in version 2.0 format.
+
+        Args:
+            cache_results: Dictionary mapping cache types to their results. Current supported types are:
+                - sparse_conv_forward_results
+                - sparse_conv_backward_results
+                - sparse_conv_depthwise_forward_results
+                - sparse_conv_depthwise_backward_results
+            force: If True, save immediately. If False, schedule for background save.
         """
         if not _is_rank_zero():
             return
@@ -187,12 +250,22 @@ class BenchmarkCache:
             current_time = time.time()
 
             try:
-                # Prepare cache data
+                # Prepare cache data in v2.0 format
                 cache_data = {
-                    "forward_results": forward_results,
-                    "backward_results": backward_results,
+                    "sparse_conv_forward_results": cache_results.get(
+                        "sparse_conv_forward_results", {}
+                    ),
+                    "sparse_conv_backward_results": cache_results.get(
+                        "sparse_conv_backward_results", {}
+                    ),
+                    "sparse_conv_depthwise_forward_results": cache_results.get(
+                        "sparse_conv_depthwise_forward_results", {}
+                    ),
+                    "sparse_conv_depthwise_backward_results": cache_results.get(
+                        "sparse_conv_depthwise_backward_results", {}
+                    ),
                     "timestamp": current_time,
-                    "version": "1.0",  # For future compatibility
+                    "version": "2.0",
                 }
 
                 # Atomic write: write to temp file then rename
@@ -206,13 +279,13 @@ class BenchmarkCache:
                 self.last_save_time = current_time
                 self.pending_changes = False
 
+                total_configs = sum(len(results) for results in cache_results.values())
                 logger.debug(
-                    f"Force saved benchmark cache: {len(forward_results)} forward, "
-                    f"{len(backward_results)} backward configurations"
+                    f"Force saved benchmark cache v2.0: {total_configs} total configurations"
                 )
 
             except Exception as e:
-                logger.warning(f"Failed to force save benchmark cache: {e}")
+                logger.warning(f"Failed to force save benchmark cache v2.0: {e}")
 
     def mark_dirty(self) -> None:
         """Mark that cache has pending changes that should be saved."""
@@ -244,7 +317,20 @@ class BenchmarkCache:
                 _BENCHMARK_BACKWARD_RESULTS,
             )
 
-            self.save_cache(_BENCHMARK_FORWARD_RESULTS, _BENCHMARK_BACKWARD_RESULTS, force=True)
+            from warpconvnet.nn.functional.sparse_conv_depth import (
+                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
+                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
+            )
+
+            self.save_cache(
+                {
+                    "sparse_conv_forward_results": _BENCHMARK_FORWARD_RESULTS,
+                    "sparse_conv_backward_results": _BENCHMARK_BACKWARD_RESULTS,
+                    "sparse_conv_depthwise_forward_results": _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
+                    "sparse_conv_depthwise_backward_results": _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
+                },
+                force=True,
+            )
 
 
 # Global cache instance
@@ -259,13 +345,31 @@ def get_benchmark_cache() -> BenchmarkCache:
     return _benchmark_cache
 
 
-def load_benchmark_cache() -> Tuple[Dict, Dict]:
-    """Load benchmark cache and return (forward_results, backward_results)."""
+def load_sparse_conv_benchmark_cache() -> Tuple[Dict, Dict]:
+    """
+    Load benchmark cache and return (forward_results, backward_results) for backward compatibility.
+    For full v2.0 results, use get_benchmark_cache().load_cache() directly.
+    """
+    cache = get_benchmark_cache()
+    cache_results = cache.load_cache()
+
+    # Return legacy format for backward compatibility
+    forward_results = cache_results.get("sparse_conv_forward_results", {})
+    backward_results = cache_results.get("sparse_conv_backward_results", {})
+
+    return forward_results, backward_results
+
+
+def load_dict_benchmark_cache() -> Dict[str, Dict]:
+    """
+    Load benchmark cache in version 2.0 format.
+    Returns dictionary with all cached benchmark result types.
+    """
     cache = get_benchmark_cache()
     return cache.load_cache()
 
 
-def save_benchmark_cache(
+def save_sparse_conv_benchmark_cache(
     forward_results: Dict, backward_results: Dict, force: bool = False
 ) -> None:
     """
@@ -277,7 +381,25 @@ def save_benchmark_cache(
         force: If True, save immediately. If False, schedule for background save.
     """
     cache = get_benchmark_cache()
-    cache.save_cache(forward_results, backward_results, force=force)
+    cache.save_cache(
+        {
+            "sparse_conv_forward_results": forward_results,
+            "sparse_conv_backward_results": backward_results,
+        },
+        force=force,
+    )
+
+
+def save_dict_benchmark_cache(cache_results: Dict[str, Dict], force: bool = False) -> None:
+    """
+    Save benchmark cache in version 2.0 format.
+
+    Args:
+        cache_results: Dictionary mapping cache types to their results
+        force: If True, save immediately. If False, schedule for background save.
+    """
+    cache = get_benchmark_cache()
+    cache.save_cache(cache_results, force=force)
 
 
 def mark_benchmark_cache_dirty() -> None:

@@ -34,7 +34,7 @@ import sys
 from datetime import datetime
 from typing import Dict, Any
 
-from warpconvnet.utils.benchmark_cache import load_benchmark_cache, get_benchmark_cache
+from warpconvnet.utils.benchmark_cache import load_sparse_conv_benchmark_cache, get_benchmark_cache
 
 
 def format_value(value: Any, indent: int = 0, top_k: int = None) -> str:
@@ -219,7 +219,7 @@ def load_and_inspect_cache(
 
     # Load the cache
     try:
-        forward_results, backward_results = load_benchmark_cache()
+        forward_results, backward_results = load_sparse_conv_benchmark_cache()
 
         # Print summary
         print("\nCache Summary:")
@@ -252,7 +252,7 @@ def search_cache(
     pattern: str, top_k: int = None, show_forward: bool = True, show_backward: bool = True
 ) -> None:
     """Search for configurations matching a pattern."""
-    forward_results, backward_results = load_benchmark_cache()
+    forward_results, backward_results = load_sparse_conv_benchmark_cache()
 
     print(f"\nSearching for configurations containing: '{pattern}'")
     if top_k == 1:

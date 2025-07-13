@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List, Tuple, Optional, Union
-from jaxtyping import Float
+from jaxtyping import Float, Int
 
 import torch
 from torch import Tensor
@@ -25,7 +25,7 @@ class IntCoords(Coords):
     def __init__(
         self,
         batched_tensor: List[Float[Tensor, "N D"]] | Float[Tensor, "N D"],  # noqa: F722,F821
-        offsets: Optional[List[int]] = None,
+        offsets: Optional[Union[List[int], Int[Tensor, "B+1"]]] = None,
         voxel_size: Optional[float] = None,
         voxel_origin: Optional[Float[Tensor, "D"]] = None,  # noqa: F821
         tensor_stride: Optional[Union[int, Tuple[int, ...]]] = None,

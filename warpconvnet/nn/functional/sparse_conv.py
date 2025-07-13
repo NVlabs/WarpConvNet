@@ -34,8 +34,7 @@ from warpconvnet.utils.ntuple import ntuple
 from warpconvnet.utils.cuda_utils import load_kernel
 from warpconvnet.utils.logger import get_logger
 from warpconvnet.utils.benchmark_cache import (
-    load_benchmark_cache,
-    save_benchmark_cache,
+    load_sparse_conv_benchmark_cache,
     mark_benchmark_cache_dirty,
 )
 from warpconvnet.utils.type_cast import _min_dtype, _max_dtype
@@ -283,7 +282,7 @@ _BENCHMARK_BACKWARD_RESULTS: Dict[
 def _initialize_benchmark_cache():
     """Load cached benchmark results and populate global dictionaries."""
     try:
-        cached_forward, cached_backward = load_benchmark_cache()
+        cached_forward, cached_backward = load_sparse_conv_benchmark_cache()
         _BENCHMARK_FORWARD_RESULTS.update(cached_forward)
         _BENCHMARK_BACKWARD_RESULTS.update(cached_backward)
         if cached_forward or cached_backward:
@@ -1892,7 +1891,7 @@ def generate_output_coords_and_kernel_map(
     output_spatially_sparse_tensor: Optional[Voxels],
     stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
     order: POINT_ORDERING = POINT_ORDERING.RANDOM,
-) -> Tuple[IntCoords, Int[Tensor, "B+1"], IntSearchResult]:
+) -> Tuple[Tensor, Int[Tensor, "B+1"], IntSearchResult]:
     """
     Perform spatially sparse convolution on the input tensor
     Spatially sparse and feature sparse is not supported yet.
@@ -1966,7 +1965,8 @@ def generate_output_coords_and_kernel_map(
     # Order the output coordinates
     if order != POINT_ORDERING.RANDOM:
         code_result = encode(
-            batch_indexed_out_coords,
+            grid_coord=batch_indexed_out_coords[:, 1:],
+            batch_offsets=out_offsets,
             order=order,
             return_perm=True,
         )
