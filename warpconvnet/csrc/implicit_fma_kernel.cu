@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cutlass/numeric_types.h>
@@ -12,8 +13,8 @@
  * Templated Implicit FMA CUDA Kernels with Shared Memory Optimization
  *
  * Clean template-based design following CUTLASS GEMM patterns:
- * - Single templated kernel implementation for all data types (float, half, double)
- * - No explicit type names in function names (no _float, _half, _double suffixes)
+ * - Single templated kernel implementation for all data types (float, half, bfloat16, double)
+ * - No explicit type names in function names (no _float, _half, _bfloat16, _double suffixes)
  * - Organized in warpconvnet::implicit_fma namespace
  * - Status-based error handling with clean propagation to Python
  * - No direct CUDA imports in Python bindings
@@ -103,6 +104,8 @@ __global__ void implicit_fma_kernel(const T* __restrict__ a,
   // Direct write since out_rows are unique (no conflicts)
   if constexpr (std::is_same_v<T, __half>) {
     c[out_idx * C + ch_idx] = __hadd(c[out_idx * C + ch_idx], __hmul(a_val, b_val));
+  } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    c[out_idx * C + ch_idx] = c[out_idx * C + ch_idx] + a_val * b_val;
   } else {
     c[out_idx * C + ch_idx] += a_val * b_val;
   }
@@ -367,6 +370,137 @@ __global__ void implicit_fma_kernel<__half>(const __half* __restrict__ a,
 }
 
 /**
+ * Bfloat16_8 specialization of implicit FMA kernel for improved memory bandwidth
+ * Uses vectorized loads/stores to process 8 bfloat16s at once (128 bits = 16 bytes)
+ * Each thread processes 8 consecutive channels (or remaining channels) for one operation
+ */
+template <>
+__global__ void implicit_fma_kernel<__nv_bfloat16>(const __nv_bfloat16* __restrict__ a,
+                                                   const __nv_bfloat16* __restrict__ b,
+                                                   __nv_bfloat16* __restrict__ c,
+                                                   const int* __restrict__ in_indices,
+                                                   const int* __restrict__ out_indices,
+                                                   int num_ops,
+                                                   int C,
+                                                   int N_A,
+                                                   int N_C) {
+  // Shared memory for vector B
+  extern __shared__ char shared_mem_raw[];
+  __nv_bfloat16* shared_b = reinterpret_cast<__nv_bfloat16*>(shared_mem_raw);
+
+  // Load vector B into shared memory cooperatively using bfloat16_8 (uint4)
+  int tid = threadIdx.x;
+  int threads_per_block = blockDim.x;
+  int C_vec8 = C / 8;
+  int C_remainder = C % 8;
+
+  // Load 8 elements at a time with alignment checking
+  for (int i = tid; i < C_vec8; i += threads_per_block) {
+    const __nv_bfloat16* b_ptr = &b[i * 8];
+    __nv_bfloat16* sb_ptr = &shared_b[i * 8];
+
+    if (reinterpret_cast<uintptr_t>(b_ptr) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(sb_ptr) % 16 == 0) {
+      // Aligned - use vectorized load (8 bfloat16s as uint4)
+      uint4 b_vec = *reinterpret_cast<const uint4*>(b_ptr);
+      *reinterpret_cast<uint4*>(sb_ptr) = b_vec;
+    } else {
+      // Not aligned - use scalar loads
+      for (int j = 0; j < 8; ++j) {
+        shared_b[i * 8 + j] = b[i * 8 + j];
+      }
+    }
+  }
+
+  // Load remaining elements
+  int start_remainder = C_vec8 * 8;
+  for (int i = tid; i < C_remainder; i += threads_per_block) {
+    shared_b[start_remainder + i] = b[start_remainder + i];
+  }
+  __syncthreads();
+
+  // Modified thread mapping: each thread processes 8 consecutive channels
+  int total_vec8_threads = num_ops * C_vec8;
+  int total_remainder_threads = num_ops * (C_remainder > 0 ? 1 : 0);
+  int total_threads = total_vec8_threads + total_remainder_threads;
+
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total_threads) return;
+
+  if (idx < total_vec8_threads) {
+    // Vectorized path: process 8 consecutive channels
+    int op_idx = idx / C_vec8;
+    int vec_idx = idx % C_vec8;
+
+    // Get the indices for this operation
+    int in_idx = in_indices[op_idx];
+    int out_idx = out_indices[op_idx];
+
+    // Bounds checking
+    if (in_idx < 0 || in_idx >= N_A || out_idx < 0 || out_idx >= N_C) {
+      return;
+    }
+
+    // Check alignment for bfloat16_8 operations
+    const __nv_bfloat16* a_ptr = &a[in_idx * C + vec_idx * 8];
+    __nv_bfloat16* c_ptr = &c[out_idx * C + vec_idx * 8];
+    const __nv_bfloat16* b_ptr = &shared_b[vec_idx * 8];
+
+    if (reinterpret_cast<uintptr_t>(a_ptr) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(c_ptr) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(b_ptr) % 16 == 0) {
+      // Aligned - use vectorized operations
+      uint4 a_vec = *reinterpret_cast<const uint4*>(a_ptr);
+      uint4 b_vec = *reinterpret_cast<const uint4*>(b_ptr);
+      uint4 c_vec = *reinterpret_cast<const uint4*>(c_ptr);
+
+      // Extract bfloat16s from uint4 and perform vectorized FMA
+      __nv_bfloat16* a_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&a_vec);
+      __nv_bfloat16* b_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&b_vec);
+      __nv_bfloat16* c_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&c_vec);
+
+      // Perform vectorized FMA: c += a * b for all 8 bfloat16s
+      for (int i = 0; i < 8; ++i) {
+        c_bfloat16s[i] = c_bfloat16s[i] + a_bfloat16s[i] * b_bfloat16s[i];
+      }
+
+      // Store result back
+      *reinterpret_cast<uint4*>(c_ptr) = c_vec;
+    } else {
+      // Not aligned - fall back to scalar operations
+      for (int i = 0; i < 8; ++i) {
+        int ch_idx = vec_idx * 8 + i;
+        __nv_bfloat16 a_val = a[in_idx * C + ch_idx];
+        __nv_bfloat16 b_val = shared_b[ch_idx];
+        c[out_idx * C + ch_idx] = c[out_idx * C + ch_idx] + a_val * b_val;
+      }
+    }
+  } else if (C_remainder > 0) {
+    // Scalar path: process remaining channels
+    int remainder_idx = idx - total_vec8_threads;
+    int op_idx = remainder_idx;  // One thread per operation for remainder
+
+    // Get the indices for this operation
+    int in_idx = in_indices[op_idx];
+    int out_idx = out_indices[op_idx];
+
+    // Bounds checking
+    if (in_idx < 0 || in_idx >= N_A || out_idx < 0 || out_idx >= N_C) {
+      return;
+    }
+
+    // Process remaining channels
+    int start_ch = C_vec8 * 8;
+    for (int ch_offset = 0; ch_offset < C_remainder; ++ch_offset) {
+      int ch_idx = start_ch + ch_offset;
+      __nv_bfloat16 a_val = a[in_idx * C + ch_idx];
+      __nv_bfloat16 b_val = shared_b[ch_idx];
+      c[out_idx * C + ch_idx] = c[out_idx * C + ch_idx] + a_val * b_val;
+    }
+  }
+}
+
+/**
  * Row-wise processing version with shared memory for vector B (each thread processes one row)
  */
 template <typename T>
@@ -415,6 +549,8 @@ __global__ void implicit_fma_kernel_rowwise(const T* __restrict__ a,
     // Direct write since out_rows are unique (no conflicts)
     if constexpr (std::is_same_v<T, __half>) {
       c[out_idx * C + ch_idx] = __hadd(c[out_idx * C + ch_idx], __hmul(a_val, b_val));
+    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+      c[out_idx * C + ch_idx] = c[out_idx * C + ch_idx] + a_val * b_val;
     } else {
       c[out_idx * C + ch_idx] += a_val * b_val;
     }
@@ -644,6 +780,120 @@ __global__ void implicit_fma_kernel_rowwise<__half>(const __half* __restrict__ a
   }
 }
 
+/**
+ * Bfloat16_8 specialization of rowwise kernel for improved memory bandwidth
+ * Uses vectorized loads/stores to process 8 bfloat16s at once (128 bits = 16 bytes)
+ */
+template <>
+__global__ void implicit_fma_kernel_rowwise<__nv_bfloat16>(const __nv_bfloat16* __restrict__ a,
+                                                           const __nv_bfloat16* __restrict__ b,
+                                                           __nv_bfloat16* __restrict__ c,
+                                                           const int* __restrict__ in_indices,
+                                                           const int* __restrict__ out_indices,
+                                                           int num_ops,
+                                                           int C,
+                                                           int N_A,
+                                                           int N_C) {
+  // Shared memory for vector B
+  extern __shared__ char shared_mem_raw[];
+  __nv_bfloat16* shared_b = reinterpret_cast<__nv_bfloat16*>(shared_mem_raw);
+
+  // Load vector B into shared memory cooperatively using bfloat16_8 (uint4)
+  int tid = threadIdx.x;
+  int threads_per_block = blockDim.x;
+  int C_vec8 = C / 8;
+  int C_remainder = C % 8;
+
+  // Load 8 elements at a time with alignment checking
+  for (int i = tid; i < C_vec8; i += threads_per_block) {
+    const __nv_bfloat16* b_ptr = &b[i * 8];
+    __nv_bfloat16* sb_ptr = &shared_b[i * 8];
+
+    if (reinterpret_cast<uintptr_t>(b_ptr) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(sb_ptr) % 16 == 0) {
+      // Aligned - use vectorized load (8 bfloat16s as uint4)
+      uint4 b_vec = *reinterpret_cast<const uint4*>(b_ptr);
+      *reinterpret_cast<uint4*>(sb_ptr) = b_vec;
+    } else {
+      // Not aligned - use scalar loads
+      for (int j = 0; j < 8; ++j) {
+        shared_b[i * 8 + j] = b[i * 8 + j];
+      }
+    }
+  }
+
+  // Load remaining elements
+  int start_remainder = C_vec8 * 8;
+  for (int i = tid; i < C_remainder; i += threads_per_block) {
+    shared_b[start_remainder + i] = b[start_remainder + i];
+  }
+  __syncthreads();
+
+  // Each thread processes one operation (one row)
+  int op_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (op_idx >= num_ops) return;
+
+  // Get the indices for this operation
+  int in_idx = in_indices[op_idx];
+  int out_idx = out_indices[op_idx];
+
+  // Bounds checking
+  if (in_idx < 0 || in_idx >= N_A || out_idx < 0 || out_idx >= N_C) {
+    return;
+  }
+
+  // Process channels using bfloat16_8 vectorization
+  int ch_idx = 0;
+
+  // Process 8 channels at a time
+  for (int vec_idx = 0; vec_idx < C_vec8; ++vec_idx) {
+    // Check alignment for bfloat16_8 operations
+    const __nv_bfloat16* a_ptr = &a[in_idx * C + vec_idx * 8];
+    __nv_bfloat16* c_ptr = &c[out_idx * C + vec_idx * 8];
+    const __nv_bfloat16* b_ptr = &shared_b[vec_idx * 8];
+
+    if (reinterpret_cast<uintptr_t>(a_ptr) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(c_ptr) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(b_ptr) % 16 == 0) {
+      // Aligned - use vectorized operations
+      uint4 a_vec = *reinterpret_cast<const uint4*>(a_ptr);
+      uint4 b_vec = *reinterpret_cast<const uint4*>(b_ptr);
+      uint4 c_vec = *reinterpret_cast<const uint4*>(c_ptr);
+
+      // Extract bfloat16s from uint4 and perform vectorized FMA
+      __nv_bfloat16* a_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&a_vec);
+      __nv_bfloat16* b_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&b_vec);
+      __nv_bfloat16* c_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&c_vec);
+
+      // Perform vectorized FMA: c += a * b for all 8 bfloat16s
+      for (int i = 0; i < 8; ++i) {
+        c_bfloat16s[i] = c_bfloat16s[i] + a_bfloat16s[i] * b_bfloat16s[i];
+      }
+
+      // Store result back
+      *reinterpret_cast<uint4*>(c_ptr) = c_vec;
+    } else {
+      // Not aligned - fall back to scalar operations
+      for (int i = 0; i < 8; ++i) {
+        int ch_idx = vec_idx * 8 + i;
+        __nv_bfloat16 a_val = a[in_idx * C + ch_idx];
+        __nv_bfloat16 b_val = shared_b[ch_idx];
+        c[out_idx * C + ch_idx] = c[out_idx * C + ch_idx] + a_val * b_val;
+      }
+    }
+  }
+
+  // Process remaining channels
+  int start_ch = C_vec8 * 8;
+  for (int ch_offset = 0; ch_offset < C_remainder; ++ch_offset) {
+    ch_idx = start_ch + ch_offset;
+    __nv_bfloat16 a_val = a[in_idx * C + ch_idx];
+    __nv_bfloat16 b_val = shared_b[ch_idx];
+    c[out_idx * C + ch_idx] = c[out_idx * C + ch_idx] + a_val * b_val;
+  }
+}
+
 // Main templated function implementation
 namespace warpconvnet {
 namespace implicit_fma {
@@ -708,6 +958,18 @@ int run_implicit_fma_templated(const void* tensor_a,
           C,
           N_A,
           N_C);
+    } else if constexpr (std::is_same_v<ElementA, cutlass::bfloat16_t>) {
+      implicit_fma_kernel_rowwise<__nv_bfloat16>
+          <<<blocks, threads_per_block, shared_mem_size, stream>>>(
+              reinterpret_cast<const __nv_bfloat16*>(a_ptr),
+              reinterpret_cast<const __nv_bfloat16*>(b_ptr),
+              reinterpret_cast<__nv_bfloat16*>(c_ptr),
+              in_indices,
+              out_indices,
+              num_ops,
+              C,
+              N_A,
+              N_C);
     } else if constexpr (std::is_same_v<ElementA, double>) {
       implicit_fma_kernel_rowwise<double><<<blocks, threads_per_block, shared_mem_size, stream>>>(
           a_ptr, b_ptr, c_ptr, in_indices, out_indices, num_ops, C, N_A, N_C);
@@ -740,6 +1002,25 @@ int run_implicit_fma_templated(const void* tensor_a,
           reinterpret_cast<const __half*>(a_ptr),
           reinterpret_cast<const __half*>(b_ptr),
           reinterpret_cast<__half*>(c_ptr),
+          in_indices,
+          out_indices,
+          num_ops,
+          C,
+          N_A,
+          N_C);
+    } else if constexpr (std::is_same_v<ElementA, cutlass::bfloat16_t>) {
+      // Bfloat16_8 specialization: different thread mapping
+      int C_vec8 = C / 8;
+      int C_remainder = C % 8;
+      int total_vec8_threads = num_ops * C_vec8;
+      int total_remainder_threads = num_ops * (C_remainder > 0 ? 1 : 0);
+      int total_threads = total_vec8_threads + total_remainder_threads;
+      int blocks = (total_threads + threads_per_block - 1) / threads_per_block;
+
+      implicit_fma_kernel<__nv_bfloat16><<<blocks, threads_per_block, shared_mem_size, stream>>>(
+          reinterpret_cast<const __nv_bfloat16*>(a_ptr),
+          reinterpret_cast<const __nv_bfloat16*>(b_ptr),
+          reinterpret_cast<__nv_bfloat16*>(c_ptr),
           in_indices,
           out_indices,
           num_ops,
@@ -790,6 +1071,19 @@ template int warpconvnet::implicit_fma::run_implicit_fma_templated<float, float,
 
 template int warpconvnet::implicit_fma::
     run_implicit_fma_templated<cutlass::half_t, cutlass::half_t, cutlass::half_t>(
+        const void*,
+        const void*,
+        void*,
+        const int*,
+        const int*,
+        int,
+        int,
+        int,
+        int,
+        const std::string&);
+
+template int warpconvnet::implicit_fma::
+    run_implicit_fma_templated<cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::bfloat16_t>(
         const void*,
         const void*,
         void*,

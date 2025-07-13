@@ -162,8 +162,8 @@ def test_implicit_fma_dtypes():
     device = torch.device("cuda")
 
     # Test different data types
-    dtypes = [torch.float32, torch.float16, torch.float64]
-    dtype_names = ["float32", "float16", "float64"]
+    dtypes = [torch.float32, torch.float16, torch.bfloat16, torch.float64]
+    dtype_names = ["float32", "float16", "bfloat16", "float64"]
 
     for dtype, dtype_name in zip(dtypes, dtype_names):
         print(f"Testing {dtype_name}...")
@@ -195,7 +195,7 @@ def test_implicit_fma_dtypes():
 
         diff = torch.abs(c - c_expected)
         max_diff = torch.max(diff)
-        tolerance = 1e-5 if dtype != torch.float16 else 1e-3
+        tolerance = 1e-5 if dtype not in [torch.float16, torch.bfloat16] else 1e-3
 
         if max_diff < tolerance:
             print(f"✓ {dtype_name} test PASSED (max_diff: {max_diff.item()})")

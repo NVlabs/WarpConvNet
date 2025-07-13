@@ -598,6 +598,19 @@ void implicit_fma_cuda(torch::Tensor a,
             N_A,
             N_C,
             kernel_type);
+  } else if (a.scalar_type() == torch::kBFloat16) {
+    status = warpconvnet::implicit_fma::
+        run_implicit_fma_templated<cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::bfloat16_t>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            in_indices.data_ptr<int>(),
+            out_indices.data_ptr<int>(),
+            num_ops,
+            C_dim,
+            N_A,
+            N_C,
+            kernel_type);
   } else if (a.scalar_type() == torch::kFloat64) {
     status = warpconvnet::implicit_fma::run_implicit_fma_templated<double, double, double>(
         a.data_ptr(),
