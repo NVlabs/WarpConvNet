@@ -30,6 +30,21 @@ int run_implicit_fma_templated(const void *tensor_a,
                                int N_C,
                                const std::string &kernel_type);
 }  // namespace implicit_fma
+
+// Forward declarations for implicit reduction functions (implemented in .cu file)
+namespace implicit_reduction {
+template <typename ElementA, typename ElementB, typename ElementOutput>
+int run_implicit_reduction_templated(const void *tensor_a,
+                                     const int *a_indices,
+                                     const void *tensor_b,
+                                     const int *b_indices,
+                                     void *result,
+                                     int M,
+                                     int C,
+                                     int N_A,
+                                     int N_B,
+                                     const std::string &kernel_type);
+}  // namespace implicit_reduction
 }  // namespace warpconvnet
 
 // Forward declaration for unified CUB sort function
@@ -53,6 +68,14 @@ void implicit_fma_cuda(torch::Tensor a,
                        torch::Tensor in_indices,
                        torch::Tensor out_indices,
                        const std::string &kernel_type = "basic");
+
+// Forward declarations for implicit reduction functions
+void implicit_reduction_cuda(torch::Tensor a,
+                             torch::Tensor a_indices,
+                             const py::object &b,          // optional, can be None
+                             const py::object &b_indices,  // optional, can be None
+                             torch::Tensor result,
+                             const std::string &kernel_type = "basic");
 
 // Type mapping from PyTorch scalar types to CUTLASS types
 template <torch::ScalarType T>
@@ -633,6 +656,130 @@ void implicit_fma_cuda(torch::Tensor a,
   }
 }
 
+// Implementation of implicit reduction CUDA function
+void implicit_reduction_cuda(torch::Tensor a,
+                             torch::Tensor a_indices,
+                             const py::object &b,          // optional, can be None
+                             const py::object &b_indices,  // optional, can be None
+                             torch::Tensor result,
+                             const std::string &kernel_type) {
+  // Validate input tensors
+  TORCH_CHECK(a.dim() == 2, "Matrix A must be 2D");
+  TORCH_CHECK(a_indices.dim() == 1, "A indices must be 1D");
+  TORCH_CHECK(result.dim() == 1, "Result must be 1D");
+
+  TORCH_CHECK(a_indices.scalar_type() == torch::kInt32, "Indices must be int32");
+
+  // Validate dimensions
+  int N_A = a.size(0);
+  int C_dim = a.size(1);
+  int M = a_indices.size(0);
+
+  TORCH_CHECK(result.size(0) == C_dim, "Result size must match number of columns in A");
+
+  // Handle optional B matrix
+  int N_B = 0;
+  bool has_b = !b.is_none();
+
+  torch::Tensor b_tensor;
+  torch::Tensor b_indices_tensor;
+
+  if (has_b) {
+    b_tensor = b.cast<torch::Tensor>();
+    b_indices_tensor = b_indices.cast<torch::Tensor>();
+
+    TORCH_CHECK(b_tensor.dim() == 2, "Matrix B must be 2D when provided");
+    TORCH_CHECK(b_indices_tensor.dim() == 1, "B indices must be 1D when B is provided");
+    TORCH_CHECK(b_indices_tensor.scalar_type() == torch::kInt32, "B indices must be int32");
+    TORCH_CHECK(b_indices_tensor.size(0) == M, "A and B indices must have same length");
+    TORCH_CHECK(b_tensor.size(1) == C_dim, "Matrix B must have same number of columns as A");
+    TORCH_CHECK(a.scalar_type() == b_tensor.scalar_type(), "A and B must have the same data type");
+    N_B = b_tensor.size(0);
+  }
+
+  TORCH_CHECK(a.scalar_type() == result.scalar_type(), "A and result must have the same data type");
+
+  // Ensure tensors are on CUDA and contiguous
+  TORCH_CHECK(a.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(a_indices.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(result.is_cuda(), "All tensors must be on CUDA");
+
+  a = a.contiguous();
+  a_indices = a_indices.contiguous();
+  result = result.contiguous();
+
+  if (has_b) {
+    TORCH_CHECK(b_tensor.is_cuda(), "All tensors must be on CUDA");
+    TORCH_CHECK(b_indices_tensor.is_cuda(), "All tensors must be on CUDA");
+    b_tensor = b_tensor.contiguous();
+    b_indices_tensor = b_indices_tensor.contiguous();
+  }
+
+  // Dispatch based on data type using template function
+  int status = 0;
+
+  if (a.scalar_type() == torch::kFloat32) {
+    status = warpconvnet::implicit_reduction::run_implicit_reduction_templated<float, float, float>(
+        a.data_ptr(),
+        a_indices.data_ptr<int>(),
+        has_b ? b_tensor.data_ptr() : nullptr,
+        has_b ? b_indices_tensor.data_ptr<int>() : nullptr,
+        result.data_ptr(),
+        M,
+        C_dim,
+        N_A,
+        N_B,
+        kernel_type);
+  } else if (a.scalar_type() == torch::kFloat16) {
+    status = warpconvnet::implicit_reduction::
+        run_implicit_reduction_templated<cutlass::half_t, cutlass::half_t, cutlass::half_t>(
+            a.data_ptr(),
+            a_indices.data_ptr<int>(),
+            has_b ? b_tensor.data_ptr() : nullptr,
+            has_b ? b_indices_tensor.data_ptr<int>() : nullptr,
+            result.data_ptr(),
+            M,
+            C_dim,
+            N_A,
+            N_B,
+            kernel_type);
+  } else if (a.scalar_type() == torch::kBFloat16) {
+    status = warpconvnet::implicit_reduction::run_implicit_reduction_templated<cutlass::bfloat16_t,
+                                                                               cutlass::bfloat16_t,
+                                                                               cutlass::bfloat16_t>(
+        a.data_ptr(),
+        a_indices.data_ptr<int>(),
+        has_b ? b_tensor.data_ptr() : nullptr,
+        has_b ? b_indices_tensor.data_ptr<int>() : nullptr,
+        result.data_ptr(),
+        M,
+        C_dim,
+        N_A,
+        N_B,
+        kernel_type);
+  } else if (a.scalar_type() == torch::kFloat64) {
+    status =
+        warpconvnet::implicit_reduction::run_implicit_reduction_templated<double, double, double>(
+            a.data_ptr(),
+            a_indices.data_ptr<int>(),
+            has_b ? b_tensor.data_ptr() : nullptr,
+            has_b ? b_indices_tensor.data_ptr<int>() : nullptr,
+            result.data_ptr(),
+            M,
+            C_dim,
+            N_A,
+            N_B,
+            kernel_type);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for implicit reduction");
+  }
+
+  // Check status
+  if (status != 0) {
+    TORCH_CHECK(false, "Implicit reduction kernel failed with status: " + std::to_string(status));
+  }
+}
+
 PYBIND11_MODULE(_C, m) {
   m.doc() = "CUDA kernels exposed through PyBind11";
 
@@ -695,24 +842,46 @@ PYBIND11_MODULE(_C, m) {
       py::arg("status"),
       "Return the human-readable string associated with a GemmStatus value");
 
+  // Create submodule 'fma' for FMA-related operations
+  py::module_ fma =
+      m.def_submodule("fma", "Fused Multiply-Add operations and related functionality");
+
   // Implicit FMA functions
-  gemm.def("implicit_fma",
-           &implicit_fma_cuda,
-           "Implicit FMA kernel: c[out_index] += a[in_index] * b\n"
-           "Performs gather-scatter FMA operation with broadcast multiplication\n"
-           "Args:\n"
-           "  a: Input matrix A (N_A x C)\n"
-           "  b: Input vector B (C,)\n"
-           "  c: Output matrix C (N_C x C), modified in-place\n"
-           "  in_indices: Input indices for gathering from A (num_ops,)\n"
-           "  out_indices: Output indices for scattering to C (num_ops,)\n"
-           "  kernel_type: 'basic', 'optimized', or 'rowwise'",
-           py::arg("a"),
-           py::arg("b"),
-           py::arg("c"),
-           py::arg("in_indices"),
-           py::arg("out_indices"),
-           py::arg("kernel_type") = "basic");
+  fma.def("implicit_fma",
+          &implicit_fma_cuda,
+          "Implicit FMA kernel: c[out_index] += a[in_index] * b\n"
+          "Performs gather-scatter FMA operation with broadcast multiplication\n"
+          "Args:\n"
+          "  a: Input matrix A (N_A x C)\n"
+          "  b: Input vector B (C,)\n"
+          "  c: Output matrix C (N_C x C), modified in-place\n"
+          "  in_indices: Input indices for gathering from A (num_ops,)\n"
+          "  out_indices: Output indices for scattering to C (num_ops,)\n"
+          "  kernel_type: 'basic', 'optimized', or 'rowwise'",
+          py::arg("a"),
+          py::arg("b"),
+          py::arg("c"),
+          py::arg("in_indices"),
+          py::arg("out_indices"),
+          py::arg("kernel_type") = "basic");
+
+  fma.def("implicit_reduction",
+          &implicit_reduction_cuda,
+          "Implicit reduction kernel: result[c] = ∑_i A[a_indices[i], c] * B[b_indices[i], c]\n"
+          "Performs reduction with optional B matrix multiplication\n"
+          "Args:\n"
+          "  a: Input matrix A (N_A x C)\n"
+          "  a_indices: Indices for gathering from A (M,)\n"
+          "  b: Optional input matrix B (N_B x C), use None for all-ones\n"
+          "  b_indices: Optional indices for gathering from B (M,), use None when B is None\n"
+          "  result: Output vector (C,), modified in-place\n"
+          "  kernel_type: Kernel type ('basic' for basic)",
+          py::arg("a"),
+          py::arg("a_indices"),
+          py::arg("b") = py::none(),
+          py::arg("b_indices") = py::none(),
+          py::arg("result"),
+          py::arg("kernel_type") = "basic");
 
   // Create submodule 'utils' for utility functions
   py::module_ utils = m.def_submodule("utils", "Utility functions including sorting operations");

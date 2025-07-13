@@ -104,6 +104,7 @@ ext_modules = [
             "warpconvnet/csrc/cub_sort.cu",
             "warpconvnet/csrc/voxel_mapping_kernels.cu",
             "warpconvnet/csrc/implicit_fma_kernel.cu",
+            "warpconvnet/csrc/implicit_reduction.cu",
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,

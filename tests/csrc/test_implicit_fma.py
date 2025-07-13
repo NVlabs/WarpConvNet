@@ -61,7 +61,7 @@ def test_implicit_fma_basic():
 
     # Run implicit FMA kernel
     try:
-        warpconvnet_c.gemm.implicit_fma(a, b, c, in_indices, out_indices, "basic")
+        warpconvnet_c.fma.implicit_fma(a, b, c, in_indices, out_indices, "basic")
         print("Kernel execution successful!")
     except Exception as e:
         print(f"ERROR: Kernel execution failed: {e}")
@@ -122,7 +122,7 @@ def test_implicit_fma_kernel_types():
         c = torch.zeros(N_C, C, device=device, dtype=torch.float32)
 
         try:
-            warpconvnet_c.gemm.implicit_fma(a, b, c, in_indices, out_indices, kernel_type)
+            warpconvnet_c.fma.implicit_fma(a, b, c, in_indices, out_indices, kernel_type)
             results[kernel_type] = c.clone()
             print(f"✓ {kernel_type} kernel executed successfully")
         except Exception as e:
@@ -180,7 +180,7 @@ def test_implicit_fma_dtypes():
         c_original = c.clone()
 
         try:
-            warpconvnet_c.gemm.implicit_fma(a, b, c, in_indices, out_indices, "basic")
+            warpconvnet_c.fma.implicit_fma(a, b, c, in_indices, out_indices, "basic")
             print(f"✓ {dtype_name} kernel executed successfully")
         except Exception as e:
             print(f"✗ {dtype_name} kernel failed: {e}")
