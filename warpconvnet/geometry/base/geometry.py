@@ -62,10 +62,16 @@ class Geometry:
 
     def __init__(
         self,
-        batched_coordinates: Coords,
+        batched_coordinates: Union[Coords, Tensor],
         batched_features: Union["CatFeatures", "PadFeatures", Tensor],  # noqa: F821
         **kwargs,
     ):
+        offsets = kwargs.pop("offsets", None)
+        if isinstance(batched_coordinates, Tensor):
+            assert (
+                offsets is not None
+            ), "offsets must be provided when batched_coordinates is a tensor"
+            batched_coordinates = Coords(batched_coordinates, offsets)
         self.batched_coordinates = batched_coordinates
         self.batched_features = to_batched_features(
             batched_features,
@@ -73,7 +79,7 @@ class Geometry:
             device=kwargs.get("device", None),
         )
 
-        assert (batched_coordinates.offsets == batched_features.offsets).all()
+        assert (batched_coordinates.offsets == self.batched_features.offsets).all()
         # Extra arguments for subclasses
         # First check _extra_attributes in kwargs. This happens when we use dataclasses.replace
         if "_extra_attributes" in kwargs:

@@ -29,7 +29,7 @@ class BatchedTensor:
     def __init__(
         self,
         batched_tensor: List[Float[Tensor, "N C"]] | Float[Tensor, "N C"],  # noqa: F722,F821
-        offsets: Optional[List[int]] = None,
+        offsets: Optional[List[int] | Tensor] = None,
         device: Optional[str] = None,
     ):
         """Initialize a batched object with a list of tensors.
@@ -54,11 +54,15 @@ class BatchedTensor:
             if offsets is None:
                 offsets = [0, batched_tensor.shape[0]]
 
-        if isinstance(offsets, list):
+        if isinstance(offsets, Sequence):
             offsets = torch.LongTensor(offsets)
+        elif isinstance(offsets, Tensor):
+            offsets = offsets.cpu()
+        else:
+            raise ValueError(f"Invalid offsets type {type(offsets)}")
 
         # Prevent from triggering __getattribute__ used in GridCoords
-        object.__setattr__(self, "offsets", offsets.cpu())
+        object.__setattr__(self, "offsets", offsets)
         if device is not None:
             batched_tensor = batched_tensor.to(device)
         object.__setattr__(self, "batched_tensor", batched_tensor)
