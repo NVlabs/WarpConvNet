@@ -150,11 +150,6 @@ def encode(
         codes = morton_code(grid_coord, order=order)
     elif order == POINT_ORDERING.RANDOM:
         codes = torch.randperm(grid_coord.shape[0], device=grid_coord.device)
-    # elif order in [POINT_ORDERING.XORSUM_DIV, POINT_ORDERING.XORSUM_MOD,
-    #                POINT_ORDERING.ZORDER_DIV, POINT_ORDERING.ZORDER_MOD,
-    #                POINT_ORDERING.SUM_DIV]:
-    #     codes = hash_code(grid_coord, order=order,
-    #                      size=size, num_buckets=num_buckets)
     else:
         raise NotImplementedError(f"Order '{order}' not supported at the moment")
 
@@ -253,69 +248,6 @@ def morton_code(
         (threads_per_block,),
         (coords_cp, num_points, result_code_cp),
     )
-
-    # Convert result from CuPy array back to PyTorch tensor on the original device
-    result_code = torch.as_tensor(result_code_cp, device=device)
-    return result_code
-
-
-@torch.no_grad()
-def hash_code(
-    coords: Int[Tensor, "N 3"] | Int[Tensor, "N 4"],  # noqa: F821
-    threads_per_block: int = 256,
-    order: POINT_ORDERING | str = "XORSUM_DIV",
-    size: Optional[int] = None,
-    num_buckets: Optional[int] = None,
-) -> Int[Tensor, "N"]:  # noqa: F821
-    """
-    Generate hash codes for the input coordinates using various hash functions.
-
-    Args:
-        coords: Input coordinates (N, 3)
-        threads_per_block: CUDA threads per block
-        order: Hash function type (XORSUM_DIV, XORSUM_MOD, ZORDER_DIV, ZORDER_MOD, SUM_DIV)
-        size: Size parameter for division-based hash functions (if None, uses number of points)
-        num_buckets: Number of buckets for modulo-based hash functions (if None, uses sqrt of number of points)
-
-    Returns:
-        Hash codes
-    """
-    if isinstance(order, str):
-        order = POINT_ORDERING(order)
-
-    # Empty grid handling
-    if coords.shape[0] == 0:
-        return torch.empty(0, dtype=torch.int64)
-
-    min_coord = coords.min(0).values
-    coords_normalized = (coords - min_coord).to(dtype=torch.int32).cuda()
-
-    device = coords_normalized.device
-    num_points = len(coords_normalized)
-    result_code_cp = cp.empty(num_points, dtype=cp.int64)
-
-    # Set default parameters
-    if size is None:
-        size = max(1, num_points)
-    if num_buckets is None:
-        num_buckets = max(1, int(math.sqrt(num_points)))
-
-    assert coords_normalized.shape[1] == 3, "coords must be [N, 3]"
-    # Single batch path
-    coords_cp = cp.from_dlpack(coords_normalized.contiguous())
-    blocks_per_grid = math.ceil(num_points / threads_per_block)
-
-    # Select appropriate parameter for the hash function
-    param = size if "DIV" in order.name else num_buckets
-
-    if order == POINT_ORDERING.XORSUM_DIV:
-        _xorsum_div_kernel(
-            (blocks_per_grid,),
-            (threads_per_block,),
-            (coords_cp, num_points, param, result_code_cp),
-        )
-    else:
-        raise NotImplementedError(f"Hash order '{order}' not supported")
 
     # Convert result from CuPy array back to PyTorch tensor on the original device
     result_code = torch.as_tensor(result_code_cp, device=device)

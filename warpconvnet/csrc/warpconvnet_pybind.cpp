@@ -45,6 +45,19 @@ int run_implicit_reduction_templated(const void *tensor_a,
                                      int N_B,
                                      const std::string &kernel_type);
 }  // namespace implicit_reduction
+
+namespace segmented_arithmetic {
+template <typename ElementB, typename ElementC, typename ElementD>
+int run_segmented_arithmetic_templated(const void *tensor_b,
+                                       const void *tensor_c,
+                                       void *tensor_d,
+                                       const int *offsets,
+                                       int N,
+                                       int C,
+                                       int K,
+                                       const std::string &operation,
+                                       const std::string &kernel_type);
+}  // namespace segmented_arithmetic
 }  // namespace warpconvnet
 
 // Forward declaration for unified CUB sort function
@@ -76,6 +89,14 @@ void implicit_reduction_cuda(torch::Tensor a,
                              const py::object &b_indices,  // optional, can be None
                              torch::Tensor result,
                              const std::string &kernel_type = "basic");
+
+// Forward declarations for segmented arithmetic functions
+void segmented_arithmetic_cuda(torch::Tensor tensor_b,
+                               torch::Tensor tensor_c,
+                               torch::Tensor tensor_d,
+                               torch::Tensor offsets,
+                               const std::string &operation,
+                               const std::string &kernel_type = "basic");
 
 // Type mapping from PyTorch scalar types to CUTLASS types
 template <torch::ScalarType T>
@@ -216,7 +237,7 @@ inline void assert_gemm_status(int status) {
   TORCH_CHECK(false, ss.str());
 }
 
-// ------------------- NEW: Common validation helpers -------------------
+// ------------------- Common validation helpers -------------------
 namespace {
 
 inline void _check_2d(const torch::Tensor &t, const char *name) {
@@ -780,6 +801,109 @@ void implicit_reduction_cuda(torch::Tensor a,
   }
 }
 
+// Implementation of segmented arithmetic CUDA function
+void segmented_arithmetic_cuda(torch::Tensor tensor_b,
+                               torch::Tensor tensor_c,
+                               torch::Tensor tensor_d,
+                               torch::Tensor offsets,
+                               const std::string &operation,
+                               const std::string &kernel_type) {
+  // Validate input tensors
+  TORCH_CHECK(tensor_b.dim() == 2, "Matrix B must be 2D");
+  TORCH_CHECK(tensor_c.dim() == 2, "Matrix C must be 2D");
+  TORCH_CHECK(tensor_d.dim() == 2, "Matrix D must be 2D");
+  TORCH_CHECK(offsets.dim() == 1, "Offsets must be 1D");
+
+  TORCH_CHECK(offsets.scalar_type() == torch::kInt32, "Offsets must be int32");
+
+  TORCH_CHECK(tensor_b.scalar_type() == tensor_c.scalar_type(),
+              "B and C must have the same data type");
+  TORCH_CHECK(tensor_b.scalar_type() == tensor_d.scalar_type(),
+              "B and D must have the same data type");
+
+  // Validate dimensions
+  int N = tensor_b.size(0);
+  int C = tensor_b.size(1);
+  int K = tensor_c.size(0);
+
+  TORCH_CHECK(tensor_c.size(1) == C, "Matrix C must have same number of columns as B");
+  TORCH_CHECK(tensor_d.size(0) == N, "Matrix D must have same number of rows as B");
+  TORCH_CHECK(tensor_d.size(1) == C, "Matrix D must have same number of columns as B");
+  TORCH_CHECK(offsets.size(0) == K + 1, "Offsets must have K+1 elements");
+
+  // Ensure tensors are on CUDA and contiguous
+  TORCH_CHECK(tensor_b.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(tensor_c.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(tensor_d.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(offsets.is_cuda(), "All tensors must be on CUDA");
+
+  tensor_b = tensor_b.contiguous();
+  tensor_c = tensor_c.contiguous();
+  tensor_d = tensor_d.contiguous();
+  // offsets must be int32. Convert to int32 if not already
+  offsets = offsets.contiguous().to(torch::kInt32);
+
+  // Dispatch based on data type using template function
+  int status = 0;
+  if (tensor_b.scalar_type() == torch::kFloat32) {
+    status =
+        warpconvnet::segmented_arithmetic::run_segmented_arithmetic_templated<float, float, float>(
+            tensor_b.data_ptr(),
+            tensor_c.data_ptr(),
+            tensor_d.data_ptr(),
+            offsets.data_ptr<int>(),
+            N,
+            C,
+            K,
+            operation,
+            kernel_type);
+  } else if (tensor_b.scalar_type() == torch::kFloat16) {
+    status = warpconvnet::segmented_arithmetic::
+        run_segmented_arithmetic_templated<cutlass::half_t, cutlass::half_t, cutlass::half_t>(
+            tensor_b.data_ptr(),
+            tensor_c.data_ptr(),
+            tensor_d.data_ptr(),
+            offsets.data_ptr<int>(),
+            N,
+            C,
+            K,
+            operation,
+            kernel_type);
+  } else if (tensor_b.scalar_type() == torch::kBFloat16) {
+    status =
+        warpconvnet::segmented_arithmetic::run_segmented_arithmetic_templated<cutlass::bfloat16_t,
+                                                                              cutlass::bfloat16_t,
+                                                                              cutlass::bfloat16_t>(
+            tensor_b.data_ptr(),
+            tensor_c.data_ptr(),
+            tensor_d.data_ptr(),
+            offsets.data_ptr<int>(),
+            N,
+            C,
+            K,
+            operation,
+            kernel_type);
+  } else if (tensor_b.scalar_type() == torch::kFloat64) {
+    status = warpconvnet::segmented_arithmetic::
+        run_segmented_arithmetic_templated<double, double, double>(tensor_b.data_ptr(),
+                                                                   tensor_c.data_ptr(),
+                                                                   tensor_d.data_ptr(),
+                                                                   offsets.data_ptr<int>(),
+                                                                   N,
+                                                                   C,
+                                                                   K,
+                                                                   operation,
+                                                                   kernel_type);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for segmented arithmetic");
+  }
+
+  // Check status
+  if (status != 0) {
+    TORCH_CHECK(false, "Segmented arithmetic kernel failed with status: " + std::to_string(status));
+  }
+}
+
 PYBIND11_MODULE(_C, m) {
   m.doc() = "CUDA kernels exposed through PyBind11";
 
@@ -908,6 +1032,28 @@ PYBIND11_MODULE(_C, m) {
             py::arg("grid_shape"),
             py::arg("bounds_min"),
             py::arg("bounds_max"));
+
+  // Segmented arithmetic functions
+  utils.def(
+      "segmented_arithmetic",
+      &segmented_arithmetic_cuda,
+      "Segmented arithmetic operations: D[offsets[i]:offsets[i+1], :] = B[offsets[i]:offsets[i+1], "
+      ":] OP C[i, :]\n"
+      "Performs element-wise arithmetic operations on segments of matrix B with corresponding rows "
+      "of matrix C\n"
+      "Args:\n"
+      "  tensor_b: Input matrix B (N x C)\n"
+      "  tensor_c: Segment vectors matrix C (K x C)\n"
+      "  tensor_d: Output matrix D (N x C), modified in-place\n"
+      "  offsets: Segment boundaries (K+1,) where offsets[i] to offsets[i+1] defines segment i\n"
+      "  operation: Operation type ('add', 'subtract'/'sub', 'multiply'/'mul', 'divide'/'div')\n"
+      "  kernel_type: Kernel type ('basic')",
+      py::arg("tensor_b"),
+      py::arg("tensor_c"),
+      py::arg("tensor_d"),
+      py::arg("offsets"),
+      py::arg("operation"),
+      py::arg("kernel_type") = "basic");
 }
 
 // ------------------ Implementation of dispatch helpers with mma_tile switch ------------------
