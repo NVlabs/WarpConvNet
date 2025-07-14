@@ -814,7 +814,8 @@ void segmented_arithmetic_cuda(torch::Tensor tensor_b,
   TORCH_CHECK(tensor_d.dim() == 2, "Matrix D must be 2D");
   TORCH_CHECK(offsets.dim() == 1, "Offsets must be 1D");
 
-  TORCH_CHECK(offsets.scalar_type() == torch::kInt32, "Offsets must be int32");
+  TORCH_CHECK(offsets.scalar_type() == torch::kInt32 || offsets.scalar_type() == torch::kInt64,
+              "Offsets must be int32 or int64");
 
   TORCH_CHECK(tensor_b.scalar_type() == tensor_c.scalar_type(),
               "B and C must have the same data type");

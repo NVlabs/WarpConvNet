@@ -14,7 +14,6 @@ from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinate
 @pytest.fixture
 def setup_voxels():
     """Setup test voxels with random coordinates."""
-    wp.init()
     torch.manual_seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

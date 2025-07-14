@@ -22,6 +22,8 @@
 #include <string>
 #include <type_traits>
 
+#include "vectorized_types.h"
+
 /**
  * Templated Segmented Arithmetic CUDA Kernels with Shared Memory Optimization
  *
@@ -115,6 +117,93 @@ struct Arithmetic<T, Divide> {
     } else {
       return a / b;
     }
+  }
+};
+
+// Float4 specializations
+template <>
+struct Arithmetic<float4, Add> {
+  __device__ __forceinline__ static float4 apply(const float4& a, const float4& b) {
+    return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+  }
+};
+
+template <>
+struct Arithmetic<float4, Subtract> {
+  __device__ __forceinline__ static float4 apply(const float4& a, const float4& b) {
+    return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+  }
+};
+
+template <>
+struct Arithmetic<float4, Multiply> {
+  __device__ __forceinline__ static float4 apply(const float4& a, const float4& b) {
+    return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+  }
+};
+
+template <>
+struct Arithmetic<float4, Divide> {
+  __device__ __forceinline__ static float4 apply(const float4& a, const float4& b) {
+    return make_float4(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w);
+  }
+};
+
+// Half8 specializations - using standalone functions from types.h
+template <>
+struct Arithmetic<half8, Add> {
+  __device__ __forceinline__ static half8 apply(const half8& a, const half8& b) {
+    return add_half8(a, b);
+  }
+};
+
+template <>
+struct Arithmetic<half8, Subtract> {
+  __device__ __forceinline__ static half8 apply(const half8& a, const half8& b) {
+    return sub_half8(a, b);
+  }
+};
+
+template <>
+struct Arithmetic<half8, Multiply> {
+  __device__ __forceinline__ static half8 apply(const half8& a, const half8& b) {
+    return mul_half8(a, b);
+  }
+};
+
+template <>
+struct Arithmetic<half8, Divide> {
+  __device__ __forceinline__ static half8 apply(const half8& a, const half8& b) {
+    return div_half8(a, b);
+  }
+};
+
+// Bfloat16_8 specializations - using standalone functions from types.h
+template <>
+struct Arithmetic<bfloat16_8, Add> {
+  __device__ __forceinline__ static bfloat16_8 apply(const bfloat16_8& a, const bfloat16_8& b) {
+    return add_bfloat16_8(a, b);
+  }
+};
+
+template <>
+struct Arithmetic<bfloat16_8, Subtract> {
+  __device__ __forceinline__ static bfloat16_8 apply(const bfloat16_8& a, const bfloat16_8& b) {
+    return sub_bfloat16_8(a, b);
+  }
+};
+
+template <>
+struct Arithmetic<bfloat16_8, Multiply> {
+  __device__ __forceinline__ static bfloat16_8 apply(const bfloat16_8& a, const bfloat16_8& b) {
+    return mul_bfloat16_8(a, b);
+  }
+};
+
+template <>
+struct Arithmetic<bfloat16_8, Divide> {
+  __device__ __forceinline__ static bfloat16_8 apply(const bfloat16_8& a, const bfloat16_8& b) {
+    return div_bfloat16_8(a, b);
   }
 };
 
@@ -250,13 +339,13 @@ __global__ void segmented_arithmetic_kernel(const T* __restrict__ b,
  * Uses vectorized loads/stores to process 4 floats at once
  */
 template <typename Op>
-__global__ void segmented_arithmetic_kernel_float(const float* __restrict__ b,
-                                                  const float* __restrict__ c,
-                                                  float* __restrict__ d,
-                                                  const int* __restrict__ offsets,
-                                                  int N,
-                                                  int C,
-                                                  int K) {
+__global__ void segmented_arithmetic_kernel_float4(const float* __restrict__ b,
+                                                   const float* __restrict__ c,
+                                                   float* __restrict__ d,
+                                                   const int* __restrict__ offsets,
+                                                   int N,
+                                                   int C,
+                                                   int K) {
   // Chunking parameters for shared memory optimization
   constexpr int CHUNK_SIZE = 32;
 
@@ -335,10 +424,7 @@ __global__ void segmented_arithmetic_kernel_float(const float* __restrict__ b,
           float4 d_vec;
 
           // Perform vectorized arithmetic
-          d_vec.x = Arithmetic<float, Op>::apply(b_vec.x, c_vec.x);
-          d_vec.y = Arithmetic<float, Op>::apply(b_vec.y, c_vec.y);
-          d_vec.z = Arithmetic<float, Op>::apply(b_vec.z, c_vec.z);
-          d_vec.w = Arithmetic<float, Op>::apply(b_vec.w, c_vec.w);
+          d_vec = Arithmetic<float4, Op>::apply(b_vec, c_vec);
 
           // Store result back
           *reinterpret_cast<float4*>(d_ptr) = d_vec;
@@ -379,13 +465,13 @@ __global__ void segmented_arithmetic_kernel_float(const float* __restrict__ b,
  * Uses vectorized loads/stores to process 8 halves at once (128 bits = 16 bytes)
  */
 template <typename Op>
-__global__ void segmented_arithmetic_kernel_half(const __half* __restrict__ b,
-                                                 const __half* __restrict__ c,
-                                                 __half* __restrict__ d,
-                                                 const int* __restrict__ offsets,
-                                                 int N,
-                                                 int C,
-                                                 int K) {
+__global__ void segmented_arithmetic_kernel_half8(const __half* __restrict__ b,
+                                                  const __half* __restrict__ c,
+                                                  __half* __restrict__ d,
+                                                  const int* __restrict__ offsets,
+                                                  int N,
+                                                  int C,
+                                                  int K) {
   // Chunking parameters for shared memory optimization
   constexpr int CHUNK_SIZE = 32;
 
@@ -455,24 +541,17 @@ __global__ void segmented_arithmetic_kernel_half(const __half* __restrict__ b,
         if (reinterpret_cast<uintptr_t>(b_ptr) % 16 == 0 &&
             reinterpret_cast<uintptr_t>(d_ptr) % 16 == 0 &&
             reinterpret_cast<uintptr_t>(c_ptr) % 16 == 0) {
-          // Aligned - use vectorized operations
+          // Aligned - use uint4 for 8 halves (16 bytes)
           uint4 b_vec = *reinterpret_cast<const uint4*>(b_ptr);
           uint4 c_vec = *reinterpret_cast<const uint4*>(c_ptr);
-          uint4 d_vec;
 
-          // Extract halves from uint4 and perform vectorized arithmetic
-          __half* b_halfs = reinterpret_cast<__half*>(&b_vec);
-          __half* c_halfs = reinterpret_cast<__half*>(&c_vec);
-          __half* d_halfs = reinterpret_cast<__half*>(&d_vec);
+          // Convert to half8 for arithmetic, then back to uint4 for storage
+          half8 b_half8 = *reinterpret_cast<const half8*>(&b_vec);
+          half8 c_half8 = *reinterpret_cast<const half8*>(&c_vec);
+          half8 d_half8 = Arithmetic<half8, Op>::apply(b_half8, c_half8);
 
-// Perform vectorized arithmetic for all 8 halves
-#pragma unroll
-          for (int j = 0; j < 8; ++j) {
-            d_halfs[j] = Arithmetic<__half, Op>::apply(b_halfs[j], c_halfs[j]);
-          }
-
-          // Store result back
-          *reinterpret_cast<uint4*>(d_ptr) = d_vec;
+          // Store result back as uint4
+          *reinterpret_cast<uint4*>(d_ptr) = *reinterpret_cast<const uint4*>(&d_half8);
         } else {
 // Not aligned - fall back to scalar operations
 #pragma unroll
@@ -587,24 +666,17 @@ __global__ void segmented_arithmetic_kernel_bfloat16(const __nv_bfloat16* __rest
         if (reinterpret_cast<uintptr_t>(b_ptr) % 16 == 0 &&
             reinterpret_cast<uintptr_t>(d_ptr) % 16 == 0 &&
             reinterpret_cast<uintptr_t>(c_ptr) % 16 == 0) {
-          // Aligned - use vectorized operations
+          // Aligned - use uint4 for 8 bfloat16s (16 bytes)
           uint4 b_vec = *reinterpret_cast<const uint4*>(b_ptr);
           uint4 c_vec = *reinterpret_cast<const uint4*>(c_ptr);
-          uint4 d_vec;
 
-          // Extract bfloat16s from uint4 and perform vectorized arithmetic
-          __nv_bfloat16* b_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&b_vec);
-          __nv_bfloat16* c_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&c_vec);
-          __nv_bfloat16* d_bfloat16s = reinterpret_cast<__nv_bfloat16*>(&d_vec);
+          // Convert to bfloat16_8 for arithmetic, then back to uint4 for storage
+          bfloat16_8 b_bfloat16_8 = *reinterpret_cast<const bfloat16_8*>(&b_vec);
+          bfloat16_8 c_bfloat16_8 = *reinterpret_cast<const bfloat16_8*>(&c_vec);
+          bfloat16_8 d_bfloat16_8 = Arithmetic<bfloat16_8, Op>::apply(b_bfloat16_8, c_bfloat16_8);
 
-// Perform vectorized arithmetic for all 8 bfloat16s
-#pragma unroll
-          for (int j = 0; j < 8; ++j) {
-            d_bfloat16s[j] = Arithmetic<__nv_bfloat16, Op>::apply(b_bfloat16s[j], c_bfloat16s[j]);
-          }
-
-          // Store result back
-          *reinterpret_cast<uint4*>(d_ptr) = d_vec;
+          // Store result back as uint4
+          *reinterpret_cast<uint4*>(d_ptr) = *reinterpret_cast<const uint4*>(&d_bfloat16_8);
         } else {
 // Not aligned - fall back to scalar operations
 #pragma unroll
@@ -697,20 +769,20 @@ int run_segmented_arithmetic_templated_impl(const void* tensor_b,
   if (kernel_type == "basic") {
     if constexpr (std::is_same_v<ElementB, float>) {
       // Calculate grid dimensions for chunked approach
-      int total_threads = N * threads_per_block;  // Simplified thread calculation for chunking
+      int total_threads = N;
       int blocks_x = (total_threads + threads_per_block - 1) / threads_per_block;
       grid_dim = dim3(blocks_x, num_chunks, 1);
 
-      segmented_arithmetic_kernel_float<Op>
+      segmented_arithmetic_kernel_float4<Op>
           <<<grid_dim, threads_per_block, shared_mem_size, stream>>>(
               b_ptr, c_ptr, d_ptr, offsets, N, C, K);
     } else if constexpr (std::is_same_v<ElementB, cutlass::half_t>) {
       // Calculate grid dimensions for chunked approach
-      int total_threads = N * threads_per_block;  // Simplified thread calculation for chunking
+      int total_threads = N;
       int blocks_x = (total_threads + threads_per_block - 1) / threads_per_block;
       grid_dim = dim3(blocks_x, num_chunks, 1);
 
-      segmented_arithmetic_kernel_half<Op>
+      segmented_arithmetic_kernel_half8<Op>
           <<<grid_dim, threads_per_block, shared_mem_size, stream>>>(
               reinterpret_cast<const __half*>(b_ptr),
               reinterpret_cast<const __half*>(c_ptr),
@@ -721,7 +793,7 @@ int run_segmented_arithmetic_templated_impl(const void* tensor_b,
               K);
     } else if constexpr (std::is_same_v<ElementB, cutlass::bfloat16_t>) {
       // Calculate grid dimensions for chunked approach
-      int total_threads = N * threads_per_block;  // Simplified thread calculation for chunking
+      int total_threads = N;
       int blocks_x = (total_threads + threads_per_block - 1) / threads_per_block;
       grid_dim = dim3(blocks_x, num_chunks, 1);
 
@@ -736,7 +808,7 @@ int run_segmented_arithmetic_templated_impl(const void* tensor_b,
               K);
     } else if constexpr (std::is_same_v<ElementB, double>) {
       // Calculate grid dimensions for chunked approach
-      int total_threads = N * threads_per_block;  // Simplified thread calculation for chunking
+      int total_threads = N;
       int blocks_x = (total_threads + threads_per_block - 1) / threads_per_block;
       grid_dim = dim3(blocks_x, num_chunks, 1);
 
@@ -751,6 +823,7 @@ int run_segmented_arithmetic_templated_impl(const void* tensor_b,
   }
 
   // Check for CUDA errors
+  cudaStreamSynchronize(stream);
   cudaError_t cuda_status = cudaGetLastError();
   if (cuda_status != cudaSuccess) {
     return static_cast<int>(SegmentedArithmeticStatus::kErrorKernelExecution);

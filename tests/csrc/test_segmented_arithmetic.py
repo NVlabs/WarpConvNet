@@ -122,6 +122,7 @@ def test_segmented_arithmetic_basic(operation, dtype):
         operation=operation,
         kernel_type="basic",
     )
+    torch.cuda.synchronize()
 
     # Compare results
     if dtype == torch.float16:
@@ -134,17 +135,11 @@ def test_segmented_arithmetic_basic(operation, dtype):
     ), f"Operation {operation} failed. Max diff: {torch.max(torch.abs(D - expected))}"
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.float64])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
 def test_segmented_arithmetic_dtypes(dtype):
     """Test different data types."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-
-    # Skip float64 for half precision operations in simple test
-    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
-        pytest.skip("BFloat16 not supported on this device")
-
-    device = torch.device("cuda")
 
     # Create test data
     B, C_segments, D, segment_offsets, _ = create_test_data(device="cuda", dtype=dtype)
@@ -156,6 +151,7 @@ def test_segmented_arithmetic_dtypes(dtype):
     _C.utils.segmented_arithmetic(
         tensor_b=B, tensor_c=C_segments, tensor_d=D, offsets=segment_offsets, operation="add"
     )
+    torch.cuda.synchronize()
 
     # Set tolerance based on dtype
     if dtype == torch.float16:
@@ -201,6 +197,7 @@ def test_segmented_arithmetic_large_input():
     _C.utils.segmented_arithmetic(
         tensor_b=B, tensor_c=C_segments, tensor_d=D, offsets=segment_offsets, operation="multiply"
     )
+    torch.cuda.synchronize()
 
     # Verify a few random segments
     for _ in range(5):
@@ -228,6 +225,7 @@ def test_segmented_arithmetic_edge_cases():
     segment_offsets = torch.tensor([0, 10], device=device, dtype=torch.int32)
 
     _C.utils.segmented_arithmetic(B, C_segments, D, segment_offsets, "add")
+    torch.cuda.synchronize()
     expected = B + C_segments[0:1]
     assert torch.allclose(D, expected, atol=1e-5)
 
@@ -239,6 +237,7 @@ def test_segmented_arithmetic_edge_cases():
     segment_offsets = torch.arange(N + 1, device=device, dtype=torch.int32)
 
     _C.utils.segmented_arithmetic(B, C_segments, D, segment_offsets, "subtract")
+    torch.cuda.synchronize()
     expected = B - C_segments
     assert torch.allclose(D, expected, atol=1e-5)
 
@@ -258,21 +257,25 @@ def test_segmented_arithmetic_error_cases():
     # Test invalid operation
     with pytest.raises(Exception):
         _C.utils.segmented_arithmetic(B, C_segments, D, segment_offsets, "invalid_op")
+        torch.cuda.synchronize()
 
     # Test dimension mismatch
     C_wrong = torch.randn(2, 3, device=device, dtype=torch.float32)  # Wrong channels
     with pytest.raises(Exception):
         _C.utils.segmented_arithmetic(B, C_wrong, D, segment_offsets, "add")
+        torch.cuda.synchronize()
 
     # Test wrong offset size
     wrong_offsets = torch.tensor([0, 10], device=device, dtype=torch.int32)  # K+1 != 3
     with pytest.raises(Exception):
         _C.utils.segmented_arithmetic(B, C_segments, D, wrong_offsets, "add")
+        torch.cuda.synchronize()
 
     # Test CPU tensors (should fail)
     B_cpu = torch.randn(10, 5, dtype=torch.float32)
     with pytest.raises(Exception):
         _C.utils.segmented_arithmetic(B_cpu, C_segments, D, segment_offsets, "add")
+        torch.cuda.synchronize()
 
 
 def test_segmented_arithmetic_inplace_modification():
@@ -290,6 +293,7 @@ def test_segmented_arithmetic_inplace_modification():
 
     # Run operation
     _C.utils.segmented_arithmetic(B, C_segments, D, segment_offsets, "add")
+    torch.cuda.synchronize()
 
     # Verify tensor is modified in-place
     assert id(D) == D_id, "Tensor D should be modified in-place"
@@ -308,6 +312,7 @@ def test_segmented_arithmetic_operation_aliases(operation):
 
     # This should not raise an exception
     _C.utils.segmented_arithmetic(B, C_segments, D, segment_offsets, operation)
+    torch.cuda.synchronize()
 
     # Verify result is not all zeros (operation was applied)
     assert not torch.allclose(D, torch.zeros_like(D))
@@ -330,6 +335,7 @@ def test_segmented_arithmetic_memory_layout():
 
     # Should work (tensors will be made contiguous internally)
     _C.utils.segmented_arithmetic(B, C_segments, D, segment_offsets, "add")
+    torch.cuda.synchronize()
 
     # Verify result is meaningful
     expected = compute_reference_result(B, C_segments, segment_offsets, "add")
