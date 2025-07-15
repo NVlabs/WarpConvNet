@@ -189,16 +189,16 @@ def _implicit_depthwise_forward_logic(
     weight: Float[Tensor, "K C"],  # noqa: F821
     kernel_map: IntSearchResult,
     num_out_coords: int,
-    compute_dtype: Optional[torch.dtype] = None,
 ) -> Float[Tensor, "M C"]:  # noqa: F821
     if _C is None:
         raise ImportError(
             "warpconvnet._C is not available. Please install warpconvnet with CUDA support."
         )
 
+    in_dtype = _min_dtype(in_features.dtype, weight.dtype)
     device = in_features.device
-    comp_in_feats = _maybe_cast(in_features, compute_dtype)
-    comp_weight = _maybe_cast(weight, compute_dtype)
+    comp_in_feats = _maybe_cast(in_features, in_dtype)
+    comp_weight = _maybe_cast(weight, in_dtype)
     iden_idx = kernel_map.identity_map_index
 
     if iden_idx is not None:
@@ -233,18 +233,16 @@ def _implicit_depthwise_backward_logic(
     in_features: Float[Tensor, "N C"],  # noqa: F821
     weight: Float[Tensor, "K C"],  # noqa: F821
     kernel_map: IntSearchResult,
-    compute_dtype: Optional[torch.dtype] = None,
     device: torch.device = None,
 ) -> Tuple[Float[Tensor, "N C"], Float[Tensor, "K C"]]:  # noqa: F821
     if _C is None:
         raise ImportError(
             "warpconvnet._C is not available. Please install warpconvnet with CUDA support."
         )
-
     if device is None:
         device = grad_output.device
 
-    dtype_to_use = compute_dtype if compute_dtype is not None else in_features.dtype
+    dtype_to_use = _min_dtype(in_features.dtype, weight.dtype)
     comp_in_feats = in_features.to(device=device, dtype=dtype_to_use)
     comp_weight = weight.to(device=device, dtype=dtype_to_use)
     comp_grad_output = grad_output.to(device=device, dtype=dtype_to_use)
@@ -333,7 +331,6 @@ def _run_depthwise_forward_benchmarks(
                 weight,
                 kernel_map,
                 num_out_coords,
-                compute_dtype,
             )
         else:
             raise ValueError(
@@ -443,7 +440,6 @@ def _run_depthwise_backward_benchmarks(
                 in_features,
                 weight,
                 kernel_map,
-                compute_dtype,
                 device,
             )
         else:
@@ -575,7 +571,6 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 weight,
                 kernel_map,
                 num_out_coords,
-                compute_dtype,
             )
         else:
             raise ValueError(f"Unsupported forward algorithm: {chosen_fwd_algo}")
@@ -679,7 +674,6 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 in_features,
                 weight,
                 kernel_map,
-                compute_dtype,
                 device,
             )
         else:
