@@ -14,6 +14,7 @@ def apply_feature_transform(
     input: Union[Geometry, Tensor],
     transform: Callable,
 ):
+    """Apply a function to the feature tensor of a Geometry or raw Tensor."""
     if isinstance(input, Geometry):
         return input.replace(batched_features=transform(input.feature_tensor))
     else:
@@ -22,6 +23,8 @@ def apply_feature_transform(
 
 
 def create_activation_function(torch_func):
+    """Wrap a ``torch.nn.functional`` activation for use with Geometry objects."""
+
     def wrapper(input: Geometry):
         return apply_feature_transform(input, torch_func)
 
@@ -42,8 +45,12 @@ log_softmax = create_activation_function(F.log_softmax)
 
 # Normalization functions
 def create_norm_function(torch_norm_func):
+    """Create a geometry-aware wrapper around a normalization function."""
+
     def wrapper(input: Geometry, *args, **kwargs):
-        return apply_feature_transform(input, lambda x: torch_norm_func(x, *args, **kwargs))
+        return apply_feature_transform(
+            input, lambda x: torch_norm_func(x, *args, **kwargs)
+        )
 
     return wrapper
 
@@ -61,6 +68,7 @@ group_norm = create_norm_function(F.group_norm)
 
 # Concatenation
 def cat(*inputs: Geometry, dim: int = -1):
+    """Concatenate feature tensors from multiple geometries along ``dim``."""
     # If called with a single sequence argument, unpack it
     if len(inputs) == 1 and isinstance(inputs[0], Sequence):
         inputs = inputs[0]
@@ -69,7 +77,8 @@ def cat(*inputs: Geometry, dim: int = -1):
     ), f"Expected all inputs to be BatchedSpatialFeatures, got {type(inputs)}"
     # Ignore the log, int type difference
     assert all(
-        torch.allclose(input.offsets.long(), inputs[0].offsets.long()) for input in inputs
+        torch.allclose(input.offsets.long(), inputs[0].offsets.long())
+        for input in inputs
     ), "All inputs must have the same offsets"
     return inputs[0].replace(
         batched_features=torch.cat([input.feature_tensor for input in inputs], dim=dim),

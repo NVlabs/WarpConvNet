@@ -28,6 +28,46 @@ from warpconvnet.constants import (
 
 
 class SpatiallySparseConv(BaseSpatialModule):
+    """Sparse convolution layer for :class:`~warpconvnet.geometry.types.voxels.Voxels`.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input feature channels.
+    out_channels : int
+        Number of output feature channels.
+    kernel_size : int or tuple of int
+        Size of the convolution kernel.
+    stride : int or tuple of int, optional
+        Convolution stride. Defaults to ``1``.
+    dilation : int or tuple of int, optional
+        Spacing between kernel elements. Defaults to ``1``.
+    bias : bool, optional
+        If ``True`` adds a learnable bias to the output. Defaults to ``True``.
+    transposed : bool, optional
+        Perform a transposed convolution. Defaults to ``False``.
+    generative : bool, optional
+        Use generative convolution. Defaults to ``False``.
+    kernel_matmul_batch_size : int, optional
+        Batch size used for implicit matrix multiplications. Defaults to ``2``.
+    num_spatial_dims : int, optional
+        Number of spatial dimensions. Defaults to ``3``.
+    fwd_algo : :class:`SPARSE_CONV_FWD_ALGO_MODE` or str, optional
+        Forward algorithm to use. Defaults to environment setting.
+    bwd_algo : :class:`SPARSE_CONV_BWD_ALGO_MODE` or str, optional
+        Backward algorithm to use. Defaults to environment setting.
+    stride_mode : :class:`STRIDED_CONV_MODE`, optional
+        How to interpret ``stride`` when ``transposed`` is ``True``.
+    order : :class:`POINT_ORDERING`, optional
+        Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
+    compute_dtype : torch.dtype, optional
+        Data type used for intermediate computations.
+    implicit_matmul_fwd_block_size : int, optional
+        CUDA block size for implicit forward matmuls.
+    implicit_matmul_bwd_block_size : int, optional
+        CUDA block size for implicit backward matmuls.
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -74,10 +114,14 @@ class SpatiallySparseConv(BaseSpatialModule):
 
         # If string, update to enum
         self.fwd_algo = (
-            SPARSE_CONV_FWD_ALGO_MODE(fwd_algo) if isinstance(fwd_algo, str) else fwd_algo
+            SPARSE_CONV_FWD_ALGO_MODE(fwd_algo)
+            if isinstance(fwd_algo, str)
+            else fwd_algo
         )
         self.bwd_algo = (
-            SPARSE_CONV_BWD_ALGO_MODE(bwd_algo) if isinstance(bwd_algo, str) else bwd_algo
+            SPARSE_CONV_BWD_ALGO_MODE(bwd_algo)
+            if isinstance(bwd_algo, str)
+            else bwd_algo
         )
         self.stride_mode = stride_mode
         self.order = order
@@ -87,7 +131,9 @@ class SpatiallySparseConv(BaseSpatialModule):
 
         self.bias: Optional[nn.Parameter] = None
 
-        self.weight = nn.Parameter(torch.randn(np.prod(_kernel_size), in_channels, out_channels))
+        self.weight = nn.Parameter(
+            torch.randn(np.prod(_kernel_size), in_channels, out_channels)
+        )
         if bias:
             self.bias = nn.Parameter(torch.randn(out_channels))
         else:
@@ -123,7 +169,9 @@ class SpatiallySparseConv(BaseSpatialModule):
         fan_in, fan_out = self._calculate_fan_in_and_fan_out()
         return fan_in if mode == "fan_in" else fan_out
 
-    def _custom_kaiming_uniform_(self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"):
+    def _custom_kaiming_uniform_(
+        self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"
+    ):
         fan = self._calculate_correct_fan(mode)
         gain = calculate_gain(nonlinearity, a)
         std = gain / math.sqrt(fan)
@@ -171,6 +219,44 @@ class SpatiallySparseConv(BaseSpatialModule):
 
 
 class SparseConv2d(SpatiallySparseConv):
+    """2D sparse convolution.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input feature channels.
+    out_channels : int
+        Number of output feature channels.
+    kernel_size : int or tuple of int
+        Size of the convolution kernel.
+    stride : int or tuple of int, optional
+        Convolution stride. Defaults to ``1``.
+    dilation : int or tuple of int, optional
+        Spacing between kernel elements. Defaults to ``1``.
+    bias : bool, optional
+        If ``True`` adds a learnable bias to the output. Defaults to ``True``.
+    transposed : bool, optional
+        Perform a transposed convolution. Defaults to ``False``.
+    generative : bool, optional
+        Use generative convolution. Defaults to ``False``.
+    stride_mode : :class:`STRIDED_CONV_MODE`, optional
+        How to interpret ``stride`` when ``transposed`` is ``True``.
+    fwd_algo : :class:`SPARSE_CONV_FWD_ALGO_MODE` or str, optional
+        Forward algorithm to use.
+    bwd_algo : :class:`SPARSE_CONV_BWD_ALGO_MODE` or str, optional
+        Backward algorithm to use.
+    kernel_matmul_batch_size : int, optional
+        Batch size used for implicit matrix multiplications. Defaults to ``2``.
+    order : :class:`POINT_ORDERING`, optional
+        Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
+    compute_dtype : torch.dtype, optional
+        Data type used for intermediate computations.
+    implicit_matmul_fwd_block_size : int, optional
+        CUDA block size for implicit forward matmuls.
+    implicit_matmul_bwd_block_size : int, optional
+        CUDA block size for implicit backward matmuls.
+    """
+
     def __init__(
         self,
         in_channels,
@@ -212,6 +298,44 @@ class SparseConv2d(SpatiallySparseConv):
 
 
 class SparseConv3d(SpatiallySparseConv):
+    """3D sparse convolution.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input feature channels.
+    out_channels : int
+        Number of output feature channels.
+    kernel_size : int or tuple of int
+        Size of the convolution kernel.
+    stride : int or tuple of int, optional
+        Convolution stride. Defaults to ``1``.
+    dilation : int or tuple of int, optional
+        Spacing between kernel elements. Defaults to ``1``.
+    bias : bool, optional
+        If ``True`` adds a learnable bias to the output. Defaults to ``True``.
+    transposed : bool, optional
+        Perform a transposed convolution. Defaults to ``False``.
+    generative : bool, optional
+        Use generative convolution. Defaults to ``False``.
+    stride_mode : :class:`STRIDED_CONV_MODE`, optional
+        How to interpret ``stride`` when ``transposed`` is ``True``.
+    fwd_algo : :class:`SPARSE_CONV_FWD_ALGO_MODE` or str, optional
+        Forward algorithm to use.
+    bwd_algo : :class:`SPARSE_CONV_BWD_ALGO_MODE` or str, optional
+        Backward algorithm to use.
+    kernel_matmul_batch_size : int, optional
+        Batch size used for implicit matrix multiplications. Defaults to ``2``.
+    order : :class:`POINT_ORDERING`, optional
+        Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
+    compute_dtype : torch.dtype, optional
+        Data type used for intermediate computations.
+    implicit_matmul_fwd_block_size : int, optional
+        CUDA block size for implicit forward matmuls.
+    implicit_matmul_bwd_block_size : int, optional
+        CUDA block size for implicit backward matmuls.
+    """
+
     def __init__(
         self,
         in_channels,

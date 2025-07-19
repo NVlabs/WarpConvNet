@@ -25,6 +25,10 @@ def build_docs():
         print("Generating API documentation...")
         subprocess.run([sys.executable, "scripts/generate_api_docs.py"], check=True, env=env)
 
+        # Generate diagrams
+        print("Generating diagrams...")
+        subprocess.run([sys.executable, "scripts/generate_diagrams.py"], check=True, env=env)
+
         # Build the documentation
         print("Building documentation...")
         result = subprocess.run(

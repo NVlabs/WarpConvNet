@@ -15,6 +15,31 @@ from warpconvnet.utils.ntuple import ntuple
 
 
 class GridConv(BaseSpatialModule):
+    """Convolutional layer for :class:`~warpconvnet.geometry.types.grid.Grid` data.
+
+    Parameters mirror those of :class:`torch.nn.Conv3d` but operate on a
+    ``Grid`` object instead of plain tensors.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input feature channels.
+    out_channels : int
+        Number of output feature channels.
+    kernel_size : int or tuple of int
+        Size of the convolution kernel.
+    stride : int or tuple of int, optional
+        Stride of the convolution. Defaults to ``1``.
+    padding : int or tuple of int, optional
+        Zero-padding added to all three sides of the input. Defaults to ``0``.
+    dilation : int or tuple of int, optional
+        Spacing between kernel elements. Defaults to ``1``.
+    bias : bool, optional
+        If ``True``, adds a learnable bias to the output. Defaults to ``True``.
+    num_spatial_dims : int, optional
+        Number of spatial dimensions. Defaults to ``3``.
+    """
+
     def __init__(
         self,
         in_channels: int,

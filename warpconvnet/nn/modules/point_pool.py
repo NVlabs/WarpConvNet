@@ -11,10 +11,36 @@ from warpconvnet.nn.functional.point_pool import point_pool
 from warpconvnet.nn.functional.point_unpool import FEATURE_UNPOOLING_MODE, point_unpool
 from warpconvnet.ops.reductions import REDUCTIONS
 
-__all__ = ["PointPoolBase", "PointMaxPool", "PointAvgPool", "PointSumPool", "PointUnpool"]
+__all__ = [
+    "PointPoolBase",
+    "PointMaxPool",
+    "PointAvgPool",
+    "PointSumPool",
+    "PointUnpool",
+]
 
 
 class PointPoolBase(BaseSpatialModule):
+    """Base module for pooling points or voxels.
+
+    Parameters
+    ----------
+    reduction : str or :class:`REDUCTIONS`, optional
+        Reduction method used when merging features. Defaults to ``REDUCTIONS.MAX``.
+    downsample_max_num_points : int, optional
+        Maximum number of points to keep when downsampling.
+    downsample_voxel_size : float, optional
+        Size of voxels used for downsampling.
+    return_type : {"point", "sparse"}, optional
+        Output geometry type. Defaults to ``"point"``.
+    unique_method : {"torch", "ravel", "morton"}, optional
+        Method used to find unique voxel indices. Defaults to ``"torch"``.
+    avereage_pooled_coordinates : bool, optional
+        If ``True`` average coordinates of points within each voxel. Defaults to ``False``.
+    return_neighbor_search_result : bool, optional
+        If ``True`` also return the neighbor search result. Defaults to ``False``.
+    """
+
     def __init__(
         self,
         reduction: Union[str, REDUCTIONS] = REDUCTIONS.MAX,
@@ -50,6 +76,20 @@ class PointPoolBase(BaseSpatialModule):
 
 
 class PointMaxPool(PointPoolBase):
+    """Point pooling using ``max`` reduction.
+
+    Parameters
+    ----------
+    downsample_max_num_points : int, optional
+        Maximum number of points to keep when downsampling.
+    downsample_voxel_size : float, optional
+        Size of voxels used for downsampling.
+    return_type : {"point", "sparse"}, optional
+        Output geometry type. Defaults to ``"point"``.
+    return_neighbor_search_result : bool, optional
+        If ``True`` also return the neighbor search result. Defaults to ``False``.
+    """
+
     def __init__(
         self,
         downsample_max_num_points: Optional[int] = None,
@@ -67,6 +107,20 @@ class PointMaxPool(PointPoolBase):
 
 
 class PointAvgPool(PointPoolBase):
+    """Point pooling using ``mean`` reduction.
+
+    Parameters
+    ----------
+    downsample_max_num_points : int, optional
+        Maximum number of points to keep when downsampling.
+    downsample_voxel_size : float, optional
+        Size of voxels used for downsampling.
+    return_type : {"point", "sparse"}, optional
+        Output geometry type. Defaults to ``"point"``.
+    return_neighbor_search_result : bool, optional
+        If ``True`` also return the neighbor search result. Defaults to ``False``.
+    """
+
     def __init__(
         self,
         downsample_max_num_points: Optional[int] = None,
@@ -84,6 +138,20 @@ class PointAvgPool(PointPoolBase):
 
 
 class PointSumPool(PointPoolBase):
+    """Point pooling using ``sum`` reduction.
+
+    Parameters
+    ----------
+    downsample_max_num_points : int, optional
+        Maximum number of points to keep when downsampling.
+    downsample_voxel_size : float, optional
+        Size of voxels used for downsampling.
+    return_type : {"point", "sparse"}, optional
+        Output geometry type. Defaults to ``"point"``.
+    return_neighbor_search_result : bool, optional
+        If ``True`` also return the neighbor search result. Defaults to ``False``.
+    """
+
     def __init__(
         self,
         downsample_max_num_points: Optional[int] = None,
@@ -101,9 +169,21 @@ class PointSumPool(PointPoolBase):
 
 
 class PointUnpool(BaseSpatialModule):
+    """Undo point pooling by scattering pooled features back to the input cloud.
+
+    Parameters
+    ----------
+    unpooling_mode : {"repeat", "interpolate"} or :class:`FEATURE_UNPOOLING_MODE`, optional
+        Strategy used when unpooling features. Defaults to ``FEATURE_UNPOOLING_MODE.REPEAT``.
+    concat_unpooled_pc : bool, optional
+        If ``True`` concatenate the unpooled point cloud with the input. Defaults to ``False``.
+    """
+
     def __init__(
         self,
-        unpooling_mode: Union[str, FEATURE_UNPOOLING_MODE] = FEATURE_UNPOOLING_MODE.REPEAT,
+        unpooling_mode: Union[
+            str, FEATURE_UNPOOLING_MODE
+        ] = FEATURE_UNPOOLING_MODE.REPEAT,
         concat_unpooled_pc: bool = False,
     ):
         super().__init__()

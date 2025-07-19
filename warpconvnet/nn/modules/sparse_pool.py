@@ -18,6 +18,18 @@ from warpconvnet.ops.reductions import REDUCTION_TYPES_STR, REDUCTIONS
 
 
 class SparsePool(BaseSpatialModule):
+    """Reduce features of a ``Voxels`` object using a strided kernel.
+
+    Parameters
+    ----------
+    kernel_size : int
+        Size of the pooling kernel.
+    stride : int
+        Stride between pooling windows.
+    reduce : {"max", "min", "mean", "sum", "random"}, optional
+        Reduction to apply within each window. Defaults to ``"max"``.
+    """
+
     def __init__(
         self,
         kernel_size: int,
@@ -42,6 +54,16 @@ class SparsePool(BaseSpatialModule):
 
 
 class SparseMaxPool(SparsePool):
+    """Max pooling for sparse tensors.
+
+    Parameters
+    ----------
+    kernel_size : int
+        Size of the pooling kernel.
+    stride : int
+        Stride between pooling windows.
+    """
+
     def __init__(
         self,
         kernel_size: int,
@@ -51,6 +73,16 @@ class SparseMaxPool(SparsePool):
 
 
 class SparseMinPool(SparsePool):
+    """Min pooling for sparse tensors.
+
+    Parameters
+    ----------
+    kernel_size : int
+        Size of the pooling kernel.
+    stride : int
+        Stride between pooling windows.
+    """
+
     def __init__(
         self,
         kernel_size: int,
@@ -60,6 +92,14 @@ class SparseMinPool(SparsePool):
 
 
 class GlobalPool(BaseSpatialModule):
+    """Pool features across the entire geometry.
+
+    Parameters
+    ----------
+    reduce : {"min", "max", "mean", "sum"}, optional
+        Reduction to apply over all features. Defaults to ``"max"``.
+    """
+
     def __init__(self, reduce: Literal["min", "max", "mean", "sum"] = "max"):
         super().__init__()
         self.reduce = reduce
@@ -69,6 +109,18 @@ class GlobalPool(BaseSpatialModule):
 
 
 class SparseUnpool(BaseSpatialModule):
+    """Unpool a sparse tensor back to a higher resolution.
+
+    Parameters
+    ----------
+    kernel_size : int
+        Size of the unpooling kernel.
+    stride : int
+        Stride between unpooling windows.
+    concat_unpooled_st : bool, optional
+        If ``True`` concatenate the unpooled tensor with the input. Defaults to ``True``.
+    """
+
     def __init__(self, kernel_size: int, stride: int, concat_unpooled_st: bool = True):
         super().__init__()
         self.kernel_size = kernel_size
@@ -86,10 +138,20 @@ class SparseUnpool(BaseSpatialModule):
 
 
 class PointToSparseWrapper(BaseSpatialModule):
-    """
-    A module that pools points to a spatially sparse tensor given a voxel size and pass it to the inner module.
+    """Pool points into a sparse tensor, apply an inner module and unpool back to points.
 
-    The output of the inner module is then converted back to a point cloud.
+    Parameters
+    ----------
+    inner_module : :class:`BaseSpatialModule`
+        Module applied on the pooled sparse tensor.
+    voxel_size : float
+        Voxel size used to pool the input points.
+    reduction : :class:`REDUCTIONS` or str, optional
+        Reduction used when pooling points. Defaults to ``REDUCTIONS.MEAN``.
+    unique_method : {"morton", "ravel", "torch"}, optional
+        Method used for hashing voxel indices. Defaults to ``"morton"``.
+    concat_unpooled_pc : bool, optional
+        If ``True`` concatenate the unpooled result with the original input. Defaults to ``True``.
     """
 
     def __init__(

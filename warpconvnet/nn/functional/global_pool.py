@@ -28,6 +28,15 @@ def _global_pool(
 
 
 def global_pool(x: Geometry, reduce: Literal["max", "mean", "sum"]) -> Geometry:
+    """Pool over all coordinates and return a single feature per batch.
+
+    Args:
+        x: Input geometry instance to pool.
+        reduce: Reduction type used to combine features.
+
+    Returns:
+        Geometry object with a single coordinate and feature per batch.
+    """
     B = x.batch_size
     num_spatial_dims = x.num_spatial_dims
     # Generate output coordinates
@@ -38,7 +47,9 @@ def global_pool(x: Geometry, reduce: Literal["max", "mean", "sum"]) -> Geometry:
     output_features = _global_pool(x, reduce)
 
     return x.replace(
-        batched_coordinates=x.batched_coordinates.__class__(output_coords, output_offsets),
+        batched_coordinates=x.batched_coordinates.__class__(
+            output_coords, output_offsets
+        ),
         batched_features=x.batched_features.__class__(output_features, output_offsets),
         offsets=output_offsets,
     )

@@ -41,7 +41,9 @@ logger = get_logger(__name__)
 try:
     import warpconvnet._C as _C
 except ImportError as e:
-    logger.warning(f"Error importing warpconvnet._C: {e}. Using fallback implementation.")
+    logger.warning(
+        f"Error importing warpconvnet._C: {e}. Using fallback implementation."
+    )
     _C = None
 
 
@@ -91,7 +93,10 @@ def _initialize_depthwise_benchmark_cache():
         _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.update(
             cached_results.get("sparse_conv_depthwise_backward_results", {})
         )
-        if _BENCHMARK_DEPTHWISE_FORWARD_RESULTS or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS:
+        if (
+            _BENCHMARK_DEPTHWISE_FORWARD_RESULTS
+            or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS
+        ):
             logger.info(
                 f"Loaded {len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward and "
                 f"{len(_BENCHMARK_DEPTHWISE_BACKWARD_RESULTS)} depthwise backward benchmark configurations from cache"
@@ -111,6 +116,7 @@ def _explicit_depthwise_forward_logic(
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype] = None,
 ) -> Float[Tensor, "M C"]:  # noqa: F821
+    """Forward pass for depthwise convolution using explicit GEMM."""
     device = in_features.device
     comp_in_feats = _maybe_cast(in_features, compute_dtype)
     comp_weight = _maybe_cast(weight, compute_dtype)
@@ -144,6 +150,7 @@ def _explicit_depthwise_backward_logic(
     compute_dtype: Optional[torch.dtype] = None,
     device: torch.device = None,
 ) -> Tuple[Float[Tensor, "N C"], Float[Tensor, "K C"]]:  # noqa: F821
+    """Backward pass for explicit depthwise convolution."""
     if device is None:
         device = grad_output.device
 
@@ -190,6 +197,7 @@ def _implicit_depthwise_forward_logic(
     kernel_map: IntSearchResult,
     num_out_coords: int,
 ) -> Float[Tensor, "M C"]:  # noqa: F821
+    """Forward pass for depthwise convolution using implicit GEMM kernels."""
     if _C is None:
         raise ImportError(
             "warpconvnet._C is not available. Please install warpconvnet with CUDA support."
@@ -222,7 +230,12 @@ def _implicit_depthwise_forward_logic(
         # Use implicit_fma: c[out_index] += a[in_index] * b
         # output_feature_tensor[out_map] += comp_in_feats[in_map] * comp_weight[i]
         _C.fma.implicit_fma(
-            comp_in_feats, comp_weight[i], output_feature_tensor, in_map, out_map, "basic"
+            comp_in_feats,
+            comp_weight[i],
+            output_feature_tensor,
+            in_map,
+            out_map,
+            "basic",
         )
 
     return output_feature_tensor.to(dtype=in_features.dtype)
@@ -235,6 +248,7 @@ def _implicit_depthwise_backward_logic(
     kernel_map: IntSearchResult,
     device: torch.device = None,
 ) -> Tuple[Float[Tensor, "N C"], Float[Tensor, "K C"]]:  # noqa: F821
+    """Backward pass for depthwise convolution using implicit kernels."""
     if _C is None:
         raise ImportError(
             "warpconvnet._C is not available. Please install warpconvnet with CUDA support."
@@ -378,14 +392,18 @@ def _run_depthwise_forward_benchmarks(
             f"Depthwise forward benchmark result: {algo_mode.value} {params_config} {current_algo_min_time_ms:.2f}ms"
         )
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
+            all_benchmark_results.append(
+                (algo_mode, params_config, current_algo_min_time_ms)
+            )
 
     if not all_benchmark_results:
         logger.warning(
             "Warning: No depthwise forward benchmark was successful. Defaulting to EXPLICIT."
         )
         with timer:
-            _execute_single_depthwise_fwd_pass(SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {})
+            _execute_single_depthwise_fwd_pass(
+                SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {}
+            )
         fallback_time = timer.elapsed_time if timer.elapsed_time is not None else 0.0
         all_benchmark_results.append(
             (SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {}, fallback_time)
@@ -488,14 +506,18 @@ def _run_depthwise_backward_benchmarks(
             f"Depthwise backward benchmark result: {algo_mode.value} {params_config} {current_algo_min_time_ms:.2f}ms"
         )
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
+            all_benchmark_results.append(
+                (algo_mode, params_config, current_algo_min_time_ms)
+            )
 
     if not all_benchmark_results:
         logger.warning(
             "Warning: No depthwise backward benchmark was successful. Defaulting to EXPLICIT."
         )
         with timer:
-            _execute_single_depthwise_bwd_pass(SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {})
+            _execute_single_depthwise_bwd_pass(
+                SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {}
+            )
         fallback_time = timer.elapsed_time if timer.elapsed_time is not None else 0.0
         all_benchmark_results.append(
             (SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {}, fallback_time)
@@ -533,14 +555,18 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 num_in_coords=in_features.shape[0],
                 num_out_coords=num_out_coords,
                 in_channels=in_features.shape[1],
-                out_channels=weight.shape[1],  # For depthwise, in_channels == out_channels
+                out_channels=weight.shape[
+                    1
+                ],  # For depthwise, in_channels == out_channels
                 kernel_volume=weight.shape[0],
                 in_dtype=in_features.dtype,
             )
             global _BENCHMARK_DEPTHWISE_FORWARD_RESULTS  # noqa: F824
             cached_result = _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.get(config)
             if cached_result is not None:
-                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]  # Best is first
+                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[
+                    0
+                ]  # Best is first
             else:
                 all_fwd_benchmark_results = _run_depthwise_forward_benchmarks(
                     in_features,
@@ -550,9 +576,9 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                     compute_dtype,
                 )
                 _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[config] = all_fwd_benchmark_results
-                chosen_fwd_algo, chosen_fwd_params, min_time = all_fwd_benchmark_results[
-                    0
-                ]  # Best is first
+                chosen_fwd_algo, chosen_fwd_params, min_time = (
+                    all_fwd_benchmark_results[0]
+                )  # Best is first
 
                 # Mark cache as dirty - background thread will save periodically
                 mark_benchmark_cache_dirty()
@@ -622,8 +648,12 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             or N_in == 0
             or grad_output.shape[0] == 0
         ):
-            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            grad_in_final = (
+                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            )
+            grad_weight_final = (
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            )
             return _backward_return(grad_in_final, grad_weight_final, 7)
 
         chosen_bwd_algo = initial_bwd_algo
@@ -641,7 +671,9 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             global _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS  # noqa: F824
             cached_result = _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.get(config)
             if cached_result is not None:
-                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]  # Best is first
+                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[
+                    0
+                ]  # Best is first
             else:
                 all_bwd_benchmark_results = _run_depthwise_backward_benchmarks(
                     grad_output,
@@ -651,10 +683,12 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                     compute_dtype,
                     device,
                 )
-                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
-                chosen_bwd_algo, chosen_bwd_params, min_time = all_bwd_benchmark_results[
-                    0
-                ]  # Best is first
+                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = (
+                    all_bwd_benchmark_results
+                )
+                chosen_bwd_algo, chosen_bwd_params, min_time = (
+                    all_bwd_benchmark_results[0]
+                )  # Best is first
 
                 # Mark cache as dirty - background thread will save periodically
                 mark_benchmark_cache_dirty()

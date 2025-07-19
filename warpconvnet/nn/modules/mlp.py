@@ -15,6 +15,22 @@ __all__ = ["FeatureResidualMLPBlock", "Linear"]
 
 
 class FeatureMLPBlock(nn.Module):
+    """Simple fully connected block with activation and normalization.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input features.
+    out_channels : int
+        Number of output features.
+    hidden_channels : int, optional
+        Size of the hidden layer. Defaults to ``None`` which uses ``in_channels``.
+    activation : ``nn.Module``, optional
+        Activation module to apply. Defaults to :class:`torch.nn.ReLU`.
+    bias : bool, optional
+        If ``True`` adds bias terms to the linear layers. Defaults to ``True``.
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -35,6 +51,22 @@ class FeatureMLPBlock(nn.Module):
 
 
 class FeatureResidualMLPBlock(nn.Module):
+    """MLP block with a residual connection.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input features.
+    out_channels : int, optional
+        Number of output features. Defaults to ``in_channels``.
+    hidden_channels : int, optional
+        Hidden layer size. Defaults to ``in_channels``.
+    activation : ``nn.Module``, optional
+        Activation module to apply. Defaults to :class:`torch.nn.ReLU`.
+    bias : bool, optional
+        If ``True`` adds bias terms to the linear layers. Defaults to ``True``.
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -69,6 +101,18 @@ class FeatureResidualMLPBlock(nn.Module):
 
 
 class Linear(BaseSpatialModule):
+    """Apply a linear layer to ``Geometry`` features.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    out_features : int
+        Number of output features.
+    bias : bool, optional
+        If ``True`` adds a bias term to the layer. Defaults to ``True``.
+    """
+
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__()
         self.block = nn.Linear(in_features, out_features, bias=bias)
@@ -78,6 +122,18 @@ class Linear(BaseSpatialModule):
 
 
 class LinearNormActivation(BaseSpatialModule):
+    """Linear layer followed by ``LayerNorm`` and ``ReLU``.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    out_features : int
+        Number of output features.
+    bias : bool, optional
+        Whether to include a bias term. Defaults to ``True``.
+    """
+
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__()
         self.block = nn.Sequential(
@@ -91,7 +147,21 @@ class LinearNormActivation(BaseSpatialModule):
 
 
 class ResidualMLPBlock(FeatureResidualMLPBlock):
-    def __init__(self, in_features: int, out_features: int = None, hidden_features: int = None):
+    """Residual MLP block operating on ``Geometry`` features.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    out_features : int, optional
+        Number of output features. Defaults to ``in_features``.
+    hidden_features : int, optional
+        Size of the hidden layer. Defaults to ``in_features``.
+    """
+
+    def __init__(
+        self, in_features: int, out_features: int = None, hidden_features: int = None
+    ):
         super().__init__(in_features, out_features, hidden_features)
 
     def forward(self, x: Geometry):

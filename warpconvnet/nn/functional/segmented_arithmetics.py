@@ -31,7 +31,12 @@ class SegmentedArithmeticFunction(Function):
 
     @staticmethod
     def forward(
-        ctx: Any, x: Tensor, y: Tensor, offsets: Tensor, operation: str, eps: float = 1e-5
+        ctx: Any,
+        x: Tensor,
+        y: Tensor,
+        offsets: Tensor,
+        operation: str,
+        eps: float = 1e-5,
     ) -> Tensor:
         """
         Forward pass for segmented arithmetic.
@@ -79,7 +84,9 @@ class SegmentedArithmeticFunction(Function):
             elif operation == "multiply":
                 # grad_x = grad_output * y (broadcast y to segments)
                 grad_x = torch.zeros_like(x)
-                _C.utils.segmented_arithmetic(grad_output, y, grad_x, offsets, "multiply")
+                _C.utils.segmented_arithmetic(
+                    grad_output, y, grad_x, offsets, "multiply"
+                )
             elif operation == "divide":
                 # grad_x = grad_output / y (broadcast y to segments)
                 grad_x = torch.zeros_like(x)
@@ -92,35 +99,53 @@ class SegmentedArithmeticFunction(Function):
                 grad_y = segment_csr(grad_output, offsets.to(torch.int64), reduce="sum")
             elif operation == "subtract":
                 # grad_y = -sum(grad_output) per segment
-                grad_y_sum = segment_csr(grad_output, offsets.to(torch.int64), reduce="sum")
+                grad_y_sum = segment_csr(
+                    grad_output, offsets.to(torch.int64), reduce="sum"
+                )
                 grad_y = -grad_y_sum
             elif operation == "multiply":
                 # grad_y = sum(grad_output * x) per segment
                 grad_y_input = grad_output * x
-                grad_y = segment_csr(grad_y_input, offsets.to(torch.int64), reduce="sum")
+                grad_y = segment_csr(
+                    grad_y_input, offsets.to(torch.int64), reduce="sum"
+                )
             elif operation == "divide":
                 # grad_y = -sum(grad_output * x / y^2) per segment
                 # First compute x / y per segment, then multiply by grad_output
                 x_div_y_sq = torch.zeros_like(x)
                 y_squared = y * y + eps
-                _C.utils.segmented_arithmetic(x, y_squared, x_div_y_sq, offsets, "divide")
+                _C.utils.segmented_arithmetic(
+                    x, y_squared, x_div_y_sq, offsets, "divide"
+                )
                 grad_y_input = -grad_output * x_div_y_sq
-                grad_y = segment_csr(grad_y_input, offsets.to(torch.int64), reduce="sum")
+                grad_y = segment_csr(
+                    grad_y_input, offsets.to(torch.int64), reduce="sum"
+                )
 
         return grad_x, grad_y, None, None
 
 
 def segmented_add(x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5) -> Tensor:
+    """Segment-wise addition."""
     return SegmentedArithmeticFunction.apply(x, y, offsets, "add", eps)  # type: ignore[return-value]
 
 
-def segmented_subtract(x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5) -> Tensor:
+def segmented_subtract(
+    x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5
+) -> Tensor:
+    """Segment-wise subtraction."""
     return SegmentedArithmeticFunction.apply(x, y, offsets, "subtract", eps)  # type: ignore[return-value]
 
 
-def segmented_multiply(x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5) -> Tensor:
+def segmented_multiply(
+    x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5
+) -> Tensor:
+    """Segment-wise multiplication."""
     return SegmentedArithmeticFunction.apply(x, y, offsets, "multiply", eps)  # type: ignore[return-value]
 
 
-def segmented_divide(x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5) -> Tensor:
+def segmented_divide(
+    x: Tensor, y: Tensor, offsets: Tensor, eps: float = 1e-5
+) -> Tensor:
+    """Segment-wise division."""
     return SegmentedArithmeticFunction.apply(x, y, offsets, "divide", eps)  # type: ignore[return-value]

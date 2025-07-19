@@ -12,6 +12,16 @@ from torch import Tensor
 def get_freqs(
     num_freqs: int, data_range: float = 2.0, device: Optional[torch.device] = None
 ) -> Float[Tensor, "num_freqs"]:  # noqa: F821
+    """Generate logarithmically spaced frequencies used in positional encoding.
+
+    Args:
+        num_freqs: Number of frequency bands to generate.
+        data_range: Range of the input data that the encoding will span.
+        device: Device to create the frequency tensor on.
+
+    Returns:
+        1‑D tensor containing ``num_freqs`` frequencies.
+    """
     if device is None:
         device = torch.device("cpu")
     freqs = 2 ** torch.arange(start=0, end=num_freqs, device=device)
@@ -50,13 +60,17 @@ def sinusoidal_encoding(
         assert (
             num_channels is not None and data_range is not None
         ), "num_channels and data_range must be provided if freqs are not given"
-        assert num_channels % 2 == 0, f"num_channels must be even for sin/cos, got {num_channels}"
+        assert (
+            num_channels % 2 == 0
+        ), f"num_channels must be even for sin/cos, got {num_channels}"
         freqs = get_freqs(num_channels // 2, data_range, device=x.device)
     freqs = freqs.reshape((1,) * (len(x.shape) - 1) + freqs.shape)
     freqed_x = x * freqs
     if concat_input:
-        return torch.cat([freqed_x.cos(), freqed_x.sin(), x], dim=encoding_axis).flatten(
+        return torch.cat(
+            [freqed_x.cos(), freqed_x.sin(), x], dim=encoding_axis
+        ).flatten(start_dim=-2)
+    else:
+        return torch.cat([freqed_x.cos(), freqed_x.sin()], dim=encoding_axis).flatten(
             start_dim=-2
         )
-    else:
-        return torch.cat([freqed_x.cos(), freqed_x.sin()], dim=encoding_axis).flatten(start_dim=-2)

@@ -1,0 +1,77 @@
+site_name: WarpConvNet
+site_description: NVIDIA Internal Library for Sparse Convolutions
+repo_url: https://github.com/nvlabs/warpconvnet
+repo_name: nvlabs/warpconvnet
+site_author: NVIDIA
+docs_dir: .
+site_dir: ../site
+
+theme:
+  name: readthedocs
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: true
+            show_root_heading: true
+            docstring_style: numpy
+            show_signature_annotations: true
+            filters: ["!^_"]
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - admonition
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+  - https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js
+  - javascripts/mermaid-init.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting_started/installation.md
+    - Quick Start: getting_started/quickstart.md
+    - Deployment: deployment.md
+  - User Guide:
+    - Basic Concepts: user_guide/concepts.md
+    - Geometry Types: user_guide/geometry_types.md
+    - Geometry Tutorial: user_guide/geometry_tutorial.md
+    - Network Tutorial: user_guide/network_tutorial.md
+    - Sparse Convolutions: user_guide/sparse_convolutions.md
+    - Point Convolutions: user_guide/point_convolutions.md
+    - Normalizations: user_guide/normalizations.md
+    - Diagram Generation: user_guide/diagrams.md
+  - Diagrams:
+    - Architecture: diagrams/architecture.md
+    - Class Hierarchy: diagrams/class_hierarchy.md
+    - Data Flow: diagrams/data_flow.md
+    - Geometry Types: diagrams/geometry_types.md
+    - Model Architecture: diagrams/model_architecture.md
+    - API Sequence: diagrams/api_sequence.md
+  - API Reference:
+    - Core: api/core.md
+    - Dataset: api/dataset.md
+    - Geometry: api/geometry.md
+    - Models: api/models.md
+    - Neural Networks: api/nn.md
+    - Operations: api/ops.md
+    - Utils: api/utils.md
+    - Types: api/types.md
+    - Miscellaneous: api/misc.md
+  - Examples:
+    - ScanNet: examples/scannet.md
+    - ModelNet: examples/modelnet.md
+  - Contributing: contributing.md 

@@ -38,6 +38,11 @@ def _generate_batched_coords(
     downsample_voxel_size: float,
     avereage_pooled_coordinates: bool = False,
 ) -> Union["BatchedContinuousCoordinates", "BatchedDiscreteCoordinates"]:  # noqa: F821
+    """Create a batched coordinate object after downsampling.
+
+    Depending on ``return_type`` this returns either point or voxel coordinates
+    using the provided unique indices.
+    """
     from warpconvnet.geometry.coords.real import RealCoords
     from warpconvnet.geometry.coords.integer import IntCoords
 
@@ -70,6 +75,7 @@ def _pool_by_random_sample(
     downsample_voxel_size: Optional[float] = None,
     return_type: Literal["point", "voxel"] = "point",
 ) -> Geometry:
+    """Randomly sample points from each batch to perform pooling."""
     from warpconvnet.geometry.types.points import Points
     from warpconvnet.geometry.types.voxels import Voxels
 
@@ -109,6 +115,7 @@ def _pool_by_max_num_points(
     return_type: Literal["point", "voxel"] = "point",
     return_neighbor_search_result: bool = False,
 ) -> Geometry:
+    """Downsample points by randomly selecting a fixed number per batch."""
     from warpconvnet.geometry.types.points import Points
     from warpconvnet.geometry.types.voxels import Voxels
 
@@ -134,7 +141,9 @@ def _pool_by_max_num_points(
     ).squeeze()
     # argsort and get the number of points per down indices
     sorted_knn_down_indices, to_sorted_knn_down_indices = torch.sort(knn_down_indices)
-    unique_indices, counts = torch.unique_consecutive(sorted_knn_down_indices, return_counts=True)
+    unique_indices, counts = torch.unique_consecutive(
+        sorted_knn_down_indices, return_counts=True
+    )
     knn_offsets = torch.cat(
         [
             torch.zeros(1, dtype=counts.dtype, device=counts.device),
@@ -151,8 +160,12 @@ def _pool_by_max_num_points(
         # select survived indices
         sampled_coords = sampled_coords[unique_indices]
         unique_batch_indices = batch_index_from_offset(sampled_offsets)
-        unique_batch_indices = unique_batch_indices.to(unique_indices.device)[unique_indices]
-        _, unique_counts = torch.unique_consecutive(unique_batch_indices, return_counts=True)
+        unique_batch_indices = unique_batch_indices.to(unique_indices.device)[
+            unique_indices
+        ]
+        _, unique_counts = torch.unique_consecutive(
+            unique_batch_indices, return_counts=True
+        )
         # Update the offsets
         sampled_offsets = torch.cat(
             [
@@ -226,7 +239,10 @@ def point_pool(
     assert (
         downsample_max_num_points is not None or downsample_voxel_size is not None
     ), "Either downsample_num_points or downsample_voxel_size must be provided."
-    assert return_type in ["point", "voxel"], "return_type must be either point or voxel."
+    assert return_type in [
+        "point",
+        "voxel",
+    ], "return_type must be either point or voxel."
     if return_type == "voxel":
         assert (
             not avereage_pooled_coordinates
@@ -248,7 +264,9 @@ def point_pool(
         )
 
     if reduction == REDUCTIONS.RANDOM:
-        assert not return_to_unique, "return_to_unique must be False when reduction is RANDOM."
+        assert (
+            not return_to_unique
+        ), "return_to_unique must be False when reduction is RANDOM."
         assert (
             not return_neighbor_search_result
         ), "return_neighbor_search_result must be False when reduction is RANDOM."
@@ -309,6 +327,7 @@ def point_pool_by_code(
     average_pooled_coordinates: bool = False,
     return_to_unique: bool = False,
 ) -> "Points":  # noqa: F821
+    """Pool points based on a user-provided clustering code."""
     from warpconvnet.geometry.types.points import Points
 
     if isinstance(reduction, str):

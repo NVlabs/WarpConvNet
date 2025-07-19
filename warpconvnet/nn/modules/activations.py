@@ -34,6 +34,14 @@ __all__ = [
 
 
 class ReLU(BaseSpatialModule):
+    """Apply the ReLU activation to ``Geometry`` features.
+
+    Parameters
+    ----------
+    inplace : bool, optional
+        Whether to perform the operation in-place. Defaults to ``False``.
+    """
+
     def __init__(self, inplace: bool = False):
         super().__init__()
         self.relu = nn.ReLU(inplace=inplace)
@@ -46,54 +54,77 @@ class ReLU(BaseSpatialModule):
 
 
 class GELU(BaseSpatialModule):
+    """Applies the GELU activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return gelu(input)
 
 
 class SiLU(BaseSpatialModule):
+    """Applies the SiLU activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return silu(input)
 
 
 class Tanh(BaseSpatialModule):
+    """Applies the ``tanh`` activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return tanh(input)
 
 
 class Sigmoid(BaseSpatialModule):
+    """Applies the sigmoid activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return sigmoid(input)
 
 
 class LeakyReLU(nn.Module):
+    """Applies the LeakyReLU activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return leaky_relu(input)
 
 
 class ELU(BaseSpatialModule):
+    """Applies the ELU activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return elu(input)
 
 
 class Softmax(BaseSpatialModule):
+    """Applies the ``softmax`` activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return softmax(input)
 
 
 class LogSoftmax(BaseSpatialModule):
+    """Applies the ``log_softmax`` activation to ``Geometry`` features."""
+
     def forward(self, input: Geometry):  # noqa: F821
         return log_softmax(input)
 
 
 # From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py
-def drop_path(x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+def drop_path(
+    x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True
+):
+    """Apply stochastic depth to the input tensor.
 
-    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
-    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
-    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
-    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
-    'survival rate' as the argument.
+    Parameters
+    ----------
+    x : ``torch.Tensor``
+        Input tensor to apply stochastic depth to.
+    drop_prob : float, optional
+        Probability of dropping a sample. Defaults to ``0.0``.
+    training : bool, optional
+        Whether the module is in training mode. Defaults to ``False``.
+    scale_by_keep : bool, optional
+        If ``True`` the output is scaled by ``1 - drop_prob``. Defaults to ``True``.
     """
     if drop_prob == 0.0 or not training:
         return x
@@ -106,7 +137,15 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: 
 
 
 class DropPath(BaseSpatialModule):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
+    """Stochastic depth regularization.
+
+    Parameters
+    ----------
+    drop_prob : float, optional
+        Probability of dropping a sample. Defaults to ``0.0``.
+    scale_by_keep : bool, optional
+        If ``True`` the output is scaled by ``1 - drop_prob``. Defaults to ``True``.
+    """
 
     def __init__(self, drop_prob: float = 0.0, scale_by_keep: bool = True):
         super().__init__()
