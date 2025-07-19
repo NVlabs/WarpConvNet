@@ -8,14 +8,18 @@ This module provides neural network layers and operations specifically designed
 for working with FactorGrid geometries in the FIGConvNet architecture.
 """
 
-from typing import List, Literal, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from warpconvnet.geometry.features.grid import GridMemoryFormat
+from warpconvnet.geometry.features.grid import (
+    GridMemoryFormat,
+    NON_COMPRESSED_FORMATS,
+    COMPRESSED_FORMATS,
+)
 from warpconvnet.geometry.types.factor_grid import FactorGrid
 from warpconvnet.geometry.types.grid import Grid
 from warpconvnet.nn.modules.base_module import BaseSpatialModule
@@ -24,14 +28,13 @@ from warpconvnet.nn.functional.factor_grid import (
     factor_grid_cat,
     factor_grid_pool,
     factor_grid_intra_communication,
-    factor_grid_intra_communications,
 )
 
 __all__ = [
     "FactorGridTransform",
     "FactorGridCat",
     "FactorGridPool",
-    "FactorGridIntraCommunication",
+    "FactorGridGlobalConv",
 ]
 
 
@@ -115,4 +118,187 @@ class FactorGridIntraCommunication(BaseSpatialModule):
 
     def forward(self, factor_grid: FactorGrid) -> FactorGrid:
         """Perform intra-communication between grids in the FactorGrid."""
-        return factor_grid_intra_communications(factor_grid, self.communication_types)
+        return factor_grid_intra_communication(factor_grid, self.communication_types)
+
+
+class _FactorGridConvNormAct(BaseSpatialModule):
+    """2D Convolution with normalization and activation for FactorGrid.
+
+    This applies 2D convolution followed by normalization and activation to each grid in the FactorGrid.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        compressed_spatial_dim: int,
+        compressed_memory_format: GridMemoryFormat,
+        stride: int = 1,
+        up_stride: Optional[int] = None,
+        norm: Type[nn.Module] = nn.BatchNorm2d,
+        activation: Type[nn.Module] = nn.GELU,
+    ):
+        super().__init__()
+        assert (
+            compressed_memory_format in COMPRESSED_FORMATS
+        ), "Compressed memory format must be a compressed format, got {compressed_memory_format}"
+
+        # Create convolution + normalization layers for each compressed spatial dimension
+        self.conv_norm_layers = nn.Sequential(
+            (
+                nn.Conv2d(
+                    in_channels * compressed_spatial_dim,
+                    out_channels * compressed_spatial_dim,
+                    kernel_size,
+                    stride,
+                    (kernel_size - 1) // 2,
+                    bias=True,
+                )
+                if up_stride is None
+                else nn.ConvTranspose2d(
+                    in_channels * compressed_spatial_dim,
+                    out_channels * compressed_spatial_dim,
+                    kernel_size,
+                    stride,
+                    (kernel_size - 1) // 2,
+                    bias=True,
+                )
+            ),
+            norm(out_channels),
+            activation(),
+        )
+
+    def forward(self, grid: Grid) -> Grid:
+        """Apply convolution + normalization to a grid."""
+        # Convert grid to compressed format if it is not already
+        grid_features = grid.grid_features.to_memory_format(self.compressed_memory_format)
+        if grid_features.memory_format != self.compressed_memory_format:
+            grid_features = grid_features.to_memory_format(self.compressed_memory_format)
+
+        # Apply convolution + normalization
+        processed_features = self.conv_norm_layers(grid_features.batched_tensor)
+        return grid.replace(batched_features=processed_features)
+
+
+class FactorGridProjection(BaseSpatialModule):
+    """Projection operation for FactorGrid."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        compressed_spatial_dims: Tuple[int, ...],
+        compressed_memory_formats: Tuple[GridMemoryFormat, ...],
+        stride: int = 1,
+        norm: Type[nn.Module] = nn.BatchNorm2d,
+        activation: Type[nn.Module] = nn.GELU,
+    ):
+        super().__init__()
+        self.convs = nn.ModuleList()
+        for compressed_spatial_dim, compressed_memory_format in zip(
+            compressed_spatial_dims, compressed_memory_formats
+        ):
+            block = nn.Sequential(
+                nn.Conv2d(
+                    in_channels * compressed_spatial_dim,
+                    out_channels * compressed_spatial_dim,
+                    kernel_size,
+                    stride,
+                    (kernel_size - 1) // 2,
+                    bias=True,
+                ),
+                norm(out_channels * compressed_spatial_dim),
+                activation(),
+            )
+            self.convs.append(block)
+
+    def forward(self, grid: FactorGrid) -> FactorGrid:
+        projected_grids = []
+        for grid, conv in zip(grid, self.convs):
+            projected_grid = conv(grid)
+            projected_grids.append(projected_grid)
+        return FactorGrid(projected_grids)
+
+
+class FactorGridGlobalConv(BaseSpatialModule):
+    """Global convolution with intra-communication for FactorGrid.
+
+    This is equivalent to GridFeatureConv2DBlocksAndIntraCommunication but works with FactorGrid objects.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        compressed_spatial_dims: Tuple[int, ...],
+        compressed_memory_formats: Tuple[GridMemoryFormat, ...],
+        stride: int = 1,
+        up_stride: Optional[int] = None,
+        communication_types: List[Literal["sum", "mul"]] = ["sum"],
+        norm: Type[nn.Module] = nn.BatchNorm2d,
+        activation: Type[nn.Module] = nn.GELU,
+    ):
+        super().__init__()
+        assert len(compressed_spatial_dims) == len(
+            compressed_memory_formats
+        ), "Number of compressed spatial dimensions and compressed memory formats must match"
+
+        # Create convolution blocks for each compressed spatial dimension
+        self.conv_blocks = nn.ModuleList()
+        for compressed_spatial_dim, compressed_memory_format in zip(
+            compressed_spatial_dims, compressed_memory_formats
+        ):
+            self.conv_blocks.append(
+                _FactorGridConvNormAct(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    compressed_spatial_dim=compressed_spatial_dim,
+                    compressed_memory_format=compressed_memory_format,
+                    stride=stride,
+                    up_stride=up_stride,
+                    norm=norm,
+                    activation=activation,
+                )
+            )
+
+        # Intra-communication module
+        self.intra_communications = FactorGridIntraCommunication(
+            communication_types=communication_types
+        )
+
+        # Projection layer if multiple communication types
+        if len(communication_types) > 1:
+            self.proj = FactorGridProjection(
+                in_channels=out_channels * len(communication_types),
+                out_channels=out_channels,
+                kernel_size=1,
+                compressed_spatial_dims=compressed_spatial_dims,
+                compressed_memory_formats=compressed_memory_formats,
+                stride=1,
+            )
+        else:
+            self.proj = nn.Identity()
+
+    def forward(self, factor_grid: FactorGrid) -> FactorGrid:
+        """Forward pass through the global convolution module."""
+        assert len(factor_grid) == len(
+            self.conv_blocks
+        ), f"Expected {len(self.conv_blocks)} grids, got {len(factor_grid)}"
+
+        # Apply convolution blocks to each grid
+        convolved_grids = []
+        for grid, conv_block in zip(factor_grid, self.conv_blocks):
+            convolved = conv_block(grid)
+            convolved_grids.append(convolved)
+
+        # Apply intra-communication
+        factor_grid = self.intra_communications(FactorGrid(convolved_grids))
+
+        # Apply projection if needed
+        factor_grid = self.proj(factor_grid)
+
+        return factor_grid

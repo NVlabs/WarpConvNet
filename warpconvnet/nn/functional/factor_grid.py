@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Literal, Optional, Callable
+from typing import List, Literal, Optional, Callable, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -22,28 +22,16 @@ __all__ = [
 def factor_grid_transform(
     factor_grid: FactorGrid,
     transform_fn: Callable[[Tensor], Tensor],
-    in_place: bool = True,
 ) -> FactorGrid:
     """Apply a transform function to all grids in a FactorGrid.
 
     Args:
         factor_grid: Input FactorGrid
         transform_fn: Function to apply to each grid's features
-        in_place: Whether to modify in-place or create a copy
 
     Returns:
         FactorGrid with transformed features
     """
-    if not in_place:
-        # Create a copy by cloning all grids
-        new_grids = []
-        for grid in factor_grid:
-            # Clone the grid by replacing with cloned features
-            cloned_features = grid.grid_features.batched_tensor.clone()
-            new_grid = grid.replace(batched_features=cloned_features)
-            new_grids.append(new_grid)
-        factor_grid = FactorGrid(new_grids)
-
     # Apply transform to each grid's features
     transformed_grids = []
     for grid in factor_grid:
@@ -269,28 +257,26 @@ def factor_grid_intra_communication(
     communication_types: List[Literal["sum", "mul"]] = ["sum"],
     cat_fn: Optional[Callable] = None,
 ) -> FactorGrid:
-    """Apply multiple intra-communication types to a FactorGrid.
+    """Perform intra-communication between grids in a FactorGrid with multiple communication types.
 
     Args:
         factor_grid: Input FactorGrid
         communication_types: List of communication types to apply
-        cat_fn: Function to concatenate results (defaults to factor_grid_cat)
+        cat_fn: Function to concatenate results from multiple communication types
 
     Returns:
-        FactorGrid with multiple communication types applied
+        FactorGrid with inter-grid communication applied
     """
-    if cat_fn is None:
-        cat_fn = factor_grid_cat
-
-    if isinstance(communication_types, str):
-        communication_types = [communication_types]
-
     if len(communication_types) == 1:
         return _factor_grid_intra_communication(factor_grid, communication_types[0])
     elif len(communication_types) == 2:
         # Apply both communication types and concatenate
         result1 = _factor_grid_intra_communication(factor_grid, communication_types[0])
         result2 = _factor_grid_intra_communication(factor_grid, communication_types[1])
-        return cat_fn(result1, result2)
+
+        if cat_fn is not None:
+            return cat_fn(result1, result2)
+        else:
+            return factor_grid_cat(result1, result2)
     else:
-        raise NotImplementedError("More than 2 communication types not implemented")
+        raise ValueError(f"Unsupported number of communication types: {len(communication_types)}")

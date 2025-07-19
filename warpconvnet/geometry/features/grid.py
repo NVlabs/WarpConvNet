@@ -70,6 +70,12 @@ NON_COMPRESSED_FORMATS = [
     GridMemoryFormat.b_c_z_x_y,
 ]
 
+COMPRESSED_FORMATS = [
+    GridMemoryFormat.b_zc_x_y,
+    GridMemoryFormat.b_xc_y_z,
+    GridMemoryFormat.b_yc_x_z,
+]
+
 
 class GridFeatures(Features):
     """Grid feature representation for 3D data with support for all memory formats.
