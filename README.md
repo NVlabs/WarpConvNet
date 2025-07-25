@@ -140,7 +140,7 @@ mkdocs build -f mkdocs-readthedocs.yml
 mkdocs serve -f mkdocs-readthedocs.yml
 ```
 
-📖 **Documentation**: [https://nvidia.github.io/warpconvnet/](https://nvidia.github.io/warpconvnet/)
+📖 **Documentation**: [https://nvlabs.github.io/WarpConvNet/](https://nvlabs.github.io/WarpConvNet/)
 
 The documentation is automatically built and deployed to GitHub Pages on every push to the main branch.
 

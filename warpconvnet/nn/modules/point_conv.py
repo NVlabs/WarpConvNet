@@ -13,7 +13,7 @@ from warpconvnet.geometry.coords.search.continuous import RealSearchMode
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.modules.base_module import BaseSpatialModule
 from warpconvnet.nn.encodings import SinusoidalEncoding
-from warpconvnet.nn.modules.mlp import FeatureMLPBlock, FeatureResidualMLPBlock
+from warpconvnet.nn.modules.mlp import MLPBlock
 from warpconvnet.ops.reductions import REDUCTION_TYPES_STR, REDUCTIONS, row_reduction
 
 __all__ = ["PointConv"]
@@ -34,7 +34,7 @@ def _get_module_input_channel(module: nn.Module) -> int:
 
 
 class PointConv(BaseSpatialModule):
-    """Point convolution operating on :class:`~warpconvnet.geometry.types.points.Points`.
+    """Point convolution operating on `warpconvnet.geometry.types.points.Points`.
 
     Parameters
     ----------
@@ -42,9 +42,9 @@ class PointConv(BaseSpatialModule):
         Number of input feature channels.
     out_channels : int
         Number of output feature channels.
-    neighbor_search_args : :class:`~warpconvnet.geometry.coords.search.search_configs.RealSearchConfig`
+    neighbor_search_args : `warpconvnet.geometry.coords.search.search_configs.RealSearchConfig`
         Configuration for neighbor search.
-    pooling_reduction : :class:`~warpconvnet.ops.reductions.REDUCTIONS`, optional
+    pooling_reduction : `warpconvnet.ops.reductions.REDUCTIONS`, optional
         Reduction used when downsampling points. Required when ``out_point_type`` is
         ``"downsample"``.
     pooling_voxel_size : float, optional
@@ -53,9 +53,9 @@ class PointConv(BaseSpatialModule):
         MLP applied to constructed edge features.
     out_transform_mlp : nn.Module, optional
         MLP applied after neighborhood reduction.
-    mlp_block : type, optional
-        Class used to build ``edge_transform_mlp`` and ``out_transform_mlp`` when not
-        provided. Defaults to :class:`FeatureMLPBlock`.
+    mlp_block : nn.Module, optional
+        Module used to build ``edge_transform_mlp`` and ``out_transform_mlp`` when not
+        provided. Defaults to `MLPBlock`.
     hidden_dim : int, optional
         Hidden dimension of the automatically created MLPs.
     channel_multiplier : int, optional
@@ -87,7 +87,7 @@ class PointConv(BaseSpatialModule):
         pooling_voxel_size: Optional[float] = None,
         edge_transform_mlp: Optional[nn.Module] = None,
         out_transform_mlp: Optional[nn.Module] = None,
-        mlp_block: Union[FeatureMLPBlock, FeatureResidualMLPBlock] = FeatureMLPBlock,
+        mlp_block: nn.Module = MLPBlock,
         hidden_dim: Optional[int] = None,
         channel_multiplier: int = 2,
         use_rel_pos: bool = False,
@@ -130,9 +130,7 @@ class PointConv(BaseSpatialModule):
             assert (
                 pooling_reduction is None and pooling_voxel_size is None
             ), "pooling_reduction and pooling_voxel_size must be None for same type"
-            assert (
-                provided_in_channels is None
-            ), "provided_in_channels must be None for same type"
+            assert provided_in_channels is None, "provided_in_channels must be None for same type"
         if (
             pooling_reduction is not None
             and pooling_voxel_size is not None
@@ -153,9 +151,7 @@ class PointConv(BaseSpatialModule):
         self.neighbor_search_args = neighbor_search_args
         self.pooling_reduction = pooling_reduction
         self.pooling_voxel_size = pooling_voxel_size
-        self.positional_encoding = SinusoidalEncoding(
-            pos_encode_dim, data_range=pos_encode_range
-        )
+        self.positional_encoding = SinusoidalEncoding(pos_encode_dim, data_range=pos_encode_range)
         # When down voxel size is not None, there will be out_point_features will be provided as an additional input
         if provided_in_channels is None:
             provided_in_channels = in_channels

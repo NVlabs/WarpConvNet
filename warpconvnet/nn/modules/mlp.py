@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional, Union
+from jaxtyping import Float
 
 import torch
 import torch.nn as nn
@@ -112,3 +114,59 @@ class BatchedLinear(nn.Module):
 
     def extra_repr(self) -> str:
         return f"in_features={self.in_features}, out_features={self.out_features}, num_matrices={self.num_matrices}, bias={self.bias is not None}"
+
+
+class MLPBlock(BaseSpatialModule):
+    """MLP block with a residual connection.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input features.
+    out_channels : int, optional
+        Number of output features. Defaults to ``in_channels``.
+    hidden_channels : int, optional
+        Hidden layer size. Defaults to ``in_channels``.
+    activation : ``nn.Module``, optional
+        Activation module to apply. Defaults to `torch.nn.ReLU`.
+    bias : bool, optional
+        If ``True`` adds bias terms to the linear layers. Defaults to ``True``.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int = None,
+        hidden_channels: int = None,
+        activation=nn.ReLU,
+        bias: bool = True,
+    ):
+        super().__init__()
+        if hidden_channels is None:
+            hidden_channels = in_channels
+        if out_channels is None:
+            out_channels = in_channels
+        self.in_channels = in_channels
+        self.block = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels, bias=bias),
+            nn.LayerNorm(hidden_channels),
+            activation(),
+            nn.Linear(hidden_channels, out_channels, bias=bias),
+            nn.LayerNorm(out_channels),
+        )
+        self.shortcut = (
+            nn.Linear(in_channels, out_channels, bias=bias)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+    def _forward_feature(self, x: Tensor) -> Tensor:
+        out = self.block(x)
+        out = out + self.shortcut(x)
+        return out
+
+    def forward(self, x: Union[Tensor, Geometry]):
+        if isinstance(x, Geometry):
+            return x.replace(batched_features=self._forward_feature(x.feature_tensor))
+        else:
+            return self._forward_feature(x)
