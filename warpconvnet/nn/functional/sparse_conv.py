@@ -1328,7 +1328,7 @@ def _run_forward_benchmarks(
     warmup_iters = max(warmup_iters, 1)
     benchmark_iters = max(benchmark_iters, 1)
 
-    logger.warn(
+    logger.warning(
         "Using benchmarked forward algo. Until the algorithm finds the best parameters, forward performance will be slow."
     )
     all_benchmark_results: List[
