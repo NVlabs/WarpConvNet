@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 ssl._create_default_https_context = ssl._create_unverified_context
 
 # Constants
-_URL = "https://shapenet.cs.stanford.edu/media/modelnet40_ply_hdf5_2048.zip"
+_URL = "https://huggingface.co/datasets/Msun/modelnet40/resolve/main/modelnet40_ply_hdf5_2048.zip"
 _LABELS = [
     "airplane",
     "bathtub",
