@@ -22,7 +22,6 @@ from warpconvnet.nn.modules.activations import GELU, DropPath
 from warpconvnet.nn.modules.attention import FeedForward, PatchAttention
 from warpconvnet.nn.modules.base_module import BaseSpatialModel, BaseSpatialModule
 from warpconvnet.nn.modules.mlp import Linear
-from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.sequential import Sequential, TupleSequential
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
 from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper, SparseMaxPool, SparseUnpool
@@ -47,7 +46,7 @@ class AttentionBlock(BaseSpatialModule):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         drop_path: float = 0.0,
-        norm_layer: type = LayerNorm,
+        norm_layer: type = nn.LayerNorm,
         act_layer: type = GELU,
         attn_type: Literal["patch"] = "patch",
         order: POINT_ORDERING = POINT_ORDERING.MORTON_XYZ,

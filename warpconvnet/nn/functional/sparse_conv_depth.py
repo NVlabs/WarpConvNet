@@ -26,24 +26,17 @@ from warpconvnet.utils.benchmark_cache import (
     save_dict_benchmark_cache,
     mark_benchmark_cache_dirty,
 )
-from warpconvnet.nn.functional.sparse_conv import (
-    SpatiallySparseConvConfig,
-    _maybe_cast,
-    _get_cuda_kernel,
-    CUDATimer,
-    _backward_return,
-    _BENCHMARK_NUM_RUNS,
-    _initialize_benchmark_cache,
-)
-from warpconvnet.utils.type_cast import _min_dtype, _max_dtype
+from warpconvnet.nn.functional.sparse_conv import _BENCHMARK_NUM_RUNS
+from warpconvnet.utils.benchmark_cache import SpatiallySparseConvConfig
+from warpconvnet.utils.type_cast import _min_dtype, _max_dtype, _maybe_cast
+from warpconvnet.utils.timer import CUDATimer
+from warpconvnet.utils.ntuple import _pad_tuple
 
 logger = get_logger(__name__)
 try:
     import warpconvnet._C as _C
 except ImportError as e:
-    logger.warning(
-        f"Error importing warpconvnet._C: {e}. Using fallback implementation."
-    )
+    logger.warning(f"Error importing warpconvnet._C: {e}. Using fallback implementation.")
     _C = None
 
 
@@ -93,10 +86,7 @@ def _initialize_depthwise_benchmark_cache():
         _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.update(
             cached_results.get("sparse_conv_depthwise_backward_results", {})
         )
-        if (
-            _BENCHMARK_DEPTHWISE_FORWARD_RESULTS
-            or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS
-        ):
+        if _BENCHMARK_DEPTHWISE_FORWARD_RESULTS or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS:
             logger.info(
                 f"Loaded {len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward and "
                 f"{len(_BENCHMARK_DEPTHWISE_BACKWARD_RESULTS)} depthwise backward benchmark configurations from cache"
@@ -392,18 +382,14 @@ def _run_depthwise_forward_benchmarks(
             f"Depthwise forward benchmark result: {algo_mode.value} {params_config} {current_algo_min_time_ms:.2f}ms"
         )
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append(
-                (algo_mode, params_config, current_algo_min_time_ms)
-            )
+            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
 
     if not all_benchmark_results:
         logger.warning(
             "Warning: No depthwise forward benchmark was successful. Defaulting to EXPLICIT."
         )
         with timer:
-            _execute_single_depthwise_fwd_pass(
-                SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {}
-            )
+            _execute_single_depthwise_fwd_pass(SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {})
         fallback_time = timer.elapsed_time if timer.elapsed_time is not None else 0.0
         all_benchmark_results.append(
             (SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {}, fallback_time)
@@ -506,18 +492,14 @@ def _run_depthwise_backward_benchmarks(
             f"Depthwise backward benchmark result: {algo_mode.value} {params_config} {current_algo_min_time_ms:.2f}ms"
         )
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append(
-                (algo_mode, params_config, current_algo_min_time_ms)
-            )
+            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
 
     if not all_benchmark_results:
         logger.warning(
             "Warning: No depthwise backward benchmark was successful. Defaulting to EXPLICIT."
         )
         with timer:
-            _execute_single_depthwise_bwd_pass(
-                SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {}
-            )
+            _execute_single_depthwise_bwd_pass(SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {})
         fallback_time = timer.elapsed_time if timer.elapsed_time is not None else 0.0
         all_benchmark_results.append(
             (SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {}, fallback_time)
@@ -555,18 +537,14 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 num_in_coords=in_features.shape[0],
                 num_out_coords=num_out_coords,
                 in_channels=in_features.shape[1],
-                out_channels=weight.shape[
-                    1
-                ],  # For depthwise, in_channels == out_channels
+                out_channels=weight.shape[1],  # For depthwise, in_channels == out_channels
                 kernel_volume=weight.shape[0],
                 in_dtype=in_features.dtype,
             )
             global _BENCHMARK_DEPTHWISE_FORWARD_RESULTS  # noqa: F824
             cached_result = _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.get(config)
             if cached_result is not None:
-                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[
-                    0
-                ]  # Best is first
+                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]  # Best is first
             else:
                 all_fwd_benchmark_results = _run_depthwise_forward_benchmarks(
                     in_features,
@@ -576,9 +554,9 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                     compute_dtype,
                 )
                 _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[config] = all_fwd_benchmark_results
-                chosen_fwd_algo, chosen_fwd_params, min_time = (
-                    all_fwd_benchmark_results[0]
-                )  # Best is first
+                chosen_fwd_algo, chosen_fwd_params, min_time = all_fwd_benchmark_results[
+                    0
+                ]  # Best is first
 
                 # Mark cache as dirty - background thread will save periodically
                 mark_benchmark_cache_dirty()
@@ -636,7 +614,7 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return _backward_return(None, None, 7)
+            return _pad_tuple(None, None, 7)
 
         N_in, C_in = in_features.shape
         K, C = weight.shape
@@ -648,13 +626,9 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             or N_in == 0
             or grad_output.shape[0] == 0
         ):
-            grad_in_final = (
-                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            )
-            grad_weight_final = (
-                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            )
-            return _backward_return(grad_in_final, grad_weight_final, 7)
+            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            return _pad_tuple(grad_in_final, grad_weight_final, 7)
 
         chosen_bwd_algo = initial_bwd_algo
         chosen_bwd_params = {}
@@ -671,9 +645,7 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             global _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS  # noqa: F824
             cached_result = _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.get(config)
             if cached_result is not None:
-                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[
-                    0
-                ]  # Best is first
+                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]  # Best is first
             else:
                 all_bwd_benchmark_results = _run_depthwise_backward_benchmarks(
                     grad_output,
@@ -683,12 +655,10 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                     compute_dtype,
                     device,
                 )
-                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = (
-                    all_bwd_benchmark_results
-                )
-                chosen_bwd_algo, chosen_bwd_params, min_time = (
-                    all_bwd_benchmark_results[0]
-                )  # Best is first
+                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
+                chosen_bwd_algo, chosen_bwd_params, min_time = all_bwd_benchmark_results[
+                    0
+                ]  # Best is first
 
                 # Mark cache as dirty - background thread will save periodically
                 mark_benchmark_cache_dirty()
@@ -718,7 +688,7 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
         if not ctx.needs_input_grad[1]:
             grad_weight = None
 
-        return _backward_return(grad_in_features, grad_weight, 7)
+        return _pad_tuple(grad_in_features, grad_weight, 7)
 
 
 def spatially_sparse_depthwise_conv(

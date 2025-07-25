@@ -18,132 +18,261 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <vector_types.h>
 
 #include <string>
 #include <type_traits>
 
-struct __align__(8) half4 { __half x, y, z, w; };
+/**
+ * Custom vectorized data types for efficient CUDA memory operations
+ * These types enable vectorized loads/stores for different precisions
+ * Following a principled template-based design pattern
+ */
 
-struct __align__(8) bfloat4 { __nv_bfloat16 x, y, z, w; };
+// ============================================================================
+// Template-based vector types
+// ============================================================================
 
-// Vectorized type definitions for 128-bit operations
-struct __align__(16) half8 {
-  __half x, y, z, w;      // First 4 halves
-  __half x2, y2, z2, w2;  // Second 4 halves
+template <typename T, int N>
+struct __align__(N * sizeof(T)) vector_type {
+  T data[N];
 
-  __device__ __forceinline__ half8() {}
+  // Constructors
+  __device__ __host__ vector_type() {}
 
-  __device__ __forceinline__ half8(
-      __half x_, __half y_, __half z_, __half w_, __half x2_, __half y2_, __half z2_, __half w2_)
-      : x(x_), y(y_), z(z_), w(w_), x2(x2_), y2(y2_), z2(z2_), w2(w2_) {}
-
-  // Arithmetic operations
-  __device__ __forceinline__ half8 operator+(const half8& other) const {
-    return half8(__hadd(x, other.x),
-                 __hadd(y, other.y),
-                 __hadd(z, other.z),
-                 __hadd(w, other.w),
-                 __hadd(x2, other.x2),
-                 __hadd(y2, other.y2),
-                 __hadd(z2, other.z2),
-                 __hadd(w2, other.w2));
+  __device__ __host__ vector_type(T val) {
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      data[i] = val;
+    }
   }
 
-  __device__ __forceinline__ half8 operator-(const half8& other) const {
-    return half8(__hsub(x, other.x),
-                 __hsub(y, other.y),
-                 __hsub(z, other.z),
-                 __hsub(w, other.w),
-                 __hsub(x2, other.x2),
-                 __hsub(y2, other.y2),
-                 __hsub(z2, other.z2),
-                 __hsub(w2, other.w2));
+  __device__ __host__ vector_type(const T* ptr) {
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      data[i] = ptr[i];
+    }
   }
 
-  __device__ __forceinline__ half8 operator*(const half8& other) const {
-    return half8(__hmul(x, other.x),
-                 __hmul(y, other.y),
-                 __hmul(z, other.z),
-                 __hmul(w, other.w),
-                 __hmul(x2, other.x2),
-                 __hmul(y2, other.y2),
-                 __hmul(z2, other.z2),
-                 __hmul(w2, other.w2));
+  // Variadic constructor
+  template <typename... Args>
+  __device__ __host__ vector_type(Args... args) : data{static_cast<T>(args)...} {
+    static_assert(sizeof...(args) == N, "Wrong number of arguments");
   }
 
-  __device__ __forceinline__ half8 operator/(const half8& other) const {
-    return half8(__hdiv(x, other.x),
-                 __hdiv(y, other.y),
-                 __hdiv(z, other.z),
-                 __hdiv(w, other.w),
-                 __hdiv(x2, other.x2),
-                 __hdiv(y2, other.y2),
-                 __hdiv(z2, other.z2),
-                 __hdiv(w2, other.w2));
+  // Array access operators
+  __device__ __host__ T& operator[](int i) { return data[i]; }
+  __device__ __host__ const T& operator[](int i) const { return data[i]; }
+
+  // Arithmetic operators
+  __device__ vector_type operator+(const vector_type& other) const {
+    vector_type result;
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      result.data[i] = data[i] + other.data[i];
+    }
+    return result;
+  }
+
+  __device__ vector_type operator-(const vector_type& other) const {
+    vector_type result;
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      result.data[i] = data[i] - other.data[i];
+    }
+    return result;
+  }
+
+  __device__ vector_type operator*(const vector_type& other) const {
+    vector_type result;
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      result.data[i] = data[i] * other.data[i];
+    }
+    return result;
+  }
+
+  __device__ vector_type operator/(const vector_type& other) const {
+    vector_type result;
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      result.data[i] = data[i] / other.data[i];
+    }
+    return result;
+  }
+
+  __device__ vector_type& operator+=(const vector_type& other) {
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      data[i] += other.data[i];
+    }
+    return *this;
+  }
+};
+
+// ============================================================================
+// Specialized vector types with proper alignment and precision-specific operations
+// ============================================================================
+
+// Legacy compatibility types (4-element vectors)
+struct __align__(8) half4 {
+  __half x, y, z, w;
+
+  __device__ __host__ half4() {}
+  __device__ __host__ half4(__half x_, __half y_, __half z_, __half w_)
+      : x(x_), y(y_), z(z_), w(w_) {}
+};
+
+struct __align__(8) bfloat4 {
+  __nv_bfloat16 x, y, z, w;
+
+  __device__ __host__ bfloat4() {}
+  __device__ __host__ bfloat4(
+      __nv_bfloat16 x_, __nv_bfloat16 y_, __nv_bfloat16 z_, __nv_bfloat16 w_)
+      : x(x_), y(y_), z(z_), w(w_) {}
+};
+
+// ============================================================================
+// Half-precision arithmetic helpers (supports both intrinsics and operators)
+// ============================================================================
+
+// Half8 - 8 half-precision floats (16 bytes, 128-bit aligned)
+struct __align__(16) half8 : public vector_type<__half, 8> {
+  using base = vector_type<__half, 8>;
+  using base::base;
+
+  // Explicit constructor
+  __device__ __host__ half8(
+      __half a, __half b, __half c, __half d, __half e, __half f, __half g, __half h) {
+    data[0] = a;
+    data[1] = b;
+    data[2] = c;
+    data[3] = d;
+    data[4] = e;
+    data[5] = f;
+    data[6] = g;
+    data[7] = h;
+  }
+
+  // Half-precision specific arithmetic operators using optimized operations
+  __device__ half8 operator+(const half8& other) const {
+    half8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = __hadd(data[i], other.data[i]);
+    }
+    return result;
+  }
+
+  __device__ half8 operator-(const half8& other) const {
+    half8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = __hsub(data[i], other.data[i]);
+    }
+    return result;
+  }
+
+  __device__ half8 operator*(const half8& other) const {
+    half8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = __hmul(data[i], other.data[i]);
+    }
+    return result;
+  }
+
+  __device__ half8 operator/(const half8& other) const {
+    half8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = __hdiv(data[i], other.data[i]);
+    }
+    return result;
+  }
+
+  __device__ half8& operator+=(const half8& other) {
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      data[i] = __hadd(data[i], other.data[i]);
+    }
+    return *this;
   }
 };
 
-struct __align__(16) bfloat16_8 {
-  __nv_bfloat16 x, y, z, w;      // First 4 bfloat16s
-  __nv_bfloat16 x2, y2, z2, w2;  // Second 4 bfloat16s
+// Bfloat16_8 - 8 bfloat16 floats (16 bytes, 128-bit aligned)
+struct __align__(16) bfloat16_8 : public vector_type<__nv_bfloat16, 8> {
+  using base = vector_type<__nv_bfloat16, 8>;
+  using base::base;
 
-  __device__ __forceinline__ bfloat16_8() {}
-
-  __device__ __forceinline__ bfloat16_8(__nv_bfloat16 x_,
-                                        __nv_bfloat16 y_,
-                                        __nv_bfloat16 z_,
-                                        __nv_bfloat16 w_,
-                                        __nv_bfloat16 x2_,
-                                        __nv_bfloat16 y2_,
-                                        __nv_bfloat16 z2_,
-                                        __nv_bfloat16 w2_)
-      : x(x_), y(y_), z(z_), w(w_), x2(x2_), y2(y2_), z2(z2_), w2(w2_) {}
-
-  // Arithmetic operations
-  __device__ __forceinline__ bfloat16_8 operator+(const bfloat16_8& other) const {
-    return bfloat16_8(x + other.x,
-                      y + other.y,
-                      z + other.z,
-                      w + other.w,
-                      x2 + other.x2,
-                      y2 + other.y2,
-                      z2 + other.z2,
-                      w2 + other.w2);
+  // Explicit constructor
+  __device__ __host__ bfloat16_8(__nv_bfloat16 a,
+                                 __nv_bfloat16 b,
+                                 __nv_bfloat16 c,
+                                 __nv_bfloat16 d,
+                                 __nv_bfloat16 e,
+                                 __nv_bfloat16 f,
+                                 __nv_bfloat16 g,
+                                 __nv_bfloat16 h) {
+    data[0] = a;
+    data[1] = b;
+    data[2] = c;
+    data[3] = d;
+    data[4] = e;
+    data[5] = f;
+    data[6] = g;
+    data[7] = h;
   }
 
-  __device__ __forceinline__ bfloat16_8 operator-(const bfloat16_8& other) const {
-    return bfloat16_8(x - other.x,
-                      y - other.y,
-                      z - other.z,
-                      w - other.w,
-                      x2 - other.x2,
-                      y2 - other.y2,
-                      z2 - other.z2,
-                      w2 - other.w2);
+  // Bfloat16-precision specific arithmetic operators (use operators since no specific intrinsics)
+  __device__ bfloat16_8 operator+(const bfloat16_8& other) const {
+    bfloat16_8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = data[i] + other.data[i];
+    }
+    return result;
   }
 
-  __device__ __forceinline__ bfloat16_8 operator*(const bfloat16_8& other) const {
-    return bfloat16_8(x * other.x,
-                      y * other.y,
-                      z * other.z,
-                      w * other.w,
-                      x2 * other.x2,
-                      y2 * other.y2,
-                      z2 * other.z2,
-                      w2 * other.w2);
+  __device__ bfloat16_8 operator-(const bfloat16_8& other) const {
+    bfloat16_8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = data[i] - other.data[i];
+    }
+    return result;
   }
 
-  __device__ __forceinline__ bfloat16_8 operator/(const bfloat16_8& other) const {
-    return bfloat16_8(x / other.x,
-                      y / other.y,
-                      z / other.z,
-                      w / other.w,
-                      x2 / other.x2,
-                      y2 / other.y2,
-                      z2 / other.z2,
-                      w2 / other.w2);
+  __device__ bfloat16_8 operator*(const bfloat16_8& other) const {
+    bfloat16_8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = data[i] * other.data[i];
+    }
+    return result;
+  }
+
+  __device__ bfloat16_8 operator/(const bfloat16_8& other) const {
+    bfloat16_8 result;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      result.data[i] = data[i] / other.data[i];
+    }
+    return result;
+  }
+
+  __device__ bfloat16_8& operator+=(const bfloat16_8& other) {
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      data[i] = data[i] + other.data[i];
+    }
+    return *this;
   }
 };
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 // Helper functions to create vectorized types
 __device__ __forceinline__ half8
@@ -162,7 +291,59 @@ __device__ __forceinline__ bfloat16_8 make_bfloat16_8(__nv_bfloat16 x,
   return bfloat16_8(x, y, z, w, x2, y2, z2, w2);
 }
 
-// Standalone arithmetic functions for convenience
+// 128-bit vectorized load for half8
+__device__ inline half8 load_half8(const __half* ptr) {
+  half8 result;
+  // Use 128-bit vectorized load (4x uint32_t = 16 bytes = 8 halves)
+  const uint4* ptr_uint4 = reinterpret_cast<const uint4*>(ptr);
+  uint4* result_uint4 = reinterpret_cast<uint4*>(&result);
+  *result_uint4 = *ptr_uint4;
+  return result;
+}
+
+// 128-bit vectorized store for half8
+__device__ inline void store_half8(__half* ptr, const half8& val) {
+  const uint4* val_uint4 = reinterpret_cast<const uint4*>(&val);
+  uint4* ptr_uint4 = reinterpret_cast<uint4*>(ptr);
+  *ptr_uint4 = *val_uint4;
+}
+
+// Read-only cache load for half8 (using regular load)
+__device__ inline half8 ldg_half8(const __half* ptr) {
+  half8 result;
+  const uint4* ptr_uint4 = reinterpret_cast<const uint4*>(ptr);
+  uint4* result_uint4 = reinterpret_cast<uint4*>(&result);
+  *result_uint4 = *ptr_uint4;
+  return result;
+}
+
+// 128-bit vectorized load for bfloat16_8
+__device__ inline bfloat16_8 load_bfloat16_8(const __nv_bfloat16* ptr) {
+  bfloat16_8 result;
+  // Use 128-bit vectorized load (4x uint32_t = 16 bytes = 8 bfloat16)
+  const uint4* ptr_uint4 = reinterpret_cast<const uint4*>(ptr);
+  uint4* result_uint4 = reinterpret_cast<uint4*>(&result);
+  *result_uint4 = *ptr_uint4;
+  return result;
+}
+
+// 128-bit vectorized store for bfloat16_8
+__device__ inline void store_bfloat16_8(__nv_bfloat16* ptr, const bfloat16_8& val) {
+  const uint4* val_uint4 = reinterpret_cast<const uint4*>(&val);
+  uint4* ptr_uint4 = reinterpret_cast<uint4*>(ptr);
+  *ptr_uint4 = *val_uint4;
+}
+
+// Read-only cache load for bfloat16_8 (using regular load)
+__device__ inline bfloat16_8 ldg_bfloat16_8(const __nv_bfloat16* ptr) {
+  bfloat16_8 result;
+  const uint4* ptr_uint4 = reinterpret_cast<const uint4*>(ptr);
+  uint4* result_uint4 = reinterpret_cast<uint4*>(&result);
+  *result_uint4 = *ptr_uint4;
+  return result;
+}
+
+// Standalone arithmetic functions for convenience (for backward compatibility)
 __device__ __forceinline__ half8 add_half8(const half8& a, const half8& b) { return a + b; }
 
 __device__ __forceinline__ half8 sub_half8(const half8& a, const half8& b) { return a - b; }
@@ -186,3 +367,52 @@ __device__ __forceinline__ bfloat16_8 mul_bfloat16_8(const bfloat16_8& a, const 
 __device__ __forceinline__ bfloat16_8 div_bfloat16_8(const bfloat16_8& a, const bfloat16_8& b) {
   return a / b;
 }
+
+// ============================================================================
+// Type traits and size information
+// ============================================================================
+
+template <typename T>
+struct vector_info;
+
+template <>
+struct vector_info<half8> {
+  static constexpr int elements = 8;
+  static constexpr int size_bytes = 16;
+  using element_type = __half;
+};
+
+template <>
+struct vector_info<bfloat16_8> {
+  static constexpr int elements = 8;
+  static constexpr int size_bytes = 16;
+  using element_type = __nv_bfloat16;
+};
+
+template <>
+struct vector_info<half4> {
+  static constexpr int elements = 4;
+  static constexpr int size_bytes = 8;
+  using element_type = __half;
+};
+
+template <>
+struct vector_info<bfloat4> {
+  static constexpr int elements = 4;
+  static constexpr int size_bytes = 8;
+  using element_type = __nv_bfloat16;
+};
+
+template <>
+struct vector_info<float4> {
+  static constexpr int elements = 4;
+  static constexpr int size_bytes = 16;
+  using element_type = float;
+};
+
+template <>
+struct vector_info<float2> {
+  static constexpr int elements = 2;
+  static constexpr int size_bytes = 8;
+  using element_type = float;
+};

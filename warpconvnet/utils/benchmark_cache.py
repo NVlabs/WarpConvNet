@@ -7,9 +7,15 @@ import threading
 import time
 import atexit
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional
-import logging
+from typing import Dict, Any, Tuple, Optional, Sequence
+from dataclasses import dataclass
 
+import torch
+
+from warpconvnet.constants import (
+    WARPCONVNET_BENCHMARK_CACHE_DIR,
+    WARPCONVNET_BENCHMARK_CACHE_VERSION,
+)
 from warpconvnet.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +40,76 @@ def _is_rank_zero() -> bool:
     return _get_current_rank() == 0
 
 
+def _int_sequence_hash(arr: Sequence[int]) -> int:  # noqa: F821
+    """Hash a sequence of ints into a single 32‑bit value."""
+    x = hash(arr[0])
+    for i in range(1, len(arr)):
+        x = (x * 31 + hash(arr[i])) & 0xFFFFFFFF  # Keep it within 32-bit range
+    return x
+
+
+_SPARSE_CONV_CONFIG_DTYPE_TO_INT = {
+    torch.bfloat16: 0,
+    torch.float16: 1,
+    torch.float32: 2,
+    torch.float64: 3,
+}
+
+
+@dataclass
+class SpatiallySparseConvConfig:
+    log_num_in_coords: int
+    log_num_out_coords: int
+    in_channels: int
+    out_channels: int
+    kernel_volume: int
+    in_dtype: torch.dtype
+    # explicit_matmul_batch_size: Optional[int] = None # TODO: Add if supporting batched explicit
+
+    def __init__(
+        self,
+        num_in_coords: int,
+        num_out_coords: int,
+        in_channels: int,
+        out_channels: int,
+        kernel_volume: int,
+        in_dtype: torch.dtype,
+        # explicit_matmul_batch_size: Optional[int] = None, # TODO
+    ):
+        self.log_num_in_coords = math.ceil(math.log2(num_in_coords)) if num_in_coords > 0 else 0
+        self.log_num_out_coords = math.ceil(math.log2(num_out_coords)) if num_out_coords > 0 else 0
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_volume = kernel_volume
+        assert in_dtype in _SPARSE_CONV_CONFIG_DTYPE_TO_INT, f"Unsupported in_dtype: {in_dtype}"
+        self.in_dtype = in_dtype
+        # self.explicit_matmul_batch_size = explicit_matmul_batch_size # TODO
+
+    def __hash__(self):
+        return _int_sequence_hash(
+            [
+                # self.log_num_in_coords,
+                # self.log_num_out_coords,
+                self.in_channels,
+                self.out_channels,
+                self.kernel_volume,
+                _SPARSE_CONV_CONFIG_DTYPE_TO_INT[self.in_dtype],
+            ]
+        )
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, SpatiallySparseConvConfig):
+            return False
+        return (
+            # self.log_num_in_coords == other.log_num_in_coords
+            # and self.log_num_out_coords == other.log_num_out_coords and
+            self.in_channels == other.in_channels
+            and self.out_channels == other.out_channels
+            and self.kernel_volume == other.kernel_volume
+            and self.in_dtype == other.in_dtype
+        )
+
+
 class BenchmarkCache:
     """
     Manages saving and loading of benchmark results to/from disk.
@@ -47,7 +123,7 @@ class BenchmarkCache:
     - sparse_conv_depthwise_backward_results
     """
 
-    def __init__(self, cache_dir: str = "~/.cache/warpconvnet"):
+    def __init__(self, cache_dir: str = WARPCONVNET_BENCHMARK_CACHE_DIR):
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_file = self.cache_dir / "benchmark_cache.pkl"
         self.lock = threading.Lock()
@@ -130,7 +206,7 @@ class BenchmarkCache:
                 "sparse_conv_depthwise_forward_results": _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
                 "sparse_conv_depthwise_backward_results": _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
                 "timestamp": current_time,
-                "version": "2.0",  # For future compatibility
+                "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
             }
 
             # Atomic write: write to temp file then rename
@@ -157,6 +233,9 @@ class BenchmarkCache:
     def load_cache(self) -> Dict[str, Dict]:
         """
         Load benchmark results from cache file.
+
+        If the loaded version is less than the latest version, the cache will be reset.
+
         Returns a dictionary with all cached benchmark results.
         """
         # Default empty results for all supported cache types
@@ -182,8 +261,8 @@ class BenchmarkCache:
             # Determine cache version and handle accordingly
             version = cache_data.get("version", "1.0")
 
-            if version == "2.0":
-                # Version 2.0 format - direct mapping
+            if version == "3.0":
+                # Version 3.0 format - direct mapping
                 result = {
                     "sparse_conv_forward_results": cache_data.get(
                         "sparse_conv_forward_results", {}
@@ -200,25 +279,13 @@ class BenchmarkCache:
                 }
 
                 total_configs = sum(len(results) for results in result.values())
-                logger.info(f"Loaded benchmark cache v2.0: {total_configs} total configurations")
+                logger.info(f"Loaded benchmark cache v3.0: {total_configs} total configurations")
 
             else:
-                # Version 1.0 format - legacy compatibility
-                result = {
-                    "sparse_conv_forward_results": cache_data.get("forward_results", {}),
-                    "sparse_conv_backward_results": cache_data.get("backward_results", {}),
-                    "sparse_conv_depthwise_forward_results": cache_data.get(
-                        "depthwise_forward_results", {}
-                    ),
-                    "sparse_conv_depthwise_backward_results": cache_data.get(
-                        "depthwise_backward_results", {}
-                    ),
-                }
-
-                logger.info(
-                    f"Loaded benchmark cache v1.0: {len(result['sparse_conv_forward_results'])} forward, "
-                    f"{len(result['sparse_conv_backward_results'])} backward configurations"
+                logger.warning(
+                    f"Loaded benchmark cache v{version}, but expected v3.0. Resetting cache."
                 )
+                return default_results
 
             return result
 
@@ -250,7 +317,7 @@ class BenchmarkCache:
             current_time = time.time()
 
             try:
-                # Prepare cache data in v2.0 format
+                # Prepare cache data in the latest version
                 cache_data = {
                     "sparse_conv_forward_results": cache_results.get(
                         "sparse_conv_forward_results", {}
@@ -265,7 +332,7 @@ class BenchmarkCache:
                         "sparse_conv_depthwise_backward_results", {}
                     ),
                     "timestamp": current_time,
-                    "version": "2.0",
+                    "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
                 }
 
                 # Atomic write: write to temp file then rename
@@ -281,11 +348,13 @@ class BenchmarkCache:
 
                 total_configs = sum(len(results) for results in cache_results.values())
                 logger.debug(
-                    f"Force saved benchmark cache v2.0: {total_configs} total configurations"
+                    f"Force saved benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {total_configs} total configurations"
                 )
 
             except Exception as e:
-                logger.warning(f"Failed to force save benchmark cache v2.0: {e}")
+                logger.warning(
+                    f"Failed to force save benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
+                )
 
     def mark_dirty(self) -> None:
         """Mark that cache has pending changes that should be saved."""

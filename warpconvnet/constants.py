@@ -25,7 +25,9 @@ def _get_env_bool(env_var_name: str, default_value: bool) -> bool:
     return result
 
 
-def _get_env_string(env_var_name: str, default_value: str, valid_values: List[str]) -> str:
+def _get_env_string(
+    env_var_name: str, default_value: str, valid_values: Optional[List[str]] = None
+) -> str:
     """Helper function to read and validate string environment variables."""
     env_value = os.environ.get(env_var_name)
 
@@ -33,7 +35,7 @@ def _get_env_string(env_var_name: str, default_value: str, valid_values: List[st
         return default_value
 
     env_value = env_value.lower()
-    if env_value not in valid_values:
+    if valid_values is not None and env_value not in valid_values:
         raise ValueError(f"{env_var_name} must be one of {valid_values}, got {env_value}")
 
     logger.info(f"{env_var_name} is set to {env_value} by environment variable")
@@ -57,6 +59,13 @@ WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE = _get_env_string(
 WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE = _get_env_string(
     "WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE", "auto", VALID_DEPTHWISE_ALGOS
 )
+
+# Sparse conv benchmark cache
+WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
+    "WARPCONVNET_BENCHMARK_CACHE_DIR", "~/.cache/warpconvnet"
+)
+
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 3.0
 
 # --- Types ---
 

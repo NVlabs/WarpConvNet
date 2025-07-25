@@ -35,3 +35,25 @@ class Timer:
     def __exit__(self, exc_type, exc_value, traceback):
         self.stop()
         return False
+
+
+class CUDATimer:
+    """__enter__ and __exit__ to time a block of code.
+    Returns the elapsed time in milliseconds.
+    """
+
+    def __init__(self):
+        self.start_event = None
+        self.end_event = None
+        self.elapsed_time = None
+
+    def __enter__(self):
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.end_event = torch.cuda.Event(enable_timing=True)
+        self.start_event.record()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.end_event.record()
+        torch.cuda.synchronize()
+        self.elapsed_time = self.start_event.elapsed_time(self.end_event)
+        return self.elapsed_time
