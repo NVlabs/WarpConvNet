@@ -26,7 +26,7 @@ from warpconvnet.geometry.features.ops.convert import (
     pad_to_cat_tensor,
 )
 from warpconvnet.nn.modules.normalizations import LayerNorm
-from warpconvnet.types import NestedTensor
+from warpconvnet.nn.modules.mlp import BatchedLinear
 
 
 def zero_out_points(
@@ -147,12 +147,29 @@ class Attention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         enable_flash: bool = True,
+        use_batched_qkv: bool = True,
     ):
+        """
+        Attention module with optional batched QKV for Muon optimization.
+
+        Args:
+            dim: Input feature dimension
+            num_heads: Number of attention heads
+            qkv_bias: Whether to use bias in QKV projection
+            qk_scale: Scale factor for attention scores
+            attn_drop: Attention dropout rate
+            proj_drop: Output projection dropout rate
+            enable_flash: Whether to use flash attention
+            use_batched_qkv: If True, uses separate Q, K, V matrices stacked as [3, dim, dim]
+                           for Muon optimization. Muon can orthogonalize the [dim, dim] matrices
+                           more effectively than the concatenated [dim, 3*dim] matrix.
+        """
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
         self.enable_flash = enable_flash
+        self.use_batched_qkv = use_batched_qkv
 
         if enable_flash:
             assert flash_attn is not None, "Make sure flash_attn is installed."
@@ -160,7 +177,13 @@ class Attention(nn.Module):
         else:
             self.attn_drop = nn.Dropout(attn_drop)
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        if use_batched_qkv:
+            # Use BatchedLinear for Muon-friendly QKV projection
+            self.qkv = BatchedLinear(dim, dim, num_matrices=3, bias=qkv_bias)
+        else:
+            # Original single linear layer approach
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -172,17 +195,26 @@ class Attention(nn.Module):
         num_points: Optional[Int[Tensor, "B"]] = None,  # noqa: F821
     ) -> Float[Tensor, "B N C"]:
         B, N, C = x.shape
-        qkv = self.qkv(x)
+
+        # Compute QKV with unified approach
+        if pos_enc is not None and self.enable_flash:
+            # Add positional encoding to input before QKV projection for flash attention
+            qkv = self.qkv(x + pos_enc).reshape(B, N, 3, C)
+        else:
+            qkv = self.qkv(x).reshape(B, N, 3, C)
+
+        # Reshape to [B, N, 3, num_heads, head_dim]
+        qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads)
 
         if not self.enable_flash:
-            qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            qkv = qkv.permute(2, 0, 3, 1, 4)
             q, k, v = (
                 qkv[0],
                 qkv[1],
                 qkv[2],
             )  # make torchscript happy (cannot use tensor as tuple)
 
-            # Apply positional encoding to the query and key
+            # Apply positional encoding to the query and key (non-flash path)
             if pos_enc is not None:
                 q = q + pos_enc.unsqueeze(1)
                 k = k + pos_enc.unsqueeze(1)
@@ -198,14 +230,6 @@ class Attention(nn.Module):
             x = x.transpose(1, 2).reshape(B, N, C)
         else:
             # Flash attention path
-            if pos_enc is not None:
-                # Add positional encoding to input before QKV projection
-                x_with_pos = x + pos_enc
-                qkv = self.qkv(x_with_pos)
-
-            # Reshape for flash attention: (B, N, 3, num_heads, head_dim)
-            qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads)
-
             # Flash attention - preserve original dtype if possible
             original_dtype = qkv.dtype
             if qkv.dtype not in [torch.float16, torch.bfloat16]:
@@ -245,6 +269,7 @@ class SpatialFeatureAttention(Attention):
         encoding_range: float = 1.0,
         use_encoding: bool = False,
         enable_flash: bool = True,
+        use_batched_qkv: bool = True,
         **kwargs,
     ):
         super().__init__(
@@ -255,6 +280,7 @@ class SpatialFeatureAttention(Attention):
             attn_drop,
             proj_drop,
             enable_flash,
+            use_batched_qkv,
         )
         self.to_attn = ToAttention(
             dim,
@@ -285,14 +311,39 @@ class PatchAttention(BaseSpatialModule):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         order: POINT_ORDERING = POINT_ORDERING.MORTON_XYZ,
+        use_batched_qkv: bool = True,
     ):
+        """
+        Patch attention module with optional batched QKV for Muon optimization.
+
+        Args:
+            dim: Input feature dimension
+            patch_size: Size of patches for attention computation
+            num_heads: Number of attention heads
+            qkv_bias: Whether to use bias in QKV projection
+            qk_scale: Scale factor for attention scores
+            attn_drop: Attention dropout rate
+            proj_drop: Output projection dropout rate
+            order: Point ordering for patch generation
+            use_batched_qkv: If True, uses separate Q, K, V matrices stacked as [3, dim, dim]
+                           for Muon optimization. Muon can orthogonalize the [dim, dim] matrices
+                           more effectively than the concatenated [dim, 3*dim] matrix.
+        """
         super().__init__()
         self.patch_size = patch_size
         self.num_heads = num_heads
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.use_batched_qkv = use_batched_qkv
+
+        if use_batched_qkv:
+            # Use BatchedLinear for Muon-friendly QKV projection
+            self.qkv = BatchedLinear(dim, dim, num_matrices=3, bias=qkv_bias)
+        else:
+            # Original single linear layer approach
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+
         self.order = order
         assert flash_attn is not None, "Make sure flash_attn is installed."
         self.attn_drop_p = attn_drop
@@ -368,10 +419,8 @@ class PatchAttention(BaseSpatialModule):
             feats = feats[code_result.perm]
             inverse_perm = code_result.inverse_perm
 
-        # Flash attention path - use variable length version for patches
-        # Reshape for flash attention: (M, 3, num_heads, head_dim)
-        qkv = self.qkv(feats)
-        qkv = qkv.reshape(-1, 3, self.num_heads, C // self.num_heads)
+        # Compute QKV: (M, 3, num_heads, head_dim)
+        qkv = self.qkv(feats).reshape(M, 3, self.num_heads, C // self.num_heads)
         if qkv.dtype not in [torch.float16, torch.bfloat16]:
             qkv = qkv.to(torch.float16)
 
@@ -436,6 +485,7 @@ class TransformerBlock(BaseSpatialModule):
         norm_eps: float = 1e-5,
         attn_fn: Optional[Callable[..., nn.Module]] = None,
         norm_fn: Optional[Callable[..., nn.Module]] = LayerNorm,
+        use_batched_qkv: bool = True,
     ):
         super().__init__()
         if attn_fn is None:
@@ -448,6 +498,7 @@ class TransformerBlock(BaseSpatialModule):
             qk_scale=qk_scale,
             attn_drop=attn_drop,
             proj_drop=proj_drop,
+            use_batched_qkv=use_batched_qkv,
         )
         self.feed_forward = FeedForward(
             dim=dim,
