@@ -43,6 +43,7 @@ int run_implicit_gemm_templated(const void *tensor_a,
                                 int hA,
                                 int wB,
                                 int hB,
+                                int indices_size,
                                 const std::string &kernel_type,
                                 int block_size);
 }  // namespace implicit_gemm
@@ -99,13 +100,13 @@ void implicit_fma_cuda(torch::Tensor a,
                        const std::string &kernel_type = "basic");
 
 // Forward declarations for implicit GEMM functions
-void implicit_gemm_cuda(torch::Tensor a,
-                        torch::Tensor b,
-                        torch::Tensor c,
-                        torch::Tensor in_map,
-                        torch::Tensor out_map,
-                        const std::string &kernel_type = "basic",
-                        int block_size = 16);
+int implicit_gemm_cuda(torch::Tensor a,
+                       torch::Tensor b,
+                       torch::Tensor c,
+                       torch::Tensor in_map,
+                       torch::Tensor out_map,
+                       const std::string &kernel_type = "basic",
+                       int block_size = 16);
 
 // Forward declarations for implicit reduction functions
 void implicit_reduction_cuda(torch::Tensor a,
@@ -703,13 +704,13 @@ void implicit_fma_cuda(torch::Tensor a,
 }
 
 // Implementation of implicit GEMM CUDA function
-void implicit_gemm_cuda(torch::Tensor a,
-                        torch::Tensor b,
-                        torch::Tensor c,
-                        torch::Tensor in_map,
-                        torch::Tensor out_map,
-                        const std::string &kernel_type,
-                        int block_size) {
+int implicit_gemm_cuda(torch::Tensor a,
+                       torch::Tensor b,
+                       torch::Tensor c,
+                       torch::Tensor in_map,
+                       torch::Tensor out_map,
+                       const std::string &kernel_type,
+                       int block_size) {
   // Validate input tensors
   TORCH_CHECK(a.dim() == 2, "Matrix A must be 2D");
   TORCH_CHECK(b.dim() == 2, "Matrix B must be 2D");
@@ -732,8 +733,6 @@ void implicit_gemm_cuda(torch::Tensor a,
   TORCH_CHECK(wA == hB, "Matrix dimensions must be compatible for multiplication");
   TORCH_CHECK(c.size(0) == hA, "Matrix C must have same number of rows as A");
   TORCH_CHECK(c.size(1) == wB, "Matrix C must have same number of columns as B");
-  TORCH_CHECK(in_map.size(0) == hA, "Input map size must match number of rows in A");
-  TORCH_CHECK(out_map.size(0) == hA, "Output map size must match number of rows in A");
 
   // Ensure tensors are on CUDA and contiguous
   TORCH_CHECK(a.is_cuda(), "All tensors must be on CUDA");
@@ -748,6 +747,10 @@ void implicit_gemm_cuda(torch::Tensor a,
   in_map = in_map.contiguous();
   out_map = out_map.contiguous();
 
+  // Get indices size
+  int indices_size = in_map.size(0);
+  TORCH_CHECK(indices_size == out_map.size(0), "Input and output maps must have the same size");
+
   // Dispatch based on data type using template function
   int status = 0;
   if (a.scalar_type() == torch::kFloat32) {
@@ -761,6 +764,7 @@ void implicit_gemm_cuda(torch::Tensor a,
         hA,
         wB,
         hB,
+        indices_size,
         kernel_type,
         block_size);
   } else if (a.scalar_type() == torch::kFloat16) {
@@ -774,6 +778,7 @@ void implicit_gemm_cuda(torch::Tensor a,
         hA,
         wB,
         hB,
+        indices_size,
         kernel_type,
         block_size);
   } else if (a.scalar_type() == torch::kBFloat16) {
@@ -788,6 +793,7 @@ void implicit_gemm_cuda(torch::Tensor a,
             hA,
             wB,
             hB,
+            indices_size,
             kernel_type,
             block_size);
   } else {
@@ -798,6 +804,8 @@ void implicit_gemm_cuda(torch::Tensor a,
   if (status != 0) {
     TORCH_CHECK(false, "Implicit GEMM kernel failed with status: " + std::to_string(status));
   }
+
+  return status;
 }
 
 // Implementation of implicit reduction CUDA function
