@@ -31,6 +31,22 @@ int run_implicit_fma_templated(const void *tensor_a,
                                const std::string &kernel_type);
 }  // namespace implicit_fma
 
+// Forward declaration for implicit GEMM function (implemented in .cu file)
+namespace implicit_gemm {
+template <typename ElementA, typename ElementB, typename ElementC, typename Itype>
+int run_implicit_gemm_templated(const void *tensor_a,
+                                const void *tensor_b,
+                                void *tensor_c,
+                                const Itype *in_map,
+                                const Itype *out_map,
+                                int wA,
+                                int hA,
+                                int wB,
+                                int hB,
+                                const std::string &kernel_type,
+                                int block_size);
+}  // namespace implicit_gemm
+
 // Forward declarations for implicit reduction functions (implemented in .cu file)
 namespace implicit_reduction {
 template <typename ElementA, typename ElementB, typename ElementOutput>
@@ -81,6 +97,15 @@ void implicit_fma_cuda(torch::Tensor a,
                        torch::Tensor in_indices,
                        torch::Tensor out_indices,
                        const std::string &kernel_type = "basic");
+
+// Forward declarations for implicit GEMM functions
+void implicit_gemm_cuda(torch::Tensor a,
+                        torch::Tensor b,
+                        torch::Tensor c,
+                        torch::Tensor in_map,
+                        torch::Tensor out_map,
+                        const std::string &kernel_type = "basic",
+                        int block_size = 16);
 
 // Forward declarations for implicit reduction functions
 void implicit_reduction_cuda(torch::Tensor a,
@@ -677,6 +702,104 @@ void implicit_fma_cuda(torch::Tensor a,
   }
 }
 
+// Implementation of implicit GEMM CUDA function
+void implicit_gemm_cuda(torch::Tensor a,
+                        torch::Tensor b,
+                        torch::Tensor c,
+                        torch::Tensor in_map,
+                        torch::Tensor out_map,
+                        const std::string &kernel_type,
+                        int block_size) {
+  // Validate input tensors
+  TORCH_CHECK(a.dim() == 2, "Matrix A must be 2D");
+  TORCH_CHECK(b.dim() == 2, "Matrix B must be 2D");
+  TORCH_CHECK(c.dim() == 2, "Matrix C must be 2D");
+  TORCH_CHECK(in_map.dim() == 1, "Input map must be 1D");
+  TORCH_CHECK(out_map.dim() == 1, "Output map must be 1D");
+
+  TORCH_CHECK(in_map.scalar_type() == torch::kInt32, "Maps must be int32");
+  TORCH_CHECK(out_map.scalar_type() == torch::kInt32, "Maps must be int32");
+
+  TORCH_CHECK(a.scalar_type() == b.scalar_type(), "A and B must have the same data type");
+  TORCH_CHECK(a.scalar_type() == c.scalar_type(), "A and C must have the same data type");
+
+  // Validate dimensions
+  int hA = a.size(0);
+  int wA = a.size(1);
+  int hB = b.size(0);
+  int wB = b.size(1);
+
+  TORCH_CHECK(wA == hB, "Matrix dimensions must be compatible for multiplication");
+  TORCH_CHECK(c.size(0) == hA, "Matrix C must have same number of rows as A");
+  TORCH_CHECK(c.size(1) == wB, "Matrix C must have same number of columns as B");
+  TORCH_CHECK(in_map.size(0) == hA, "Input map size must match number of rows in A");
+  TORCH_CHECK(out_map.size(0) == hA, "Output map size must match number of rows in A");
+
+  // Ensure tensors are on CUDA and contiguous
+  TORCH_CHECK(a.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(b.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(c.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(in_map.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(out_map.is_cuda(), "All tensors must be on CUDA");
+
+  a = a.contiguous();
+  b = b.contiguous();
+  c = c.contiguous();
+  in_map = in_map.contiguous();
+  out_map = out_map.contiguous();
+
+  // Dispatch based on data type using template function
+  int status = 0;
+  if (a.scalar_type() == torch::kFloat32) {
+    status = warpconvnet::implicit_gemm::run_implicit_gemm_templated<float, float, float, int>(
+        a.data_ptr(),
+        b.data_ptr(),
+        c.data_ptr(),
+        in_map.data_ptr<int>(),
+        out_map.data_ptr<int>(),
+        wA,
+        hA,
+        wB,
+        hB,
+        kernel_type,
+        block_size);
+  } else if (a.scalar_type() == torch::kFloat16) {
+    status = warpconvnet::implicit_gemm::run_implicit_gemm_templated<__half, __half, __half, int>(
+        a.data_ptr(),
+        b.data_ptr(),
+        c.data_ptr(),
+        in_map.data_ptr<int>(),
+        out_map.data_ptr<int>(),
+        wA,
+        hA,
+        wB,
+        hB,
+        kernel_type,
+        block_size);
+  } else if (a.scalar_type() == torch::kBFloat16) {
+    status = warpconvnet::implicit_gemm::
+        run_implicit_gemm_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            in_map.data_ptr<int>(),
+            out_map.data_ptr<int>(),
+            wA,
+            hA,
+            wB,
+            hB,
+            kernel_type,
+            block_size);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for implicit GEMM");
+  }
+
+  // Check status
+  if (status != 0) {
+    TORCH_CHECK(false, "Implicit GEMM kernel failed with status: " + std::to_string(status));
+  }
+}
+
 // Implementation of implicit reduction CUDA function
 void implicit_reduction_cuda(torch::Tensor a,
                              torch::Tensor a_indices,
@@ -966,6 +1089,27 @@ PYBIND11_MODULE(_C, m) {
       },
       py::arg("status"),
       "Return the human-readable string associated with a GemmStatus value");
+
+  // Implicit GEMM functions under gemm submodule
+  gemm.def("implicit_gemm",
+           &implicit_gemm_cuda,
+           "Implicit GEMM kernel: C[out_map] += A[in_map] * B\n"
+           "Performs matrix multiplication with gather-scatter operations\n"
+           "Args:\n"
+           "  a: Input matrix A (hA x wA)\n"
+           "  b: Input matrix B (hB x wB)\n"
+           "  c: Output matrix C (hA x wB), modified in-place\n"
+           "  in_map: Input row mapping (hA,)\n"
+           "  out_map: Output row mapping (hA,)\n"
+           "  kernel_type: Kernel type ('basic' or 'vectorized')\n"
+           "  block_size: CUDA block size (default 16)",
+           py::arg("a"),
+           py::arg("b"),
+           py::arg("c"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("kernel_type") = "basic",
+           py::arg("block_size") = 16);
 
   // Create submodule 'fma' for FMA-related operations
   py::module_ fma =

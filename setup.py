@@ -106,6 +106,7 @@ ext_modules = [
             "warpconvnet/csrc/implicit_fma_kernel.cu",
             "warpconvnet/csrc/implicit_reduction.cu",
             "warpconvnet/csrc/segmented_arithmetic.cu",
+            "warpconvnet/csrc/implicit_gemm.cu",
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
