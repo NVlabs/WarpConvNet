@@ -22,17 +22,13 @@ from warpconvnet.nn.modules.activations import GELU, DropPath
 from warpconvnet.nn.modules.attention import FeedForward, PatchAttention
 from warpconvnet.nn.modules.base_module import BaseSpatialModel, BaseSpatialModule
 from warpconvnet.nn.modules.mlp import Linear
+from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.sequential import Sequential, TupleSequential
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
 from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper, SparseMaxPool, SparseUnpool
 
 
-STR2ATTN = {
-    "patch": PatchAttention,
-}
-
-
-class AttentionBlock(BaseSpatialModule):
+class PatchAttentionBlock(BaseSpatialModule):
     def __init__(
         self,
         in_channels: int,
@@ -46,15 +42,13 @@ class AttentionBlock(BaseSpatialModule):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         drop_path: float = 0.0,
-        norm_layer: type = nn.LayerNorm,
+        norm_layer: type = LayerNorm,
         act_layer: type = GELU,
         attn_type: Literal["patch"] = "patch",
         order: POINT_ORDERING = POINT_ORDERING.MORTON_XYZ,
     ):
         super().__init__()
         self.order = order
-        assert attn_type in STR2ATTN.keys(), f"Invalid attention type: {attn_type}"
-        attn_module = STR2ATTN[attn_type]
         self.conv = Sequential(
             SparseConv3d(
                 in_channels,
@@ -73,7 +67,7 @@ class AttentionBlock(BaseSpatialModule):
         )
 
         self.norm1 = norm_layer(attention_channels)
-        self.attention = attn_module(
+        self.attention = PatchAttention(
             attention_channels,
             patch_size=patch_size,
             num_heads=num_heads,
@@ -138,7 +132,6 @@ class PointTransformerV3(BaseSpatialModel):
         self.num_level = num_level
         self.shuffle_orders = shuffle_orders
         self.orders = orders
-        assert attn_type in STR2ATTN.keys(), f"Invalid attention type: {attn_type}"
 
         self.conv = Sequential(
             SparseConv3d(
@@ -155,7 +148,7 @@ class PointTransformerV3(BaseSpatialModel):
         for i in range(num_level):
             level_blocks = nn.ModuleList(
                 [
-                    AttentionBlock(
+                    PatchAttentionBlock(
                         in_channels=enc_channels[i],
                         attention_channels=enc_channels[i],
                         patch_size=enc_patch_size[i],
@@ -207,7 +200,7 @@ class PointTransformerV3(BaseSpatialModel):
             )
             level_blocks = nn.ModuleList(
                 [
-                    AttentionBlock(
+                    PatchAttentionBlock(
                         in_channels=dec_channels_list[i],
                         attention_channels=dec_channels_list[i],
                         patch_size=dec_patch_size[i],
