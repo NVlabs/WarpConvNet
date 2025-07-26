@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 import math
 import os
 import pickle
@@ -261,8 +262,11 @@ class BenchmarkCache:
 
             # Determine cache version and handle accordingly
             version = cache_data.get("version", "1.0")
+            # Remove any string before and after major.minor
+            version = re.sub(r"[^0-9.]", "", str(version))
+            major_version, minor_version = version.split(".")
 
-            if version == "3.0":
+            if int(major_version) == 3:
                 # Version 3.0 format - direct mapping
                 result = {
                     "sparse_conv_forward_results": cache_data.get(
