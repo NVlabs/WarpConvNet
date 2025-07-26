@@ -48,6 +48,22 @@ int run_implicit_gemm_templated(const void *tensor_a,
                                 int block_size);
 }  // namespace implicit_gemm
 
+// Forward declaration for split-K implicit GEMM function (implemented in .cu file)
+namespace split_k_implicit_gemm {
+template <typename ElementA, typename ElementB, typename ElementC, typename Itype>
+int run_split_k_implicit_gemm_templated(const void *tensor_a,
+                                        const void *tensor_b,
+                                        void *tensor_c,
+                                        const Itype *indices_a,
+                                        const Itype *indices_b,
+                                        int N,
+                                        int C_a,
+                                        int C_b,
+                                        int K,
+                                        int split_k_factor,
+                                        int block_size);
+}  // namespace split_k_implicit_gemm
+
 // Forward declarations for implicit reduction functions (implemented in .cu file)
 namespace implicit_reduction {
 template <typename ElementA, typename ElementB, typename ElementOutput>
@@ -107,6 +123,15 @@ int implicit_gemm_cuda(torch::Tensor a,
                        torch::Tensor out_map,
                        const std::string &kernel_type = "basic",
                        int block_size = 16);
+
+// Forward declarations for split-K implicit GEMM functions
+int split_k_implicit_gemm_cuda(torch::Tensor a,
+                               torch::Tensor b,
+                               torch::Tensor c,
+                               torch::Tensor indices_a,
+                               torch::Tensor indices_b,
+                               int split_k_factor = 4,
+                               int block_size = 16);
 
 // Forward declarations for implicit reduction functions
 void implicit_reduction_cuda(torch::Tensor a,
@@ -808,6 +833,105 @@ int implicit_gemm_cuda(torch::Tensor a,
   return status;
 }
 
+// Implementation of split-K implicit GEMM CUDA function
+int split_k_implicit_gemm_cuda(torch::Tensor a,
+                               torch::Tensor b,
+                               torch::Tensor c,
+                               torch::Tensor indices_a,
+                               torch::Tensor indices_b,
+                               int split_k_factor,
+                               int block_size) {
+  // Validate input tensors
+  TORCH_CHECK(a.dim() == 2, "Matrix A must be 2D");
+  TORCH_CHECK(b.dim() == 2, "Matrix B must be 2D");
+  TORCH_CHECK(c.dim() == 2, "Matrix C must be 2D");
+  TORCH_CHECK(indices_a.dim() == 1, "Indices A must be 1D");
+  TORCH_CHECK(indices_b.dim() == 1, "Indices B must be 1D");
+
+  TORCH_CHECK(indices_a.scalar_type() == torch::kInt32, "Indices must be int32");
+  TORCH_CHECK(indices_b.scalar_type() == torch::kInt32, "Indices must be int32");
+
+  TORCH_CHECK(a.scalar_type() == b.scalar_type(), "A and B must have the same data type");
+  TORCH_CHECK(a.scalar_type() == c.scalar_type(), "A and C must have the same data type");
+
+  // Validate dimensions
+  int N = std::max(a.size(0), b.size(0));  // Number of rows in A and B
+  int C_a = a.size(1);                     // Number of columns in A
+  int C_b = b.size(1);                     // Number of columns in B
+  int K = indices_a.size(0);               // Number of indices
+
+  TORCH_CHECK(c.size(0) == C_a, "Matrix C must have C_a rows");
+  TORCH_CHECK(c.size(1) == C_b, "Matrix C must have C_b columns");
+  TORCH_CHECK(indices_b.size(0) == K, "Indices A and B must have same length");
+
+  // Ensure tensors are on CUDA and contiguous
+  TORCH_CHECK(a.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(b.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(c.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(indices_a.is_cuda(), "All tensors must be on CUDA");
+  TORCH_CHECK(indices_b.is_cuda(), "All tensors must be on CUDA");
+
+  a = a.contiguous();
+  b = b.contiguous();
+  c = c.contiguous();
+  indices_a = indices_a.contiguous();
+  indices_b = indices_b.contiguous();
+
+  // Dispatch based on data type using template function
+  int status = 0;
+  if (a.scalar_type() == torch::kFloat32) {
+    status = warpconvnet::split_k_implicit_gemm::
+        run_split_k_implicit_gemm_templated<float, float, float, int>(a.data_ptr(),
+                                                                      b.data_ptr(),
+                                                                      c.data_ptr(),
+                                                                      indices_a.data_ptr<int>(),
+                                                                      indices_b.data_ptr<int>(),
+                                                                      N,
+                                                                      C_a,
+                                                                      C_b,
+                                                                      K,
+                                                                      split_k_factor,
+                                                                      block_size);
+  } else if (a.scalar_type() == torch::kFloat16) {
+    status = warpconvnet::split_k_implicit_gemm::
+        run_split_k_implicit_gemm_templated<__half, __half, __half, int>(a.data_ptr(),
+                                                                         b.data_ptr(),
+                                                                         c.data_ptr(),
+                                                                         indices_a.data_ptr<int>(),
+                                                                         indices_b.data_ptr<int>(),
+                                                                         N,
+                                                                         C_a,
+                                                                         C_b,
+                                                                         K,
+                                                                         split_k_factor,
+                                                                         block_size);
+  } else if (a.scalar_type() == torch::kBFloat16) {
+    status = warpconvnet::split_k_implicit_gemm::
+        run_split_k_implicit_gemm_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            indices_a.data_ptr<int>(),
+            indices_b.data_ptr<int>(),
+            N,
+            C_a,
+            C_b,
+            K,
+            split_k_factor,
+            block_size);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for split-K implicit GEMM");
+  }
+
+  // Check status
+  if (status != 0) {
+    TORCH_CHECK(false,
+                "Split-K implicit GEMM kernel failed with status: " + std::to_string(status));
+  }
+
+  return status;
+}
+
 // Implementation of implicit reduction CUDA function
 void implicit_reduction_cuda(torch::Tensor a,
                              torch::Tensor a_indices,
@@ -1117,6 +1241,26 @@ PYBIND11_MODULE(_C, m) {
            py::arg("in_map"),
            py::arg("out_map"),
            py::arg("kernel_type") = "basic",
+           py::arg("block_size") = 16);
+
+  gemm.def("split_k_implicit_gemm",
+           &split_k_implicit_gemm_cuda,
+           "Split-K Implicit GEMM kernel: C += transpose(A[indices_a]) @ B[indices_b]\n"
+           "Performs efficient matrix multiplication with CUB block reduction\n"
+           "Args:\n"
+           "  a: Input matrix A (N x C_a)\n"
+           "  b: Input matrix B (N x C_b)\n"
+           "  c: Output matrix C (C_a x C_b), modified in-place\n"
+           "  indices_a: Row indices for matrix A (K,)\n"
+           "  indices_b: Row indices for matrix B (K,)\n"
+           "  split_k_factor: Number of splits for K dimension (default 4)\n"
+           "  block_size: CUDA block size parameter (default 16)",
+           py::arg("a"),
+           py::arg("b"),
+           py::arg("c"),
+           py::arg("indices_a"),
+           py::arg("indices_b"),
+           py::arg("split_k_factor") = 4,
            py::arg("block_size") = 16);
 
   // Create submodule 'fma' for FMA-related operations

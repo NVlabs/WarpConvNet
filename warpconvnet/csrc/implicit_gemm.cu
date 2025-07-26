@@ -121,8 +121,6 @@ __global__ void implicit_gemm(const Dtype *__restrict__ A,
     for (int k = 0; k < BLOCK_SIZE; ++k) {
       if constexpr (std::is_same_v<Dtype, __half>) {
         Csub = __hadd(Csub, __hmul(As[ty][k], Bs[k][tx]));
-      } else if constexpr (std::is_same_v<Dtype, __nv_bfloat16>) {
-        Csub = __hadd(Csub, __hmul(As[ty][k], Bs[k][tx]));
       } else {
         Csub += As[ty][k] * Bs[k][tx];
       }
@@ -147,8 +145,6 @@ __global__ void implicit_gemm(const Dtype *__restrict__ A,
       }
     } else {
       if constexpr (std::is_same_v<Dtype, __half>) {
-        C[wB * out_row + x] = __hadd(C[wB * out_row + x], Csub);
-      } else if constexpr (std::is_same_v<Dtype, __nv_bfloat16>) {
         C[wB * out_row + x] = __hadd(C[wB * out_row + x], Csub);
       } else {
         C[wB * out_row + x] += Csub;
