@@ -23,13 +23,11 @@ from warpconvnet.nn.functional.sparse_conv import (
     _explicit_gemm_backward_logic,
     _cutlass_implicit_gemm_forward_logic,
     _cutlass_implicit_gemm_backward_logic,
-    SpatiallySparseConvBatchedExplicitGEMMFunction,
     SpatiallySparseConvExplicitGEMMFunction,
     SpatiallySparseConvImplicitGEMMFunction,
     UnifiedSpatiallySparseConvFunction,
     spatially_sparse_conv,
 )
-from warpconvnet.nn.functional.sparse_pool import sparse_max_pool
 from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
 
@@ -335,8 +333,9 @@ def test_sparse_conv_forward_backward_implicit_explicit_gemm(setup_voxels):
         kernel_map,
         num_out_coords=out_explicit.shape[0],
         compute_dtype=None,
-        bwd_block_size=16,
-        device=None,
+        gemm_block_size=16,
+        split_k_threads_per_block=128,
+        split_k_factor=4,
     )
     assert torch.allclose(grad_in, grad_in_explicit, atol=1e-3, rtol=1e-5)
     assert torch.allclose(grad_weight, grad_weight_explicit, atol=1e-3, rtol=1e-5)

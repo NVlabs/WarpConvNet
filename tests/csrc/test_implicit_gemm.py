@@ -105,13 +105,39 @@ def test_implicit_gemm(N, C_in, C_out, indices_ratio, dtype):
 
     # Compute reference result using PyTorch (convert to float32 for computation)
     a_gathered = tensor_a[indices_a.squeeze()]
-    c_ref = torch.matmul(a_gathered, tensor_b).to(dtype)
-
-    # Extract only the rows that were modified by the kernel
-    c_result = tensor_c[indices_c.squeeze()]
+    c_ref = torch.zeros(N, C_out, dtype=dtype, device="cuda")
+    c_out = torch.matmul(a_gathered, tensor_b).to(dtype)
+    c_ref[indices_c.squeeze()] = c_out
 
     # Compare results (convert to float32 for comparison)
-    compare_results(c_result, c_ref, indices_c)
+    compare_results(tensor_c, c_ref, indices_c)
 
     # Use more lenient thresholds for half precision
     print(f"{N}, {C_in}, {C_out}, {indices_ratio}, {dtype} test passed!")
+
+    # Test accumulation C+=AB
+    indices_a = rand_indices(N, int(N * indices_ratio), "cuda")  # N x 1
+    indices_c = rand_indices(N, int(N * indices_ratio), "cuda")
+
+    # Create input tensors with specific values for debugging (all float16)
+    tensor_a = randn_clamped((N, C_in), dtype, "cuda")  # N x C_in
+    tensor_b = randn_clamped((C_in, C_out), dtype, "cuda")  # C_in x C_out
+
+    # Test with accumulation
+    status = _C.gemm.implicit_gemm(
+        tensor_a,
+        tensor_b,
+        tensor_c,
+        indices_a,
+        indices_c,
+        "basic",
+        4,
+    )
+
+    # Compute reference result using PyTorch (convert to float32 for computation)
+    a_gathered = tensor_a[indices_a.squeeze()]
+    c_out = torch.matmul(a_gathered, tensor_b).to(dtype)
+    c_ref[indices_c.squeeze()] += c_out
+
+    # Compare results (convert to float32 for comparison)
+    compare_results(tensor_c, c_ref, indices_c)

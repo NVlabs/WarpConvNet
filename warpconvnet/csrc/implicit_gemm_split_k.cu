@@ -214,7 +214,7 @@ namespace split_k_implicit_gemm {
  * @param C_b: Number of columns in B.
  * @param K: Number of indices (length of indices_a and indices_b).
  * @param split_k_factor: Number of splits for the K dimension.
- * @param block_size: CUDA block size.
+ * @param threads: CUDA threads per block.
  *
  * @return Status code indicating success or failure.
  */
@@ -229,7 +229,7 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
                                         int C_b,
                                         int K,
                                         int split_k_factor = 4,
-                                        int block_size = 16) {
+                                        int block_threads = 256) {
   // Convert void pointers
   auto a_ptr = reinterpret_cast<const ElementA *>(tensor_a);
   auto b_ptr = reinterpret_cast<const ElementB *>(tensor_b);
@@ -265,10 +265,6 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
   dim3 grid_2d(max_grid_x, max_grid_y);
 
   // Use 1D thread blocks for CUB reduction
-  const int block_threads = (block_size == 4)    ? 128
-                            : (block_size == 16) ? 256
-                            : (block_size == 32) ? 512
-                                                 : 256;  // Default to 256
   dim3 threads(block_threads);
 
   for (int split = 0; split < actual_splits; ++split) {
@@ -358,6 +354,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
                                               current_chunk_size,
                                               split);
       }
+    } else {
+      return static_cast<int>(SplitKGemmStatus::kErrorInvalidDimensions);
     }
   }
 
@@ -373,6 +371,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
     } else if (block_threads == 512) {
       split_k_reduction_kernel<ElementC, 512>
           <<<grid_2d, threads, 0, stream>>>(c_ptr, c_partials, C_a, C_b, actual_splits);
+    } else {
+      return static_cast<int>(SplitKGemmStatus::kErrorInvalidDimensions);
     }
   }
 

@@ -3,23 +3,16 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Literal, Optional, Tuple, Union, Generator, Dict, Any, Sequence
+from typing import List, Optional, Tuple, Union, Dict, Any
 
 import numpy as np
 import torch
 from jaxtyping import Float, Int
-import logging
-import cupy as cp
 import math
-import os
 import itertools
 
 from torch import Tensor
 from torch.autograd import Function
-from torch.utils.dlpack import (
-    to_dlpack as torch_to_dlpack,
-    from_dlpack as torch_from_dlpack,
-)
 
 from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.geometry.types.voxels import Voxels
@@ -34,7 +27,6 @@ from warpconvnet.geometry.coords.ops.expand import (
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, encode
 from warpconvnet.nn.functional.sparse_pool import sparse_reduce
 from warpconvnet.utils.ntuple import ntuple
-from warpconvnet.utils.cuda_utils import load_kernel
 from warpconvnet.utils.logger import get_logger
 from warpconvnet.utils.benchmark_cache import (
     SpatiallySparseConvConfig,
@@ -51,56 +43,6 @@ try:
 except ImportError as e:
     logger.warning(f"Error importing warpconvnet._C: {e}. Using fallback implementation.")
     _C = None
-
-
-_KERNEL_CACHE = {}
-_MAX_GRID_Y = 65535
-
-# Dtype mapping for kernel template
-_DTYPE_TO_CPP_STR = {
-    torch.float16: "half",
-    torch.float32: "float",
-    torch.float64: "double",
-}
-
-# Itype mapping for kernel template
-_ITYPE_TO_CPP_STR = {
-    torch.int32: "int",
-}
-
-_TORCH_DTYPE_TO_CUPY_DTYPE = {
-    torch.float16: cp.float16,
-    torch.float32: cp.float32,
-    torch.float64: cp.float64,
-    torch.int32: cp.int32,
-}
-
-
-def _get_cuda_kernel(
-    kernel_name: str,
-    feature_dtype: torch.dtype,
-    itype: torch.dtype,
-    block_size: int = 32,
-):
-    """Return a compiled CUDA kernel with caching based on dtype and block size."""
-    dtype_str = _DTYPE_TO_CPP_STR.get(feature_dtype)
-    # Currently only support int32 for index type
-    itype_str = "int"
-
-    if dtype_str is None:
-        raise ValueError(f"Unsupported feature_dtype for CUDA kernel: {feature_dtype}")
-
-    block_size_str = str(block_size)
-    cache_key = (kernel_name, dtype_str, itype_str, block_size_str)
-
-    if cache_key in _KERNEL_CACHE:
-        return _KERNEL_CACHE[cache_key]
-
-    templated_kernel_name = f"{kernel_name}_{dtype_str}_{itype_str}_b{block_size_str}"
-    # cuda_utils.py automatically handles the csrc path for just filename
-    loaded_kernel = load_kernel(templated_kernel_name, "sparse_conv.cu")
-    _KERNEL_CACHE[cache_key] = loaded_kernel
-    return loaded_kernel
 
 
 class STRIDED_CONV_MODE(Enum):
@@ -180,6 +122,10 @@ _BENCHMARK_FORWARD_PARAMS = [
         (SPARSE_CONV_FWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM, params)
         for params in _BENCHMARK_AD_GATHER_SCATTER_PARAMS
     ],
+    *[
+        (SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM, {"fwd_block_size": block_size})
+        for block_size in [4, 16, 32]
+    ],
 ]
 
 # Backward pass combines best AD params with best TrAB params
@@ -208,6 +154,19 @@ _BENCHMARK_BACKWARD_PARAMS = [
         # Only include combinations with split-K to avoid duplicating base cases
         if ad_params.get("split_k_slices") is not None
         or trab_params.get("split_k_slices") is not None
+    ],
+    *[
+        (
+            SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM,
+            {
+                "gemm_block_size": gemm_block_size,
+                "split_k_threads_per_block": split_k_threads_per_block,
+                "split_k_factor": split_k_factor,
+            },
+        )
+        for gemm_block_size in [4, 16, 32]
+        for split_k_threads_per_block in [256]
+        for split_k_factor in [2, 4, 8, 16]
     ],
 ]
 
@@ -329,22 +288,23 @@ def _implicit_gemm_forward_logic(
     """Forward pass using implicit GEMM with a custom CUDA kernel."""
     device = in_features.device
     feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
-    cupy_feature_dtype = _TORCH_DTYPE_TO_CUPY_DTYPE[feature_dtype]
-    index_dtype = torch.int32
+    min_dtype = _min_dtype(feature_dtype, weight.dtype)
 
-    _in_features_detached = in_features.contiguous().detach()  # Detach for safety with DLPack
-    _weight_detached = weight.contiguous().detach()  # Detach for safety with DLPack
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
     N_in, C_in = _in_features_detached.shape
     K, _, C_out = _weight_detached.shape
     iden_idx = kernel_map.identity_map_index
 
     if iden_idx is not None:
-        output_feature_tensor_cp = cp.from_dlpack(
-            torch.matmul(_in_features_detached, _weight_detached[iden_idx])
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
+            dtype=min_dtype
         )
     else:
-        output_feature_tensor_cp = cp.zeros((num_out_coords, C_out), dtype=cupy_feature_dtype)
+        output_feature_tensor = torch.zeros(
+            (num_out_coords, C_out), dtype=min_dtype, device=device
+        )
 
     if (
         num_out_coords == 0
@@ -353,78 +313,28 @@ def _implicit_gemm_forward_logic(
         or C_out == 0
         or _in_features_detached.shape[0] == 0
     ):
-        return torch.from_dlpack(output_feature_tensor_cp).to(dtype=in_features.dtype)
-
-    matmul_kernel = _get_cuda_kernel("matmul", feature_dtype, index_dtype, fwd_block_size)
-
-    # Use detached tensors for DLPack conversion
-    in_features_cp = cp.from_dlpack(_in_features_detached.to(dtype=feature_dtype))
+        return output_feature_tensor.to(dtype=in_features.dtype)
 
     for k_idx in range(len(kernel_map)):
         if k_idx == iden_idx:
             continue
 
-        # Ensure weight[k_idx] is converted to the correct compute_dtype for CuPy
-        current_weight_k_detached = _weight_detached[k_idx].to(dtype=feature_dtype)
-        current_weight_k_cp = cp.from_dlpack(current_weight_k_detached)
-
         in_map_k, out_map_k = kernel_map[k_idx]
-        in_map_k = in_map_k.to(device=device, dtype=index_dtype).contiguous()
-        out_map_k = out_map_k.to(device=device, dtype=index_dtype).contiguous()
-
         num_active_pairs = in_map_k.shape[0]
         if num_active_pairs == 0:
             continue
 
-        in_map_k_cp = cp.from_dlpack(in_map_k)
-        out_map_k_cp = cp.from_dlpack(out_map_k)
+        _C.gemm.implicit_gemm(
+            in_features,
+            weight[k_idx],
+            output_feature_tensor,
+            in_map_k,
+            out_map_k,
+            "basic",
+            fwd_block_size,
+        )
 
-        threads_y = fwd_block_size
-        threads_x = fwd_block_size
-        blocks_y = math.ceil(num_active_pairs / threads_y)
-        blocks_x = math.ceil(C_out / threads_x)
-
-        if blocks_y > 0 and blocks_x > 0 and blocks_y < _MAX_GRID_Y:
-            matmul_kernel(
-                (blocks_x, blocks_y, 1),
-                (threads_x, threads_y, 1),
-                (
-                    in_features_cp,
-                    C_in,
-                    num_active_pairs,
-                    current_weight_k_cp,
-                    C_out,
-                    C_in,
-                    output_feature_tensor_cp,
-                    in_map_k_cp,
-                    out_map_k_cp,
-                ),
-            )
-        elif blocks_y >= _MAX_GRID_Y:
-            num_iters = math.ceil(blocks_y / _MAX_GRID_Y)
-            for iter_idx in range(num_iters):
-                start_idx = iter_idx * _MAX_GRID_Y * threads_y
-                end_idx = min(start_idx + _MAX_GRID_Y * threads_y, num_active_pairs)
-                curr_active_pairs = end_idx - start_idx
-                if curr_active_pairs == 0:
-                    continue
-                matmul_kernel(
-                    (blocks_x, math.ceil(curr_active_pairs / threads_y), 1),
-                    (threads_x, threads_y, 1),
-                    (
-                        in_features_cp,
-                        C_in,
-                        curr_active_pairs,
-                        current_weight_k_cp,
-                        C_out,
-                        C_in,
-                        output_feature_tensor_cp,
-                        in_map_k_cp[start_idx:end_idx],
-                        out_map_k_cp[start_idx:end_idx],
-                    ),
-                )
-
-    return torch.from_dlpack(output_feature_tensor_cp).to(dtype=in_features.dtype)
+    return output_feature_tensor.to(dtype=in_features.dtype)
 
 
 def _implicit_gemm_backward_logic(
@@ -434,32 +344,31 @@ def _implicit_gemm_backward_logic(
     kernel_map: IntSearchResult,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
-    bwd_block_size: int,
-    device: torch.device,
+    gemm_block_size: int,
+    split_k_threads_per_block: int,
+    split_k_factor: int,
 ) -> Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]]:
     """Backward pass using implicit GEMM kernels."""
     feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
-    cupy_feature_dtype = _TORCH_DTYPE_TO_CUPY_DTYPE[feature_dtype]
-    index_dtype = torch.int32
+    min_dtype = _min_dtype(feature_dtype, weight.dtype)
+    device = in_features.device
 
-    _in_features_detached = in_features.contiguous().detach().to(dtype=feature_dtype)
-    _weight_detached = weight.contiguous().detach().to(dtype=feature_dtype)
-    _grad_output_detached = grad_output.contiguous().detach().to(dtype=feature_dtype)
-    grad_output_cp = cp.from_dlpack(torch_to_dlpack(_grad_output_detached))
-    in_features_cp = cp.from_dlpack(torch_to_dlpack(_in_features_detached))
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
+    _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
 
     N_in, C_in = _in_features_detached.shape
     K, _, C_out = _weight_detached.shape
     iden_idx = kernel_map.identity_map_index
 
-    grad_weight_tensor_cp = cp.zeros((K, C_in, C_out), dtype=cupy_feature_dtype)
+    grad_weight_tensor = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
     if iden_idx is not None:
-        grad_in_features_cp = cp.matmul(
-            grad_output_cp, cp.from_dlpack(_weight_detached[iden_idx].T)
-        )
-        grad_weight_tensor_cp[iden_idx] = cp.matmul(in_features_cp.T, grad_output_cp)
+        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
+        grad_weight_tensor[iden_idx] = torch.matmul(
+            _in_features_detached.T, _grad_output_detached
+        ).to(dtype=min_dtype)
     else:
-        grad_in_features_cp = cp.zeros((N_in, C_in), dtype=cupy_feature_dtype)
+        grad_in_features = torch.zeros((N_in, C_in), dtype=min_dtype, device=device)
 
     if (
         num_out_coords == 0
@@ -469,87 +378,40 @@ def _implicit_gemm_backward_logic(
         or N_in == 0
         or _grad_output_detached.shape[0] == 0
     ):
-        grad_in_final = torch.from_dlpack(grad_in_features_cp).to(dtype=in_features.dtype)
-        grad_weight_final = torch.from_dlpack(grad_weight_tensor_cp).to(dtype=weight.dtype)
-        return grad_in_final, grad_weight_final
-
-    matmul2_kernel = _get_cuda_kernel("matmul2", feature_dtype, index_dtype, bwd_block_size)
+        return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(
+            dtype=weight.dtype
+        )
 
     for k_idx in range(len(kernel_map)):
         if k_idx == iden_idx:
             continue
-
-        # Ensure weight_k is on correct device and dtype for CuPy
-        current_weight_k_detached = _weight_detached[k_idx]  # Already compute_dtype
-        current_weight_k_cp = cp.from_dlpack(current_weight_k_detached)
 
         in_map_k, out_map_k = kernel_map[k_idx]
         num_active_pairs = in_map_k.shape[0]
         if num_active_pairs == 0:
             continue
 
-        in_map_k = in_map_k.to(device=device, dtype=index_dtype).contiguous()
-        out_map_k = out_map_k.to(device=device, dtype=index_dtype).contiguous()
+        _C.gemm.implicit_gemm(
+            _grad_output_detached,
+            _weight_detached[k_idx].T,
+            grad_in_features,
+            out_map_k,
+            in_map_k,
+            "basic",
+            gemm_block_size,
+        )
 
-        in_map_k_cp = cp.from_dlpack(in_map_k)
-        out_map_k_cp = cp.from_dlpack(out_map_k)
-        grad_weight_k_cp = grad_weight_tensor_cp[k_idx]
+        _C.gemm.split_k_implicit_gemm(
+            _in_features_detached,
+            _grad_output_detached,
+            grad_weight_tensor[k_idx],
+            in_map_k,
+            out_map_k,
+            split_k_factor=split_k_factor,
+            block_size=split_k_threads_per_block,
+        )
 
-        threads_y = bwd_block_size
-        threads_x = bwd_block_size
-        blocks_x = math.ceil(C_in / threads_x)
-        blocks_y = math.ceil(num_active_pairs / threads_y)
-
-        if blocks_y > 0 and blocks_x > 0 and blocks_y < _MAX_GRID_Y:
-            matmul2_kernel(
-                (blocks_x, blocks_y, 1),
-                (threads_x, threads_y, 1),
-                (
-                    grad_output_cp,
-                    C_out,
-                    num_active_pairs,
-                    current_weight_k_cp,
-                    C_out,
-                    C_in,
-                    in_features_cp,
-                    C_in,
-                    num_active_pairs,
-                    grad_in_features_cp,
-                    grad_weight_k_cp,
-                    in_map_k_cp,
-                    out_map_k_cp,
-                ),
-            )
-        elif blocks_y >= _MAX_GRID_Y:
-            num_iters = math.ceil(blocks_y / _MAX_GRID_Y)
-            for iter_idx in range(num_iters):
-                start_idx = iter_idx * _MAX_GRID_Y * threads_y
-                end_idx = min(start_idx + _MAX_GRID_Y * threads_y, num_active_pairs)
-                curr_active_pairs = end_idx - start_idx
-                if curr_active_pairs == 0:
-                    continue
-                matmul2_kernel(
-                    (blocks_x, math.ceil(curr_active_pairs / threads_y), 1),
-                    (threads_x, threads_y, 1),
-                    (
-                        grad_output_cp,
-                        C_out,
-                        curr_active_pairs,
-                        current_weight_k_cp,
-                        C_out,
-                        C_in,
-                        in_features_cp,
-                        C_in,
-                        curr_active_pairs,
-                        grad_in_features_cp,
-                        grad_weight_k_cp,
-                        in_map_k_cp[start_idx:end_idx],
-                        out_map_k_cp[start_idx:end_idx],
-                    ),
-                )
-    grad_in_final = torch.from_dlpack(grad_in_features_cp).to(dtype=in_features.dtype)
-    grad_weight_final = torch.from_dlpack(grad_weight_tensor_cp).to(dtype=weight.dtype)
-    return grad_in_final, grad_weight_final
+    return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(dtype=weight.dtype)
 
 
 def _cutlass_implicit_gemm_forward_logic(
@@ -764,9 +626,10 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
         num_out_coords: int,
+        gemm_block_size: int = 16,
+        split_k_threads_per_block: int = 128,
+        split_k_factor: int = 4,
         compute_dtype: Optional[torch.dtype] = None,
-        fwd_block_size: int = 16,
-        bwd_block_size: int = 16,  # Saved for backward
     ) -> Float[Tensor, "M C_out"]:
         output_feature_tensor = _implicit_gemm_forward_logic(
             in_features,
@@ -774,14 +637,16 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
             kernel_map,
             num_out_coords,
             compute_dtype,
-            fwd_block_size,
+            gemm_block_size,
         )
         ctx.save_for_backward(in_features, weight)
         ctx.kernel_map = kernel_map
-        ctx.num_out_coords = num_out_coords
-        ctx.compute_dtype = compute_dtype
-        ctx.bwd_block_size = bwd_block_size
-        ctx.device = in_features.device
+        ctx.gemm_params = {
+            "compute_dtype": compute_dtype,
+            "gemm_block_size": gemm_block_size,
+            "split_k_threads_per_block": split_k_threads_per_block,
+            "split_k_factor": split_k_factor,
+        }
         return output_feature_tensor
 
     @staticmethod
@@ -796,10 +661,8 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
     ]:
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
-        num_out_coords = ctx.num_out_coords
-        compute_dtype = ctx.compute_dtype
-        bwd_block_size = ctx.bwd_block_size
-        device = ctx.device
+        num_out_coords = grad_output.shape[0]
+        gemm_params = ctx.gemm_params
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
             return _pad_tuple(None, None, 7)
@@ -824,9 +687,10 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
             weight,
             kernel_map,
             num_out_coords,
-            compute_dtype,
-            bwd_block_size,
-            device,
+            gemm_params["compute_dtype"],
+            gemm_params["gemm_block_size"],
+            gemm_params["split_k_threads_per_block"],
+            gemm_params["split_k_factor"],
         )
 
         if not ctx.needs_input_grad[0]:
@@ -1303,8 +1167,9 @@ def _run_backward_benchmarks(
                 kernel_map,
                 num_out_coords,
                 compute_dtype,
-                device=device,
-                **params_config,
+                gemm_block_size=params_config.get("gemm_block_size", 16),
+                split_k_threads_per_block=params_config.get("split_k_threads_per_block", 128),
+                split_k_factor=params_config.get("split_k_factor", 4),
             )
         elif algo_mode == SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM:
             status, _ = _cutlass_implicit_gemm_backward_logic(

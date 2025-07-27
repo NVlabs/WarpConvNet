@@ -61,7 +61,7 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
                                         int C_b,
                                         int K,
                                         int split_k_factor,
-                                        int block_size);
+                                        int block_threads);
 }  // namespace split_k_implicit_gemm
 
 // Forward declarations for implicit reduction functions (implemented in .cu file)
@@ -755,9 +755,12 @@ int implicit_gemm_cuda(torch::Tensor a,
   int hB = b.size(0);
   int wB = b.size(1);
 
-  TORCH_CHECK(wA == hB, "Matrix dimensions must be compatible for multiplication");
-  TORCH_CHECK(c.size(0) == hA, "Matrix C must have same number of rows as A");
-  TORCH_CHECK(c.size(1) == wB, "Matrix C must have same number of columns as B");
+  TORCH_CHECK(wA == hB,
+              "Matrix dimensions must be compatible for multiplication. wA: " + std::to_string(wA) +
+                  ", hB: " + std::to_string(hB));
+  TORCH_CHECK(c.size(1) == wB,
+              "Matrix C must have same number of columns as B. wB: " + std::to_string(wB) +
+                  ", c.size(1): " + std::to_string(c.size(1)));
 
   // Ensure tensors are on CUDA and contiguous
   TORCH_CHECK(a.is_cuda(), "All tensors must be on CUDA");

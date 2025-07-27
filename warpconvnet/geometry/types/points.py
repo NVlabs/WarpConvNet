@@ -298,8 +298,12 @@ class Points(Geometry):
 
         return cls(batched_coordinates, batched_features)
 
-    def to_voxels(self, voxel_size: float) -> "Voxels":
+    def to_voxels(
+        self,
+        voxel_size: float,
+        reduction: Union[REDUCTIONS | REDUCTION_TYPES_STR] = REDUCTIONS.MEAN,
+    ) -> "Voxels":
         """
         Convert the point collection to a spatially sparse tensor.
         """
-        return points_to_voxels(self, voxel_size)
+        return points_to_voxels(self, voxel_size, reduction)

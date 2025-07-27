@@ -71,9 +71,7 @@ __global__ void implicit_gemm(const Dtype *__restrict__ A,
   const int y = BLOCK_SIZE * by + ty;
 
   // Check if this thread should process a valid row
-  if (y >= indices_size) {
-    return;  // Skip threads that don't correspond to valid indices
-  }
+  const bool valid_thread = (y < indices_size);
 
   // Csub is used to store the element of the block sub-matrix
   // that is computed by the thread
@@ -86,8 +84,13 @@ __global__ void implicit_gemm(const Dtype *__restrict__ A,
     Csub = Dtype(0);
   }
 
-  const Itype in_row = in_map[y];
-  const Itype out_row = out_map[y];
+  // Only access in_map and out_map for valid threads to avoid out-of-bounds access
+  Itype in_row = 0;
+  Itype out_row = 0;
+  if (valid_thread) {
+    in_row = in_map[y];
+    out_row = out_map[y];
+  }
 
   // Declaration of the shared memory arrays used to
   // store the sub-matrices of A and B
@@ -101,13 +104,15 @@ __global__ void implicit_gemm(const Dtype *__restrict__ A,
     // to shared memory; each thread loads
     // one element of each matrix
     if constexpr (std::is_same_v<Dtype, __half>) {
-      As[ty][tx] = ((s + tx) < wA) ? A[wA * in_row + s + tx] : __float2half(0.0f);
+      As[ty][tx] = (valid_thread && (s + tx) < wA) ? A[wA * in_row + s + tx] : __float2half(0.0f);
       Bs[ty][tx] = ((s + ty) < hB && x < wB) ? B[wB * (s + ty) + x] : __float2half(0.0f);
     } else if constexpr (std::is_same_v<Dtype, __nv_bfloat16>) {
-      As[ty][tx] = ((s + tx) < wA) ? A[wA * in_row + s + tx] : __float2bfloat16(0.0f);
+      As[ty][tx] =
+          (valid_thread && (s + tx) < wA) ? A[wA * in_row + s + tx] : __float2bfloat16(0.0f);
       Bs[ty][tx] = ((s + ty) < hB && x < wB) ? B[wB * (s + ty) + x] : __float2bfloat16(0.0f);
     } else {
-      As[ty][tx] = ((s + tx) < wA) ? A[wA * in_row + s + tx] : static_cast<Dtype>(0);
+      As[ty][tx] =
+          (valid_thread && (s + tx) < wA) ? A[wA * in_row + s + tx] : static_cast<Dtype>(0);
       Bs[ty][tx] = ((s + ty) < hB && x < wB) ? B[wB * (s + ty) + x] : static_cast<Dtype>(0);
     }
 
@@ -134,7 +139,7 @@ __global__ void implicit_gemm(const Dtype *__restrict__ A,
 
   // Write the block sub-matrix to device memory;
   // each thread writes one element
-  if (x < wB) {
+  if (valid_thread && x < wB) {
     if constexpr (use_atomic) {
       if constexpr (std::is_same_v<Dtype, __half>) {
         atomicAdd(&C[wB * out_row + x], Csub);
