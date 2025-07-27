@@ -298,9 +298,7 @@ def _implicit_gemm_forward_logic(
     iden_idx = kernel_map.identity_map_index
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
-            dtype=min_dtype
-        )
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
     else:
         output_feature_tensor = torch.zeros(
             (num_out_coords, C_out), dtype=min_dtype, device=device
@@ -325,8 +323,8 @@ def _implicit_gemm_forward_logic(
             continue
 
         _C.gemm.implicit_gemm(
-            in_features,
-            weight[k_idx],
+            _in_features_detached,
+            _weight_detached[k_idx],
             output_feature_tensor,
             in_map_k,
             out_map_k,
@@ -343,10 +341,10 @@ def _implicit_gemm_backward_logic(
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
     num_out_coords: int,
-    compute_dtype: Optional[torch.dtype],
     gemm_block_size: int,
     split_k_threads_per_block: int,
     split_k_factor: int,
+    compute_dtype: Optional[torch.dtype],
 ) -> Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]]:
     """Backward pass using implicit GEMM kernels."""
     feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
@@ -431,14 +429,14 @@ def _cutlass_implicit_gemm_forward_logic(
 
     device = in_features.device
     iden_idx = kernel_map.identity_map_index
-    in_dtype = _min_dtype(in_features.dtype, weight.dtype)
-    in_features = in_features.to(dtype=in_dtype)
-    weight = weight.to(dtype=in_dtype)
+    min_dtype = _min_dtype(in_features.dtype, weight.dtype)
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(in_features, weight[iden_idx])
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
     else:
         output_feature_tensor = torch.zeros(
-            num_out_coords, weight.shape[-1], device=device, dtype=in_dtype
+            num_out_coords, weight.shape[-1], device=device, dtype=min_dtype
         )
 
     for i in range(len(kernel_map)):
@@ -451,8 +449,8 @@ def _cutlass_implicit_gemm_forward_logic(
         in_map = in_map.to(device)
         out_map = out_map.to(device)
         status = _C.gemm.cutlass_gemm_AD_gather_scatter(
-            in_features,
-            weight[i],
+            _in_features_detached,
+            _weight_detached[i],
             output_feature_tensor,
             output_feature_tensor,
             in_map,
@@ -488,20 +486,18 @@ def _cutlass_implicit_gemm_backward_logic(
     if device is None:
         device = in_features.device
 
-    in_dtype = _min_dtype(in_features.dtype, weight.dtype, grad_output.dtype)
-    grad_output = grad_output.to(dtype=in_dtype)
-    in_features = in_features.to(dtype=in_dtype)
-    orig_weight_dtype = weight.dtype
+    min_dtype = _min_dtype(in_features.dtype, weight.dtype, grad_output.dtype)
+    _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
     grad_weight = torch.zeros_like(weight, device=device)
-    # Downcast to for input
-    weight = weight.to(dtype=in_dtype)
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
-        grad_in_features = torch.matmul(grad_output, weight[iden_idx].T)
-        grad_weight[iden_idx] = torch.matmul(in_features.T, grad_output).to(orig_weight_dtype)
+        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
+        grad_weight[iden_idx] = torch.matmul(_in_features_detached.T, _grad_output_detached)
     else:
-        grad_in_features = torch.zeros_like(in_features, device=device)
+        grad_in_features = torch.zeros_like(_in_features_detached, device=device)
 
     for i in range(len(kernel_map)):
         if i == iden_idx:
@@ -511,13 +507,11 @@ def _cutlass_implicit_gemm_backward_logic(
         if in_map.shape[0] == 0:
             continue
 
-        curr_weight = weight[i]
-
         # grad_in_features[in_map] += torch.matmul(grad_output[out_map], curr_weight.T)
         if requires_grad[0]:
             status = _C.gemm.cutlass_gemm_AD_gather_scatter(
-                grad_output,
-                curr_weight.T.contiguous(),
+                _grad_output_detached,
+                _weight_detached[i].T.contiguous(),
                 grad_in_features,
                 grad_in_features,
                 out_map,
@@ -532,8 +526,8 @@ def _cutlass_implicit_gemm_backward_logic(
         # grad_weight[i] += torch.matmul(curr_in_feats.T, curr_grad_output)
         if requires_grad[1]:
             status = _C.gemm.cutlass_gemm_trAB_gather(
-                in_features,
-                grad_output,
+                _in_features_detached,
+                _grad_output_detached,
                 grad_weight[i],
                 grad_weight[i],
                 in_map,
@@ -549,7 +543,7 @@ def _cutlass_implicit_gemm_backward_logic(
 
     return (
         grad_in_features.to(dtype=in_features.dtype),
-        grad_weight.to(dtype=orig_weight_dtype),
+        grad_weight.to(dtype=weight.dtype),
     )
 
 
@@ -687,10 +681,10 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
             weight,
             kernel_map,
             num_out_coords,
-            gemm_params["compute_dtype"],
             gemm_params["gemm_block_size"],
             gemm_params["split_k_threads_per_block"],
             gemm_params["split_k_factor"],
+            gemm_params["compute_dtype"],
         )
 
         if not ctx.needs_input_grad[0]:
@@ -1458,23 +1452,16 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 device,
             )
         elif chosen_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM:
-            current_bwd_block_size = chosen_bwd_params.get("bwd_block_size")
-            if current_bwd_block_size is None:  # Fallback
-                current_bwd_block_size = (
-                    initial_bwd_block_size if initial_bwd_block_size is not None else 16
-                )  # Default fallback
-                print(
-                    f"Warning: bwd_block_size not found in chosen_bwd_params for IMPLICIT_GEMM, using {current_bwd_block_size}"
-                )
             grad_in_features, grad_weight = _implicit_gemm_backward_logic(
                 grad_output,
                 in_features,
                 weight,
                 kernel_map,
                 num_out_coords,
-                compute_dtype,
-                current_bwd_block_size,
-                device,
+                gemm_block_size=chosen_bwd_params.get("bwd_block_size", 16),
+                split_k_threads_per_block=chosen_bwd_params.get("split_k_threads_per_block", 256),
+                split_k_factor=chosen_bwd_params.get("split_k_factor", 4),
+                compute_dtype=compute_dtype,
             )
         elif chosen_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM:
             grad_in_features, grad_weight = _cutlass_implicit_gemm_backward_logic(
