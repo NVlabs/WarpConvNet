@@ -253,3 +253,14 @@ def test_extra_attributes():
     # Check that the extra attribute is present
     assert replaced.extra_attributes["test_attribute"] == "test"
     assert replaced.voxel_size == voxel_size
+
+
+def test_from_dense():
+    B, C, H, W, D = 2, 3, 100, 100, 100
+    rand_img = torch.randn(B, C, H, W, D)
+    mask = torch.rand(B, 1, H, W, D) < 0.5
+    rand_img[mask.expand_as(rand_img)] = 0
+    voxels = Voxels.from_dense(rand_img, voxel_size=0.05).to("cuda:0")
+
+    assert voxels.offsets[-1] == voxels.batched_coordinates.batched_tensor.shape[0]
+    assert voxels.offsets[-1] == voxels.batched_features.batched_tensor.shape[0]

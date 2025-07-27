@@ -111,7 +111,7 @@ class Voxels(Geometry):
             assert target_spatial_sparse_tensor.num_spatial_dims == len(spatial_shape)
             assert target_spatial_sparse_tensor.batch_size == batched_spatial_shape[0]
             # Use the provided spatial sparse tensor's coordinate only
-            batch_indexed_coords = target_spatial_sparse_tensor.batch_indexed_coordinates
+            batch_indexed_coords = target_spatial_sparse_tensor.batch_indexed_coordinates.clone()
             # subtract the min_coords
             min_coords = target_spatial_sparse_tensor.coordinate_tensor.min(dim=0).values.view(
                 1, -1
@@ -144,7 +144,7 @@ class Voxels(Geometry):
         device = self.batched_coordinates.device
 
         # Get the batch indexed coordinates and features
-        batch_indexed_coords = self.batched_coordinates.batch_indexed_coordinates
+        batch_indexed_coords = self.batched_coordinates.batch_indexed_coordinates.clone()
         features = self.batched_features.batched_tensor
 
         # Get the spatial shape.
