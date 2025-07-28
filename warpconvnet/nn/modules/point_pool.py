@@ -25,7 +25,7 @@ class PointPoolBase(BaseSpatialModule):
 
     Parameters
     ----------
-    reduction : str or :class:`REDUCTIONS`, optional
+    reduction : str or `REDUCTIONS`, optional
         Reduction method used when merging features. Defaults to ``REDUCTIONS.MAX``.
     downsample_max_num_points : int, optional
         Maximum number of points to keep when downsampling.
@@ -173,7 +173,7 @@ class PointUnpool(BaseSpatialModule):
 
     Parameters
     ----------
-    unpooling_mode : {"repeat", "interpolate"} or :class:`FEATURE_UNPOOLING_MODE`, optional
+    unpooling_mode : {"repeat", "interpolate"} or `FEATURE_UNPOOLING_MODE`, optional
         Strategy used when unpooling features. Defaults to ``FEATURE_UNPOOLING_MODE.REPEAT``.
     concat_unpooled_pc : bool, optional
         If ``True`` concatenate the unpooled point cloud with the input. Defaults to ``False``.
@@ -181,9 +181,7 @@ class PointUnpool(BaseSpatialModule):
 
     def __init__(
         self,
-        unpooling_mode: Union[
-            str, FEATURE_UNPOOLING_MODE
-        ] = FEATURE_UNPOOLING_MODE.REPEAT,
+        unpooling_mode: Union[str, FEATURE_UNPOOLING_MODE] = FEATURE_UNPOOLING_MODE.REPEAT,
         concat_unpooled_pc: bool = False,
     ):
         super().__init__()

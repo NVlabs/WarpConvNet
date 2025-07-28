@@ -31,6 +31,10 @@ from warpconvnet.utils.benchmark_cache import SpatiallySparseConvConfig
 from warpconvnet.utils.type_cast import _min_dtype, _max_dtype, _maybe_cast
 from warpconvnet.utils.timer import CUDATimer
 from warpconvnet.utils.ntuple import _pad_tuple
+from warpconvnet.constants import (
+    WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE,
+    WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE,
+)
 
 logger = get_logger(__name__)
 try:
@@ -97,6 +101,51 @@ def _initialize_depthwise_benchmark_cache():
 
 # Initialize cache on module load
 _initialize_depthwise_benchmark_cache()
+
+
+def _filter_depthwise_benchmark_params_by_env_config(
+    default_params: List[
+        Tuple[
+            Union[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE],
+            Dict[str, Any],
+        ]
+    ],
+    env_config: Union[
+        str,
+        List[Union[str, SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE]],
+    ],
+    is_forward: bool = True,
+) -> List[
+    Tuple[
+        Union[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE],
+        Dict[str, Any],
+    ]
+]:
+    """Filter benchmark parameters based on environment configuration for depthwise convolution."""
+    if env_config == "auto":
+        return default_params
+
+    if isinstance(env_config, str):
+        env_config = [env_config]
+
+    # Convert strings to enums and normalize the list
+    normalized_algos = []
+    for algo in env_config:
+        if isinstance(algo, str):
+            if is_forward:
+                normalized_algos.append(SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE(algo))
+            else:
+                normalized_algos.append(SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo))
+        else:
+            normalized_algos.append(algo)
+
+    # Filter default parameters to only include algorithms in the list
+    filtered_params = []
+    for algo_mode, params_config in default_params:
+        if algo_mode in normalized_algos:
+            filtered_params.append((algo_mode, params_config))
+
+    return filtered_params
 
 
 def _explicit_depthwise_forward_logic(
@@ -301,6 +350,9 @@ def _run_depthwise_forward_benchmarks(
     kernel_map: IntSearchResult,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
+    custom_params: Optional[
+        List[Tuple[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, Dict[str, Any]]]
+    ] = None,
     warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
     benchmark_iters: int = _BENCHMARK_NUM_RUNS,
 ) -> List[Tuple[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, Dict[str, Any], float]]:
@@ -341,7 +393,11 @@ def _run_depthwise_forward_benchmarks(
                 f"Unsupported algo_mode in _execute_single_depthwise_fwd_pass: {algo_mode}"
             )
 
-    for algo_mode, params_config in _BENCHMARK_DEPTHWISE_FORWARD_PARAMS:
+    params_to_benchmark = (
+        custom_params if custom_params is not None else _BENCHMARK_DEPTHWISE_FORWARD_PARAMS
+    )
+
+    for algo_mode, params_config in params_to_benchmark:
         # Skip implicit if _C is not available
         if algo_mode == SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.IMPLICIT and _C is None:
             continue
@@ -412,6 +468,9 @@ def _run_depthwise_backward_benchmarks(
     kernel_map: IntSearchResult,
     compute_dtype: Optional[torch.dtype],
     device: torch.device,
+    custom_params: Optional[
+        List[Tuple[SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE, Dict[str, Any]]]
+    ] = None,
     warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
     benchmark_iters: int = _BENCHMARK_NUM_RUNS,
 ) -> List[Tuple[SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE, Dict[str, Any], float]]:
@@ -451,7 +510,11 @@ def _run_depthwise_backward_benchmarks(
                 f"Unsupported algo_mode in _execute_single_depthwise_bwd_pass: {algo_mode}"
             )
 
-    for algo_mode, params_config in _BENCHMARK_DEPTHWISE_BACKWARD_PARAMS:
+    params_to_benchmark = (
+        custom_params if custom_params is not None else _BENCHMARK_DEPTHWISE_BACKWARD_PARAMS
+    )
+
+    for algo_mode, params_config in params_to_benchmark:
         # Skip implicit if _C is not available
         if algo_mode == SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.IMPLICIT and _C is None:
             continue
@@ -523,44 +586,104 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
         weight: Float[Tensor, "K C"],
         kernel_map: IntSearchResult,
         num_out_coords: int,
-        fwd_algo: SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE,
-        bwd_algo: SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE,
+        fwd_algo: Union[
+            SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, List[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE]
+        ],
+        bwd_algo: Union[
+            SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE, List[SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE]
+        ],
         compute_dtype: Optional[torch.dtype],
     ) -> Float[Tensor, "M C"]:
+        global _BENCHMARK_DEPTHWISE_FORWARD_RESULTS  # noqa: F824
         output_feature_tensor = None
 
-        chosen_fwd_algo = fwd_algo
-        chosen_fwd_params = {}
+        # Convert string inputs to enum if needed
+        if isinstance(fwd_algo, str):
+            fwd_algo = SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE(fwd_algo)
+        if isinstance(bwd_algo, str):
+            bwd_algo = SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(bwd_algo)
 
-        if fwd_algo == SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.AUTO:
-            config = SpatiallySparseConvConfig(
-                num_in_coords=in_features.shape[0],
-                num_out_coords=num_out_coords,
-                in_channels=in_features.shape[1],
-                out_channels=weight.shape[1],  # For depthwise, in_channels == out_channels
-                kernel_volume=weight.shape[0],
-                in_dtype=in_features.dtype,
-            )
-            global _BENCHMARK_DEPTHWISE_FORWARD_RESULTS  # noqa: F824
-            cached_result = _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.get(config)
-            if cached_result is not None:
-                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]  # Best is first
+        if isinstance(fwd_algo, list):
+            fwd_algo = [
+                SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE(algo) if isinstance(algo, str) else algo
+                for algo in fwd_algo
+            ]
+        if isinstance(bwd_algo, list):
+            bwd_algo = [
+                SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo) if isinstance(algo, str) else algo
+                for algo in bwd_algo
+            ]
+
+        # UNIFIED APPROACH: Always benchmark within filtered algorithm space
+        # Step 1: Determine algorithm filter set
+        if isinstance(fwd_algo, list):
+            algorithm_filter = fwd_algo
+        elif fwd_algo == SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.AUTO:
+            algorithm_filter = "auto"  # All algorithms
+        else:
+            # Single algorithm - create list for consistent processing
+            algorithm_filter = [fwd_algo]
+
+        # Step 2: Generate configuration for caching
+        config = SpatiallySparseConvConfig(
+            num_in_coords=in_features.shape[0],
+            num_out_coords=num_out_coords,
+            in_channels=in_features.shape[1],
+            out_channels=weight.shape[1],  # For depthwise, in_channels == out_channels
+            kernel_volume=weight.shape[0],
+            in_dtype=in_features.dtype,
+        )
+
+        # Step 3: Check cache first
+        cached_result = _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.get(config)
+        if cached_result is not None:
+            if algorithm_filter == "auto":
+                # Use best overall result
+                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]
             else:
-                all_fwd_benchmark_results = _run_depthwise_forward_benchmarks(
-                    in_features,
-                    weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
+                # Filter cached results to only include algorithms in filter set
+                filtered_cached_results = []
+                for algo, params, time in cached_result:
+                    if algo in algorithm_filter:
+                        filtered_cached_results.append((algo, params, time))
+
+                if filtered_cached_results:
+                    # Use the best performing algorithm from the filtered results
+                    chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[
+                        0
+                    ]  # Best is first
+                else:
+                    # Fallback to best cached result if none from filter set
+                    logger.warning(
+                        f"No cached algorithms from {algorithm_filter} found, using best cached"
+                    )
+                    chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]
+        else:
+            # Step 4: No cache - always benchmark within filtered space
+            if algorithm_filter == "auto":
+                # Benchmark all algorithms
+                filtered_params = _BENCHMARK_DEPTHWISE_FORWARD_PARAMS
+            else:
+                # Filter benchmark parameters to only include algorithms in filter set
+                filtered_params = _filter_depthwise_benchmark_params_by_env_config(
+                    _BENCHMARK_DEPTHWISE_FORWARD_PARAMS, algorithm_filter, is_forward=True
                 )
-                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[config] = all_fwd_benchmark_results
-                chosen_fwd_algo, chosen_fwd_params, min_time = all_fwd_benchmark_results[
-                    0
-                ]  # Best is first
 
-                # Mark cache as dirty - background thread will save periodically
-                mark_benchmark_cache_dirty()
+            # Always run benchmarks to find optimal parameters
+            all_fwd_benchmark_results = _run_depthwise_forward_benchmarks(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                compute_dtype,
+                custom_params=filtered_params,
+            )
+            _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[config] = all_fwd_benchmark_results
+            chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]  # Best is first
 
+            mark_benchmark_cache_dirty()
+
+        # Step 5: Execute with optimal algorithm and parameters
         if chosen_fwd_algo == SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT:
             output_feature_tensor = _explicit_depthwise_forward_logic(
                 in_features,
@@ -630,39 +753,89 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
             return _pad_tuple(grad_in_final, grad_weight_final, 7)
 
-        chosen_bwd_algo = initial_bwd_algo
-        chosen_bwd_params = {}
+        # Convert string to enum if needed
+        if isinstance(initial_bwd_algo, str):
+            initial_bwd_algo = SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(initial_bwd_algo)
 
-        if initial_bwd_algo == SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.AUTO:
-            config = SpatiallySparseConvConfig(
-                num_in_coords=config_params["num_in_coords"],
-                num_out_coords=config_params["num_out_coords"],
-                in_channels=config_params["in_channels"],
-                out_channels=config_params["out_channels"],
-                kernel_volume=config_params["kernel_volume"],
-                in_dtype=grad_output.dtype,
-            )
-            global _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS  # noqa: F824
-            cached_result = _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.get(config)
-            if cached_result is not None:
-                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]  # Best is first
+        if isinstance(initial_bwd_algo, list):
+            initial_bwd_algo = [
+                SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo) if isinstance(algo, str) else algo
+                for algo in initial_bwd_algo
+            ]
+
+        # UNIFIED APPROACH: Always benchmark within filtered algorithm space
+        # Step 1: Determine algorithm filter set
+        if isinstance(initial_bwd_algo, list):
+            algorithm_filter = initial_bwd_algo
+        elif initial_bwd_algo == SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.AUTO:
+            algorithm_filter = "auto"  # All algorithms
+        else:
+            # Single algorithm - create list for consistent processing
+            algorithm_filter = [initial_bwd_algo]
+
+        # Step 2: Generate configuration for caching
+        config_params = ctx.config_params_for_bwd
+        config = SpatiallySparseConvConfig(
+            num_in_coords=config_params["num_in_coords"],
+            num_out_coords=config_params["num_out_coords"],
+            in_channels=config_params["in_channels"],
+            out_channels=config_params["out_channels"],
+            kernel_volume=config_params["kernel_volume"],
+            in_dtype=grad_output.dtype,
+        )
+
+        # Step 3: Check cache first
+        global _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS  # noqa: F824
+        cached_result = _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.get(config)
+        if cached_result is not None:
+            if algorithm_filter == "auto":
+                # Use best overall result
+                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]
             else:
-                all_bwd_benchmark_results = _run_depthwise_backward_benchmarks(
-                    grad_output,
-                    in_features,
-                    weight,
-                    kernel_map,
-                    compute_dtype,
-                    device,
+                # Filter cached results to only include algorithms in filter set
+                filtered_cached_results = []
+                for algo, params, time in cached_result:
+                    if algo in algorithm_filter:
+                        filtered_cached_results.append((algo, params, time))
+
+                if filtered_cached_results:
+                    # Use the best performing algorithm from the filtered results
+                    chosen_bwd_algo, chosen_bwd_params, _ = filtered_cached_results[
+                        0
+                    ]  # Best is first
+                else:
+                    # Fallback to best cached result if none from filter set
+                    logger.warning(
+                        f"No cached algorithms from {algorithm_filter} found, using best cached"
+                    )
+                    chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]
+        else:
+            # Step 4: No cache - always benchmark within filtered space
+            if algorithm_filter == "auto":
+                # Benchmark all algorithms
+                filtered_params = _BENCHMARK_DEPTHWISE_BACKWARD_PARAMS
+            else:
+                # Filter benchmark parameters to only include algorithms in filter set
+                filtered_params = _filter_depthwise_benchmark_params_by_env_config(
+                    _BENCHMARK_DEPTHWISE_BACKWARD_PARAMS, algorithm_filter, is_forward=False
                 )
-                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
-                chosen_bwd_algo, chosen_bwd_params, min_time = all_bwd_benchmark_results[
-                    0
-                ]  # Best is first
 
-                # Mark cache as dirty - background thread will save periodically
-                mark_benchmark_cache_dirty()
+            # Always run benchmarks to find optimal parameters
+            all_bwd_benchmark_results = _run_depthwise_backward_benchmarks(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                compute_dtype,
+                device,
+                custom_params=filtered_params,
+            )
+            _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
+            chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]  # Best is first
 
+            mark_benchmark_cache_dirty()
+
+        # Step 5: Execute with optimal algorithm and parameters
         if chosen_bwd_algo == SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT:
             grad_in_features, grad_weight = _explicit_depthwise_backward_logic(
                 grad_output,
@@ -696,8 +869,12 @@ def spatially_sparse_depthwise_conv(
     weight: Float[Tensor, "K C"],
     kernel_map: IntSearchResult,
     num_out_coords: int,
-    fwd_algo: SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE = SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT,
-    bwd_algo: SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE = SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT,
+    fwd_algo: Union[
+        SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, List[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE], None
+    ] = None,
+    bwd_algo: Union[
+        SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE, List[SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE], None
+    ] = None,
     compute_dtype: Optional[torch.dtype] = None,
 ) -> Float[Tensor, "M C"]:
     """
@@ -708,13 +885,21 @@ def spatially_sparse_depthwise_conv(
         weight: Depthwise convolution weights of shape (K, C)
         kernel_map: Kernel mapping from IntSearchResult
         num_out_coords: Number of output coordinates
-        fwd_algo: Forward algorithm to use
-        bwd_algo: Backward algorithm to use
+        fwd_algo: Forward algorithm(s) to use. Can be a single algorithm or a list to limit benchmark search space.
+                  If None, uses environment variable WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE (default: explicit)
+        bwd_algo: Backward algorithm(s) to use. Can be a single algorithm or a list to limit benchmark search space.
+                  If None, uses environment variable WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE (default: explicit)
         compute_dtype: Computation dtype (defaults to input dtype)
 
     Returns:
         Output features of shape (M, C)
     """
+    # Use environment variables if no explicit algorithms provided
+    if fwd_algo is None:
+        fwd_algo = WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE
+    if bwd_algo is None:
+        bwd_algo = WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE
+
     return UnifiedSpatiallySparseDepthwiseConvFunction.apply(
         in_features,
         weight,

@@ -28,7 +28,7 @@ from warpconvnet.constants import (
 
 
 class SpatiallySparseConv(BaseSpatialModule):
-    """Sparse convolution layer for :class:`~warpconvnet.geometry.types.voxels.Voxels`.
+    """Sparse convolution layer for `warpconvnet.geometry.types.voxels.Voxels`.
 
     Parameters
     ----------
@@ -52,13 +52,13 @@ class SpatiallySparseConv(BaseSpatialModule):
         Batch size used for implicit matrix multiplications. Defaults to ``2``.
     num_spatial_dims : int, optional
         Number of spatial dimensions. Defaults to ``3``.
-    fwd_algo : :class:`SPARSE_CONV_FWD_ALGO_MODE` or str, optional
+    fwd_algo : `SPARSE_CONV_FWD_ALGO_MODE` or str, optional
         Forward algorithm to use. Defaults to environment setting.
-    bwd_algo : :class:`SPARSE_CONV_BWD_ALGO_MODE` or str, optional
+    bwd_algo : `SPARSE_CONV_BWD_ALGO_MODE` or str, optional
         Backward algorithm to use. Defaults to environment setting.
-    stride_mode : :class:`STRIDED_CONV_MODE`, optional
+    stride_mode : `STRIDED_CONV_MODE`, optional
         How to interpret ``stride`` when ``transposed`` is ``True``.
-    order : :class:`POINT_ORDERING`, optional
+    order : `POINT_ORDERING`, optional
         Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
     compute_dtype : torch.dtype, optional
         Data type used for intermediate computations.
@@ -112,17 +112,19 @@ class SpatiallySparseConv(BaseSpatialModule):
         if bwd_algo is None:
             bwd_algo = WARPCONVNET_BWD_ALGO_MODE
 
-        # If string, update to enum
-        self.fwd_algo = (
-            SPARSE_CONV_FWD_ALGO_MODE(fwd_algo)
-            if isinstance(fwd_algo, str)
-            else fwd_algo
-        )
-        self.bwd_algo = (
-            SPARSE_CONV_BWD_ALGO_MODE(bwd_algo)
-            if isinstance(bwd_algo, str)
-            else bwd_algo
-        )
+        # Convert string to enum, but preserve lists for direct passing to functional layer
+        if isinstance(fwd_algo, str):
+            self.fwd_algo = SPARSE_CONV_FWD_ALGO_MODE(fwd_algo)
+        else:
+            # Keep lists as-is (from env vars or direct user input)
+            self.fwd_algo = fwd_algo
+
+        if isinstance(bwd_algo, str):
+            self.bwd_algo = SPARSE_CONV_BWD_ALGO_MODE(bwd_algo)
+        else:
+            # Keep lists as-is (from env vars or direct user input)
+            self.bwd_algo = bwd_algo
+
         self.stride_mode = stride_mode
         self.order = order
         self.compute_dtype = compute_dtype
@@ -131,9 +133,7 @@ class SpatiallySparseConv(BaseSpatialModule):
 
         self.bias: Optional[nn.Parameter] = None
 
-        self.weight = nn.Parameter(
-            torch.randn(np.prod(_kernel_size), in_channels, out_channels)
-        )
+        self.weight = nn.Parameter(torch.randn(np.prod(_kernel_size), in_channels, out_channels))
         if bias:
             self.bias = nn.Parameter(torch.randn(out_channels))
         else:
@@ -169,9 +169,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         fan_in, fan_out = self._calculate_fan_in_and_fan_out()
         return fan_in if mode == "fan_in" else fan_out
 
-    def _custom_kaiming_uniform_(
-        self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"
-    ):
+    def _custom_kaiming_uniform_(self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"):
         fan = self._calculate_correct_fan(mode)
         gain = calculate_gain(nonlinearity, a)
         std = gain / math.sqrt(fan)
@@ -239,15 +237,15 @@ class SparseConv2d(SpatiallySparseConv):
         Perform a transposed convolution. Defaults to ``False``.
     generative : bool, optional
         Use generative convolution. Defaults to ``False``.
-    stride_mode : :class:`STRIDED_CONV_MODE`, optional
+    stride_mode : `STRIDED_CONV_MODE`, optional
         How to interpret ``stride`` when ``transposed`` is ``True``.
-    fwd_algo : :class:`SPARSE_CONV_FWD_ALGO_MODE` or str, optional
+    fwd_algo : `SPARSE_CONV_FWD_ALGO_MODE` or str, optional
         Forward algorithm to use.
-    bwd_algo : :class:`SPARSE_CONV_BWD_ALGO_MODE` or str, optional
+    bwd_algo : `SPARSE_CONV_BWD_ALGO_MODE` or str, optional
         Backward algorithm to use.
     kernel_matmul_batch_size : int, optional
         Batch size used for implicit matrix multiplications. Defaults to ``2``.
-    order : :class:`POINT_ORDERING`, optional
+    order : `POINT_ORDERING`, optional
         Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
     compute_dtype : torch.dtype, optional
         Data type used for intermediate computations.
@@ -318,15 +316,15 @@ class SparseConv3d(SpatiallySparseConv):
         Perform a transposed convolution. Defaults to ``False``.
     generative : bool, optional
         Use generative convolution. Defaults to ``False``.
-    stride_mode : :class:`STRIDED_CONV_MODE`, optional
+    stride_mode : `STRIDED_CONV_MODE`, optional
         How to interpret ``stride`` when ``transposed`` is ``True``.
-    fwd_algo : :class:`SPARSE_CONV_FWD_ALGO_MODE` or str, optional
+    fwd_algo : `SPARSE_CONV_FWD_ALGO_MODE` or str, optional
         Forward algorithm to use.
-    bwd_algo : :class:`SPARSE_CONV_BWD_ALGO_MODE` or str, optional
+    bwd_algo : `SPARSE_CONV_BWD_ALGO_MODE` or str, optional
         Backward algorithm to use.
     kernel_matmul_batch_size : int, optional
         Batch size used for implicit matrix multiplications. Defaults to ``2``.
-    order : :class:`POINT_ORDERING`, optional
+    order : `POINT_ORDERING`, optional
         Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
     compute_dtype : torch.dtype, optional
         Data type used for intermediate computations.

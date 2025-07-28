@@ -47,7 +47,7 @@ class NormalizationBase(BaseSpatialModule):
 
 
 class BatchNorm(NormalizationBase):
-    """Applies :class:`torch.nn.BatchNorm1d` to ``Geometry`` features.
+    """Applies `torch.nn.BatchNorm1d` to ``Geometry`` features.
 
     Parameters
     ----------
@@ -64,7 +64,7 @@ class BatchNorm(NormalizationBase):
 
 
 class LayerNorm(NormalizationBase):
-    """Applies :class:`torch.nn.LayerNorm` to ``Geometry`` features.
+    """Applies `torch.nn.LayerNorm` to ``Geometry`` features.
 
     Parameters
     ----------
@@ -117,9 +117,7 @@ class SegmentedLayerNorm(nn.LayerNorm):
         elementwise_affine: bool = True,
         bias: bool = True,
     ):
-        super().__init__(
-            [channels], eps=eps, elementwise_affine=elementwise_affine, bias=bias
-        )
+        super().__init__([channels], eps=eps, elementwise_affine=elementwise_affine, bias=bias)
 
     def forward(self, x: Geometry):
         # Only works for geometry with batched features
@@ -140,7 +138,7 @@ class SegmentedLayerNorm(nn.LayerNorm):
 
 
 class InstanceNorm(NormalizationBase):
-    """Applies :class:`torch.nn.InstanceNorm1d` to ``Geometry`` features.
+    """Applies `torch.nn.InstanceNorm1d` to ``Geometry`` features.
 
     Parameters
     ----------
@@ -155,7 +153,7 @@ class InstanceNorm(NormalizationBase):
 
 
 class GroupNorm(NormalizationBase):
-    """Applies :class:`torch.nn.GroupNorm` to ``Geometry`` features.
+    """Applies `torch.nn.GroupNorm` to ``Geometry`` features.
 
     Parameters
     ----------
@@ -172,7 +170,7 @@ class GroupNorm(NormalizationBase):
 
 
 class RMSNorm(NormalizationBase):
-    """Applies :class:`torch.nn.RMSNorm` to ``Geometry`` features.
+    """Applies `torch.nn.RMSNorm` to ``Geometry`` features.
 
     Parameters
     ----------

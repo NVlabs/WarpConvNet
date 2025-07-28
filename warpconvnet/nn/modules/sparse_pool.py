@@ -142,11 +142,11 @@ class PointToSparseWrapper(BaseSpatialModule):
 
     Parameters
     ----------
-    inner_module : :class:`BaseSpatialModule`
+    inner_module : `BaseSpatialModule`
         Module applied on the pooled sparse tensor.
     voxel_size : float
         Voxel size used to pool the input points.
-    reduction : :class:`REDUCTIONS` or str, optional
+    reduction : `REDUCTIONS` or str, optional
         Reduction used when pooling points. Defaults to ``REDUCTIONS.MEAN``.
     unique_method : {"morton", "ravel", "torch"}, optional
         Method used for hashing voxel indices. Defaults to ``"morton"``.

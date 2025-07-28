@@ -15,9 +15,9 @@ from warpconvnet.utils.ntuple import ntuple
 
 
 class GridConv(BaseSpatialModule):
-    """Convolutional layer for :class:`~warpconvnet.geometry.types.grid.Grid` data.
+    """Convolutional layer for `warpconvnet.geometry.types.grid.Grid` data.
 
-    Parameters mirror those of :class:`torch.nn.Conv3d` but operate on a
+    Parameters mirror those of `torch.nn.Conv3d` but operate on a
     ``Grid`` object instead of plain tensors.
 
     Parameters

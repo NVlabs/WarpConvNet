@@ -603,3 +603,67 @@ def _generate_kernel_offsets(kernel_size, kernel_dilation, device):
         ],
         dim=1,
     ).to(device)
+
+
+def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
+    """Test sparse convolution with algorithm lists for limiting search space."""
+    voxels = setup_small_voxels
+    C_in, C_out = voxels.num_channels, 13
+    kernel_size = (3, 3, 3)
+
+    # Create weights
+    num_kernels = kernel_size[0] * kernel_size[1] * kernel_size[2]
+    weights = torch.randn(num_kernels, C_in, C_out).to(voxels.device)
+
+    # Test with enum list
+    out1 = spatially_sparse_conv(
+        voxels,
+        weight=weights,
+        kernel_size=kernel_size,
+        fwd_algo=[
+            SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM,
+            SPARSE_CONV_FWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
+        ],
+        bwd_algo=[
+            SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM,
+            SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
+        ],
+    )
+
+    # Test with string list
+    out2 = spatially_sparse_conv(
+        voxels,
+        weight=weights,
+        kernel_size=kernel_size,
+        fwd_algo=["implicit_gemm", "cutlass_implicit_gemm"],
+        bwd_algo=["implicit_gemm", "cutlass_implicit_gemm"],
+    )
+
+    # Test with mixed string/enum list (should be converted properly)
+    out3 = spatially_sparse_conv(
+        voxels,
+        weight=weights,
+        kernel_size=kernel_size,
+        fwd_algo=["implicit_gemm", SPARSE_CONV_FWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
+        bwd_algo=["implicit_gemm", SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
+    )
+
+    # Test single algorithm for comparison
+    out4 = spatially_sparse_conv(
+        voxels,
+        weight=weights,
+        kernel_size=kernel_size,
+        fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM,
+        bwd_algo=SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM,
+    )
+
+    # All should have same output dimensions
+    assert out1.num_channels == C_out
+    assert out2.num_channels == C_out
+    assert out3.num_channels == C_out
+    assert out4.num_channels == C_out
+
+    # Results should be similar (they're the same mathematical operation)
+    assert out1.feature_tensor.shape == out2.feature_tensor.shape
+    assert out1.feature_tensor.shape == out3.feature_tensor.shape
+    assert out1.feature_tensor.shape == out4.feature_tensor.shape

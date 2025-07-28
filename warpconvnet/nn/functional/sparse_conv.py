@@ -36,6 +36,10 @@ from warpconvnet.utils.benchmark_cache import (
 from warpconvnet.utils.type_cast import _min_dtype, _maybe_cast
 from warpconvnet.utils.timer import CUDATimer
 from warpconvnet.utils.ntuple import _pad_tuple
+from warpconvnet.constants import (
+    WARPCONVNET_FWD_ALGO_MODE,
+    WARPCONVNET_BWD_ALGO_MODE,
+)
 
 logger = get_logger(__name__)
 try:
@@ -200,6 +204,80 @@ def _initialize_benchmark_cache():
 _initialize_benchmark_cache()
 
 
+def _filter_benchmark_params_by_env_config(
+    all_params: List[
+        Tuple[Union[SPARSE_CONV_FWD_ALGO_MODE, SPARSE_CONV_BWD_ALGO_MODE], Dict[str, Any]]
+    ],
+    env_config: Union[str, List[Union[str, SPARSE_CONV_FWD_ALGO_MODE, SPARSE_CONV_BWD_ALGO_MODE]]],
+    is_forward: bool = True,
+) -> List[Tuple[Union[SPARSE_CONV_FWD_ALGO_MODE, SPARSE_CONV_BWD_ALGO_MODE], Dict[str, Any]]]:
+    """Filter benchmark parameters based on environment variable configuration.
+
+    Args:
+        all_params: All available benchmark parameters
+        env_config: Environment variable value (string or list of algorithm names)
+        is_forward: Whether this is for forward pass (affects enum type)
+
+    Returns:
+        Filtered list of benchmark parameters
+    """
+    if env_config == "auto":
+        # When "auto", use all available algorithms
+        return all_params
+
+    # Convert environment config to list of algorithm names
+    if isinstance(env_config, str):
+        algo_names = [env_config]
+    else:
+        algo_names = env_config
+
+    # Map string algorithm names to enum values
+    EnumClass = SPARSE_CONV_FWD_ALGO_MODE if is_forward else SPARSE_CONV_BWD_ALGO_MODE
+
+    # Get target enum values
+    target_algos = []
+    for algo_name in algo_names:
+        if isinstance(algo_name, EnumClass):
+            target_algos.append(algo_name)
+        else:
+            try:
+                target_algos.append(EnumClass(algo_name))
+            except ValueError:
+                logger.warning(f"Unknown algorithm name: {algo_name}")
+
+    if not target_algos:
+        logger.warning(f"No valid algorithms found in {algo_names}, using all algorithms")
+        return all_params
+
+    # Filter parameters to only include target algorithms
+    filtered_params = []
+    for algo_enum, params in all_params:
+        if algo_enum in target_algos:
+            filtered_params.append((algo_enum, params))
+
+    if not filtered_params:
+        logger.warning(
+            f"No benchmark parameters found for algorithms {algo_names}, using all algorithms"
+        )
+        return all_params
+
+    return filtered_params
+
+
+def _get_filtered_forward_params() -> List[Tuple[SPARSE_CONV_FWD_ALGO_MODE, Dict[str, Any]]]:
+    """Get forward benchmark parameters filtered by environment variable."""
+    return _filter_benchmark_params_by_env_config(
+        _BENCHMARK_FORWARD_PARAMS, WARPCONVNET_FWD_ALGO_MODE, is_forward=True
+    )
+
+
+def _get_filtered_backward_params() -> List[Tuple[SPARSE_CONV_BWD_ALGO_MODE, Dict[str, Any]]]:
+    """Get backward benchmark parameters filtered by environment variable."""
+    return _filter_benchmark_params_by_env_config(
+        _BENCHMARK_BACKWARD_PARAMS, WARPCONVNET_BWD_ALGO_MODE, is_forward=False
+    )
+
+
 def _explicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
@@ -298,7 +376,9 @@ def _implicit_gemm_forward_logic(
     iden_idx = kernel_map.identity_map_index
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
+            dtype=min_dtype
+        )
     else:
         output_feature_tensor = torch.zeros(
             (num_out_coords, C_out), dtype=min_dtype, device=device
@@ -1009,6 +1089,7 @@ def _run_forward_benchmarks(
     compute_dtype: Optional[torch.dtype],
     warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
     benchmark_iters: int = _BENCHMARK_NUM_RUNS,
+    custom_params: Optional[List[Tuple[SPARSE_CONV_FWD_ALGO_MODE, Dict[str, Any]]]] = None,
 ) -> Tuple[SPARSE_CONV_FWD_ALGO_MODE, Dict[str, Any], float]:
     """
     Benchmark different forward algorithms and return the best one with its parameters and runtime.
@@ -1059,7 +1140,8 @@ def _run_forward_benchmarks(
             # Should not happen with current _BENCHMARK_FORWARD_PARAMS
             raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
 
-    for algo_mode, params_config in _BENCHMARK_FORWARD_PARAMS:
+    params_to_use = custom_params if custom_params is not None else _get_filtered_forward_params()
+    for algo_mode, params_config in params_to_use:
         # Warmup runs
         status = None
         for _ in range(warmup_iters):
@@ -1128,6 +1210,7 @@ def _run_backward_benchmarks(
     device: torch.device,
     warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
     benchmark_iters: int = _BENCHMARK_NUM_RUNS,
+    custom_params: Optional[List[Tuple[SPARSE_CONV_BWD_ALGO_MODE, Dict[str, Any]]]] = None,
 ) -> Tuple[SPARSE_CONV_BWD_ALGO_MODE, Dict[str, Any], float]:
     """
     Benchmark different backward algorithms and return the best one with its parameters and runtime.
@@ -1160,10 +1243,10 @@ def _run_backward_benchmarks(
                 weight,
                 kernel_map,
                 num_out_coords,
+                params_config.get("gemm_block_size", 16),
+                params_config.get("split_k_threads_per_block", 128),
+                params_config.get("split_k_factor", 4),
                 compute_dtype,
-                gemm_block_size=params_config.get("gemm_block_size", 16),
-                split_k_threads_per_block=params_config.get("split_k_threads_per_block", 128),
-                split_k_factor=params_config.get("split_k_factor", 4),
             )
         elif algo_mode == SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM:
             status, _ = _cutlass_implicit_gemm_backward_logic(
@@ -1183,7 +1266,8 @@ def _run_backward_benchmarks(
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
 
-    for algo_mode, params_config in _BENCHMARK_BACKWARD_PARAMS:
+    params_to_use = custom_params if custom_params is not None else _get_filtered_backward_params()
+    for algo_mode, params_config in params_to_use:
         status = None
         for _ in range(warmup_iters):
             status = _execute_single_bwd_pass(algo_mode, params_config)
@@ -1242,50 +1326,98 @@ class UnifiedSpatiallySparseConvFunction(Function):
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
         num_out_coords: int,
-        fwd_algo: SPARSE_CONV_FWD_ALGO_MODE,
-        bwd_algo: SPARSE_CONV_BWD_ALGO_MODE,
+        fwd_algo: Union[SPARSE_CONV_FWD_ALGO_MODE, List[SPARSE_CONV_FWD_ALGO_MODE]],
+        bwd_algo: Union[SPARSE_CONV_BWD_ALGO_MODE, List[SPARSE_CONV_BWD_ALGO_MODE]],
         compute_dtype: Optional[torch.dtype],
         fwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
     ) -> Float[Tensor, "M C_out"]:
+        global _BENCHMARK_FORWARD_RESULTS  # noqa: F824
         output_feature_tensor = None
 
-        chosen_fwd_algo = fwd_algo
-        chosen_fwd_params = {}
-        if fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM and fwd_block_size is not None:
-            chosen_fwd_params = {"fwd_block_size": fwd_block_size}
+        # Convert string inputs to enum if needed
+        if isinstance(fwd_algo, str):
+            fwd_algo = SPARSE_CONV_FWD_ALGO_MODE(fwd_algo)
+        if isinstance(bwd_algo, str):
+            bwd_algo = SPARSE_CONV_BWD_ALGO_MODE(bwd_algo)
+
+        if isinstance(fwd_algo, list):
+            fwd_algo = [
+                SPARSE_CONV_FWD_ALGO_MODE(algo) if isinstance(algo, str) else algo
+                for algo in fwd_algo
+            ]
+        if isinstance(bwd_algo, list):
+            bwd_algo = [
+                SPARSE_CONV_BWD_ALGO_MODE(algo) if isinstance(algo, str) else algo
+                for algo in bwd_algo
+            ]
+
+        # UNIFIED APPROACH: Always benchmark within filtered algorithm space
+        # Step 1: Determine algorithm filter set
+        if isinstance(fwd_algo, list):
+            algorithm_filter = fwd_algo
         elif fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.AUTO:
-            config = SpatiallySparseConvConfig(
-                num_in_coords=in_features.shape[0],
-                num_out_coords=num_out_coords,
-                in_channels=in_features.shape[1],
-                out_channels=weight.shape[2],
-                kernel_volume=weight.shape[0],
-                in_dtype=in_features.dtype,
-            )
-            global _BENCHMARK_FORWARD_RESULTS  # noqa: F824
-            cached_result = _BENCHMARK_FORWARD_RESULTS.get(config)
-            if cached_result is not None:
-                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]  # Best is first
-                # print(f"Using cached fwd: {chosen_fwd_algo}, {chosen_fwd_params}")
+            algorithm_filter = "auto"  # All algorithms
+        else:
+            # Single algorithm - create list for consistent processing
+            algorithm_filter = [fwd_algo]
+
+        # Step 2: Generate configuration for caching
+        config = SpatiallySparseConvConfig(
+            num_in_coords=in_features.shape[0],
+            num_out_coords=num_out_coords,
+            in_channels=in_features.shape[1],
+            out_channels=weight.shape[2],
+            kernel_volume=weight.shape[0],
+            in_dtype=in_features.dtype,
+        )
+
+        # Step 3: Check cache first
+        cached_result = _BENCHMARK_FORWARD_RESULTS.get(config)
+        if cached_result is not None:
+            if algorithm_filter == "auto":
+                # Use best overall result
+                chosen_fwd_algo, chosen_fwd_params, _ = cached_result[0]
             else:
-                # print(f"Running fwd benchmark for config: {config}")
-                all_fwd_benchmark_results = _run_forward_benchmarks(
-                    in_features,
-                    weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
+                # Filter cached results to only include algorithms in filter set
+                filtered_cached_results = []
+                for algo, params, time in cached_result:
+                    if algo in algorithm_filter:
+                        filtered_cached_results.append((algo, params, time))
+
+                if filtered_cached_results:
+                    # Use the best performing algorithm from the filtered results
+                    chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[0]
+                else:
+                    raise ValueError(
+                        f"No cached algorithms from {algorithm_filter} found. Please check your algorithm list and try again. If you need to reset the cache, please run `rm -rf ~/.cache/warpconvnet/`."
+                    )
+        else:
+            # Step 4: No cache - always benchmark within filtered space
+            if algorithm_filter == "auto":
+                # Benchmark all algorithms
+                filtered_params = _BENCHMARK_FORWARD_PARAMS
+            else:
+                # Filter benchmark parameters to only include algorithms in filter set
+                filtered_params = _filter_benchmark_params_by_env_config(
+                    _BENCHMARK_FORWARD_PARAMS, algorithm_filter, is_forward=True
                 )
-                _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results
-                chosen_fwd_algo, chosen_fwd_params, min_time = all_fwd_benchmark_results[
-                    0
-                ]  # Best is first
-                # print(f"Chosen fwd after benchmark: {chosen_fwd_algo}, {chosen_fwd_params}, time: {min_time}")
 
-                # Mark cache as dirty - background thread will save periodically
-                mark_benchmark_cache_dirty()
+            # Always run benchmarks to find optimal parameters
+            all_fwd_benchmark_results = _run_forward_benchmarks(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                compute_dtype,
+                custom_params=filtered_params,
+            )
+            _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results
+            chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]  # Best is first
 
+            mark_benchmark_cache_dirty()
+
+        # Step 5: Execute with optimal algorithm and parameters
         if chosen_fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM:
             output_feature_tensor = _explicit_gemm_forward_logic(
                 in_features,
@@ -1296,12 +1428,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
         elif chosen_fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM:
             current_fwd_block_size = chosen_fwd_params.get("fwd_block_size")
-            if current_fwd_block_size is None:  # Fallback if somehow not set by AUTO or direct
-                current_fwd_block_size = (
-                    fwd_block_size if fwd_block_size is not None else 16
-                )  # Default fallback
-                print(
-                    f"Warning: fwd_block_size not found in chosen_fwd_params for IMPLICIT_GEMM, using {current_fwd_block_size}"
+            if current_fwd_block_size is None:  # Fallback if somehow not set
+                current_fwd_block_size = fwd_block_size if fwd_block_size is not None else 16
+                logger.warning(
+                    f"fwd_block_size not found in chosen_fwd_params for IMPLICIT_GEMM, using fallback {current_fwd_block_size}"
                 )
             output_feature_tensor = _implicit_gemm_forward_logic(
                 in_features,
@@ -1324,10 +1454,6 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 raise RuntimeError(
                     f"Error in _cutlass_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
                 )
-        # elif chosen_fwd_algo == SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM_BATCHED: # TODO
-        # if explicit_matmul_batch_size is None:
-        #     raise ValueError("explicit_matmul_batch_size is required for batched explicit GEMM forward.")
-        # output_feature_tensor = _batched_explicit_gemm_forward_logic(...)
         else:
             raise ValueError(f"Unsupported forward algorithm: {chosen_fwd_algo}")
 
@@ -1367,6 +1493,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
     ]:
+        global _BENCHMARK_BACKWARD_RESULTS  # noqa: F824
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
         config_params = ctx.config_params_for_bwd
@@ -1376,6 +1503,16 @@ class UnifiedSpatiallySparseConvFunction(Function):
         initial_bwd_algo = config_params["initial_bwd_algo"]
         initial_bwd_block_size = config_params["initial_bwd_block_size"]
         # explicit_matmul_batch_size = ctx.explicit_matmul_batch_size # TODO
+
+        # Convert string to enum if needed
+        if isinstance(initial_bwd_algo, str):
+            initial_bwd_algo = SPARSE_CONV_BWD_ALGO_MODE(initial_bwd_algo)
+
+        if isinstance(initial_bwd_algo, list):
+            initial_bwd_algo = [
+                SPARSE_CONV_BWD_ALGO_MODE(algo) if isinstance(algo, str) else algo
+                for algo in initial_bwd_algo
+            ]
 
         grad_in_features, grad_weight = None, None
 
@@ -1396,51 +1533,77 @@ class UnifiedSpatiallySparseConvFunction(Function):
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
             return _pad_tuple(grad_in_final, grad_weight_final, 9)
 
-        chosen_bwd_algo = initial_bwd_algo
-        chosen_bwd_params = {}
-
-        if (
-            initial_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM
-            and initial_bwd_block_size is not None
-        ):
-            chosen_bwd_params = {"bwd_block_size": initial_bwd_block_size}
+        # UNIFIED APPROACH: Always benchmark within filtered algorithm space
+        # Step 1: Determine algorithm filter set
+        if isinstance(initial_bwd_algo, list):
+            algorithm_filter = initial_bwd_algo
         elif initial_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.AUTO:
-            config_params = ctx.config_params_for_bwd
-            # Use fwd_block_size from chosen_fwd_params if available for config consistency
-            # If fwd was EXPLICIT, this would be None.
-            # The bwd_block_size in config_params is the user-provided one.
-            config = SpatiallySparseConvConfig(
-                num_in_coords=config_params["num_in_coords"],
-                num_out_coords=config_params["num_out_coords"],
-                in_channels=config_params["in_channels"],
-                out_channels=config_params["out_channels"],
-                kernel_volume=config_params["kernel_volume"],
-                in_dtype=grad_output.dtype,
-            )
-            global _BENCHMARK_BACKWARD_RESULTS  # noqa: F824
-            cached_result = _BENCHMARK_BACKWARD_RESULTS.get(config)
-            if cached_result is not None:
-                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]  # Best is first
-                # print(f"Using cached bwd: {chosen_bwd_algo}, {chosen_bwd_params}")
-            else:
-                # print(f"Running bwd benchmark for config: {config}")
-                all_bwd_benchmark_results = _run_backward_benchmarks(
-                    grad_output,
-                    in_features,
-                    weight,
-                    kernel_map,
-                    num_out_coords,
-                    compute_dtype,
-                    device,
-                )
-                _BENCHMARK_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
-                chosen_bwd_algo, chosen_bwd_params, min_time = all_bwd_benchmark_results[
-                    0
-                ]  # Best is first
-                # print(f"Chosen bwd after benchmark: {chosen_bwd_algo}, {chosen_bwd_params}, time: {min_time}")
+            algorithm_filter = "auto"  # All algorithms
+        else:
+            # Single algorithm - create list for consistent processing
+            algorithm_filter = [initial_bwd_algo]
 
-                # Mark cache as dirty - background thread will save periodically
-                mark_benchmark_cache_dirty()
+        # Step 2: Generate configuration for caching
+        config_params = ctx.config_params_for_bwd
+        config = SpatiallySparseConvConfig(
+            num_in_coords=config_params["num_in_coords"],
+            num_out_coords=config_params["num_out_coords"],
+            in_channels=config_params["in_channels"],
+            out_channels=config_params["out_channels"],
+            kernel_volume=config_params["kernel_volume"],
+            in_dtype=grad_output.dtype,
+        )
+
+        # Step 3: Check cache first
+        cached_result = _BENCHMARK_BACKWARD_RESULTS.get(config)
+        if cached_result is not None:
+            if algorithm_filter == "auto":
+                # Use best overall result
+                chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]
+            else:
+                # Filter cached results to only include algorithms in filter set
+                filtered_cached_results = []
+                for algo, params, time in cached_result:
+                    if algo in algorithm_filter:
+                        filtered_cached_results.append((algo, params, time))
+
+                if filtered_cached_results:
+                    # Use the best performing algorithm from the filtered results
+                    chosen_bwd_algo, chosen_bwd_params, _ = filtered_cached_results[
+                        0
+                    ]  # Best is first
+                else:
+                    # Fallback to best cached result if none from filter set
+                    logger.warning(
+                        f"No cached algorithms from {algorithm_filter} found, using best cached"
+                    )
+                    chosen_bwd_algo, chosen_bwd_params, _ = cached_result[0]
+        else:
+            # Step 4: No cache - always benchmark within filtered space
+            if algorithm_filter == "auto":
+                # Benchmark all algorithms
+                filtered_params = _BENCHMARK_BACKWARD_PARAMS
+            else:
+                # Filter benchmark parameters to only include algorithms in filter set
+                filtered_params = _filter_benchmark_params_by_env_config(
+                    _BENCHMARK_BACKWARD_PARAMS, algorithm_filter, is_forward=False
+                )
+
+            # Always run benchmarks to find optimal parameters
+            all_bwd_benchmark_results = _run_backward_benchmarks(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                compute_dtype,
+                device,
+                custom_params=filtered_params,
+            )
+            _BENCHMARK_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
+            chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]  # Best is first
+
+            mark_benchmark_cache_dirty()
 
         if chosen_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM:
             grad_in_features, grad_weight = _explicit_gemm_backward_logic(
@@ -1507,8 +1670,12 @@ def spatially_sparse_conv(
     generative: bool = False,
     output_spatially_sparse_tensor: Optional[Geometry] = None,
     transposed: bool = False,
-    fwd_algo: SPARSE_CONV_FWD_ALGO_MODE = SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM,
-    bwd_algo: SPARSE_CONV_BWD_ALGO_MODE = SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM,
+    fwd_algo: Union[
+        SPARSE_CONV_FWD_ALGO_MODE, List[SPARSE_CONV_FWD_ALGO_MODE]
+    ] = SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM,
+    bwd_algo: Union[
+        SPARSE_CONV_BWD_ALGO_MODE, List[SPARSE_CONV_BWD_ALGO_MODE]
+    ] = SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM,
     stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
     stride_reduce: str = "max",
     order: POINT_ORDERING = POINT_ORDERING.RANDOM,
