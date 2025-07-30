@@ -1,6 +1,3 @@
-[submodule "warpconvnet/models"]
-	path = warpconvnet/models
-	url = ssh://git@gitlab-master.nvidia.com:12051/3dmmllm/warpnet-models.git
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git

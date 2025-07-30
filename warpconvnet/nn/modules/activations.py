@@ -110,9 +110,7 @@ class LogSoftmax(BaseSpatialModule):
 
 
 # From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py
-def drop_path(
-    x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True
-):
+def drop_path(x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True):
     """Apply stochastic depth to the input tensor.
 
     Parameters

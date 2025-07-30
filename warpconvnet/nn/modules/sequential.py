@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Tuple
+from typing import Callable, Sequence, Tuple
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.nn.modules.base_module import BaseSpatialModule
@@ -67,7 +68,10 @@ class TupleSequential(Sequential, BaseSpatialModule):
     """
 
     def __init__(self, *args, tuple_layer: int):
-        super().__init__(*args)
+        if len(args) == 1 and isinstance(args[0], Sequence):
+            super().__init__(*args[0])
+        else:
+            super().__init__(*args)
         self.tuple_layer = tuple_layer
 
     def forward(self, *xs: Tuple[Geometry]):
@@ -83,3 +87,14 @@ class TupleSequential(Sequential, BaseSpatialModule):
             x = in_sf.replace(batched_features=x)
 
         return x
+
+
+class GeometryWrapper(BaseSpatialModule):
+    """Wrapper for a spatial module that returns a geometry object."""
+
+    def __init__(self, module: Callable[[Tensor], Tensor]):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x: Geometry) -> Geometry:
+        return x.replace(batched_features=self.module(x.feature_tensor))

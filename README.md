@@ -44,14 +44,9 @@ Available optional dependency groups:
 ├── 3rdparty/            # Third-party dependencies
 │   └── cutlass/         # CUDA kernels
 ├── docker/              # Docker build files
-│   ├── build.sh
-│   └── Dockerfile
 ├── docs/                # Documentation sources
 ├── examples/            # Example applications
 ├── scripts/             # Development utilities
-│   ├── build_docs.py
-│   ├── dir_struct.sh
-│   └── serve_docs.py
 ├── tests/               # Test suite
 │   ├── base/            # Core functionality tests
 │   ├── coords/          # Coordinate operation tests
@@ -67,7 +62,6 @@ Available optional dependency groups:
     │   ├── coords/      # Coordinate operations
     │   ├── features/    # Feature operations
     │   └── types/       # Geometry types
-    ├── models/          # Sample models (WIP)
     ├── nn/              # Neural networks
     │   ├── functional/  # Neural network functions
     │   └── modules/     # Neural network modules
