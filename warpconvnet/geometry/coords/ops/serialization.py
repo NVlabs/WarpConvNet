@@ -47,6 +47,7 @@ class POINT_ORDERING(Enum):
 
 STR2POINT_ORDERING = {
     "random": POINT_ORDERING.RANDOM,
+    "morton": POINT_ORDERING.MORTON_XYZ,        # Default Morton ordering
     "morton_xyz": POINT_ORDERING.MORTON_XYZ,
     "morton_xzy": POINT_ORDERING.MORTON_XZY,
     "morton_yxz": POINT_ORDERING.MORTON_YXZ,
@@ -238,16 +239,27 @@ def morton_code(
     num_points = len(coords_normalized)
     result_code_cp = cp.empty(num_points, dtype=cp.int64)
 
-    assert coords_normalized.shape[1] == 3, "coords must be [N, 3]"
-    # Single batch path (20-bit)
+    assert coords_normalized.shape[1] in [3, 4], "coords must be [N, 3] or [N, 4]"
+
     coords_cp = cp.from_dlpack(coords_normalized.contiguous())
-    # The kernel loads 4 points per thread, so we need to adjust the number of blocks
-    blocks_per_grid = math.ceil(num_points / (threads_per_block * 4))
-    _assign_order_20bit_kernel_4points(
-        (blocks_per_grid,),
-        (threads_per_block,),
-        (coords_cp, num_points, result_code_cp),
-    )
+    
+    if coords_normalized.shape[1] == 3:
+        # Single batch path (20-bit)
+        # The kernel loads 4 points per thread, so we need to adjust the number of blocks
+        blocks_per_grid = math.ceil(num_points / (threads_per_block * 4))
+        _assign_order_20bit_kernel_4points(
+            (blocks_per_grid,),
+            (threads_per_block,),
+            (coords_cp, num_points, result_code_cp),
+        )
+    elif coords_normalized.shape[1] == 4:
+        # Batched path (16-bit)
+        blocks_per_grid = math.ceil(num_points / threads_per_block)
+        _assign_order_16bit_kernel(
+            (blocks_per_grid,),
+            (threads_per_block,),
+            (coords_cp, num_points, result_code_cp),
+        )
 
     # Convert result from CuPy array back to PyTorch tensor on the original device
     result_code = torch.as_tensor(result_code_cp, device=device)
