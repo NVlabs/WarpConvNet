@@ -452,12 +452,8 @@ class FeedForward(BaseSpatialModule):
         self,
         dim: int,
         hidden_dim: int,
-        multiple_of: int = 2,
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
@@ -481,7 +477,8 @@ class TransformerBlock(BaseSpatialModule):
         qk_scale: Optional[float] = None,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
-        ffn_multiplier: int = 4,
+        ffn_multiplier: float = 4.0,
+        ffn_multiple_of: int = 32,
         norm_eps: float = 1e-5,
         attn_fn: Optional[Callable[..., nn.Module]] = None,
         norm_fn: Optional[Callable[..., nn.Module]] = LayerNorm,
@@ -500,9 +497,13 @@ class TransformerBlock(BaseSpatialModule):
             proj_drop=proj_drop,
             use_batched_qkv=use_batched_qkv,
         )
+        # Even hidden dimension
+        hidden_dim = int(
+            (ffn_multiplier * dim + ffn_multiple_of - 1) // ffn_multiple_of * ffn_multiple_of
+        )
         self.feed_forward = FeedForward(
             dim=dim,
-            hidden_dim=ffn_multiplier * dim,
+            hidden_dim=hidden_dim,
         )
         self.attention_norm = norm_fn(dim, eps=norm_eps)
         self.ffn_norm = norm_fn(dim, eps=norm_eps)
