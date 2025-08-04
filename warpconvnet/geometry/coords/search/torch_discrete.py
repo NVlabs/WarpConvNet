@@ -237,7 +237,9 @@ def _kernel_map_from_offsets(
     )
 
     return _kernel_map_search_to_result(
-        torch.from_dlpack(found_in_coord_index), return_type, identity_map_index=identity_map_index
+        torch.from_dlpack(found_in_coord_index),
+        identity_map_index=identity_map_index,
+        return_type=return_type,
     )
 
 
@@ -338,10 +340,6 @@ def _kernel_map_from_size(
 
     # --- Generic Case (Fallback to offset method) ---
     else:
-        logger.warning(
-            f"Using generic offset-based kernel map for {num_dims}D coords when method='size'. "
-            f"Consider implementing a specialized kernel or using method='offset' directly for potential performance gains."
-        )  # Log a warning for non-4D case using size method
         # Generate kernel offsets on the correct device
         kernel_offsets_tensor = kernel_offsets_from_size(
             kernel_sizes, (1,) * len(kernel_sizes), device=target_device

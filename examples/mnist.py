@@ -23,9 +23,9 @@ class Net(nn.Module):
         super().__init__()
         # must use Sequential here to use spatial ops such as SparseConv2d
         self.layers = Sequential(
-            SparseConv2d(1, 32, kernel_size=3, stride=1, kernel_search_batch_size=9),
+            SparseConv2d(1, 32, kernel_size=3, stride=1),
             nn.ReLU(),
-            SparseConv2d(32, 64, kernel_size=3, stride=1, kernel_search_batch_size=9),
+            SparseConv2d(32, 64, kernel_size=3, stride=1),
             nn.ReLU(),
         )
         self.head = nn.Sequential(
