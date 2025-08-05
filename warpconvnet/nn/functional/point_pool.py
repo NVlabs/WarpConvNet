@@ -36,7 +36,7 @@ def _generate_batched_coords(
     to_unique_indices: Int[Tensor, "M"],  # noqa: F821
     unique_offsets: Int[Tensor, "B+1"],  # noqa: F821
     downsample_voxel_size: float,
-    avereage_pooled_coordinates: bool = False,
+    average_pooled_coordinates: bool = False,
 ) -> Union["BatchedContinuousCoordinates", "BatchedDiscreteCoordinates"]:  # noqa: F821
     """Create a batched coordinate object after downsampling.
 
@@ -46,12 +46,12 @@ def _generate_batched_coords(
     from warpconvnet.geometry.coords.real import RealCoords
     from warpconvnet.geometry.coords.integer import IntCoords
 
-    if return_type == "point" and not avereage_pooled_coordinates:
+    if return_type == "point" and not average_pooled_coordinates:
         return RealCoords(
             batched_tensor=coordinate_tensor[to_unique_indices],
             offsets=unique_offsets,
         )
-    elif return_type == "point" and avereage_pooled_coordinates:
+    elif return_type == "point" and average_pooled_coordinates:
         avg_coords = row_reduction(
             coordinate_tensor[csr_indices],
             csr_offsets,
@@ -98,7 +98,7 @@ def _pool_by_random_sample(
         to_unique_indices,
         unique_offsets,
         downsample_voxel_size,
-        avereage_pooled_coordinates=False,
+        average_pooled_coordinates=False,
     )
     out_sf = RETURN_CLS(
         batched_coordinates=down_coords,
@@ -208,7 +208,7 @@ def point_pool(
     downsample_max_num_points: Optional[int] = None,
     downsample_voxel_size: Optional[float] = None,
     return_type: Literal["point", "voxel"] = "point",
-    avereage_pooled_coordinates: bool = False,
+    average_pooled_coordinates: bool = False,
     return_neighbor_search_result: bool = False,
     return_to_unique: bool = False,
     unique_method: Literal["torch", "ravel", "morton"] = "torch",
@@ -245,7 +245,7 @@ def point_pool(
     ], "return_type must be either point or voxel."
     if return_type == "voxel":
         assert (
-            not avereage_pooled_coordinates
+            not average_pooled_coordinates
         ), "averaging pooled coordinates is not supported for Voxels return type"
         RETURN_CLS = Voxels
     else:
@@ -304,7 +304,7 @@ def point_pool(
         to_unique.to_unique_indices,
         unique_offsets,
         downsample_voxel_size,
-        avereage_pooled_coordinates,
+        average_pooled_coordinates,
     )
 
     out_sf = RETURN_CLS(
@@ -358,6 +358,7 @@ def point_pool_by_code(
     offsets = offsets_from_offsets(
         pc.offsets,
         to_unique.to_unique_indices,
+        device="cpu"
     )
 
     out_pc = pc.replace(

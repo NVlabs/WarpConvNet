@@ -177,6 +177,10 @@ def offsets_from_offsets(
         batch_index = batch_index_from_offset(offsets)
         if device is not None:
             batch_index = batch_index.to(device)
+            sorted_indices = sorted_indices.to(device)
+        else:
+            # if no device is specified, use the device of sorted_indices
+            batch_index = batch_index.to(sorted_indices.device)
         _, batch_counts = torch.unique_consecutive(batch_index[sorted_indices], return_counts=True)
         batch_counts = batch_counts.cpu()
         new_offsets = torch.cat((batch_counts.new_zeros(1), batch_counts.cumsum(dim=0)))
