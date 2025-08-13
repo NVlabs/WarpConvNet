@@ -1810,9 +1810,9 @@ def generate_output_coords_and_kernel_map(
     kernel_size: Tuple[int, ...],
     kernel_dilation: Tuple[int, ...],
     stride: Tuple[int, ...],
-    generative: bool,
-    transposed: bool,
-    output_spatially_sparse_tensor: Optional[Voxels],
+    generative: bool = False,
+    transposed: bool = False,
+    output_spatially_sparse_tensor: Optional[Voxels] = None,
     stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
     order: POINT_ORDERING = POINT_ORDERING.RANDOM,
 ) -> Tuple[Tensor, Int[Tensor, "B+1"], IntSearchResult]:
