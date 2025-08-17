@@ -108,8 +108,9 @@ class BatchedLinear(nn.Module):
         output = torch.einsum("...i,kio->...ko", input, self.weight)
 
         if self.bias is not None:
-            output = output + self.bias.view(self.num_matrices, self.out_features)
+            output += self.bias.view(self.num_matrices, self.out_features)
 
+        output = output.to(input.dtype)
         return output
 
     def extra_repr(self) -> str:
