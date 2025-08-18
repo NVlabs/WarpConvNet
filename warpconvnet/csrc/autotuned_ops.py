@@ -7,14 +7,23 @@ import math
 import torch
 
 import warpconvnet._C as _C
-from warpconvnet.utils.benchmark_cache import make_autotuned_op
+from warpconvnet.utils.benchmark_cache import make_autotuned_op, make_status_timing_runner
+
+
+def _dtype_name(dtype: torch.dtype) -> str:
+    # Prefer a compact, stable name (e.g., 'float32') over 'torch.float32'
+    name = getattr(dtype, "name", None)
+    if isinstance(name, str) and len(name) > 0:
+        return name
+    s = str(dtype)
+    return s.split(".")[-1] if "." in s else s
 
 
 def _device_sm_dtype_key(*tensors: torch.Tensor) -> Tuple[int, Tuple[int, int], str]:
     dev = tensors[0].device.index if tensors else torch.cuda.current_device()
     sm = torch.cuda.get_device_capability(dev)
     # Use first tensor's dtype as representative; ops below are homogeneous dtypes by design
-    dtype = str(tensors[0].dtype) if tensors else str(torch.float16)
+    dtype = _dtype_name(tensors[0].dtype) if tensors else _dtype_name(torch.float16)
     return dev, sm, dtype
 
 
@@ -46,7 +55,7 @@ def _key_trAB_gather(
         dev,
         sm,
         dtype,
-        str(accumulator_type),
+        _dtype_name(accumulator_type),
         K,
         N,
         log_len_a,
@@ -83,7 +92,7 @@ def _key_AD_gather_scatter(
         dev,
         sm,
         dtype,
-        str(accumulator_type),
+        _dtype_name(accumulator_type),
         K,
         N,
         log_len_a,
@@ -138,53 +147,11 @@ _BENCHMARK_TRAB_GATHER_PARAMS = [
 ]
 
 
-def _run_and_time_status(
-    c_fn,
-    candidate: Dict[str, Any],
-    args: Tuple[Any, ...],
-    kwargs: Dict[str, Any],
-    *,
-    output_positions: Tuple[int, int],
-) -> float | int:
-    """
-    Returns:
-        float: The minimum latency in milliseconds.
-        int: The status code returned by the kernel.
-    """
-    starter = torch.cuda.Event(enable_timing=True)
-    ender = torch.cuda.Event(enable_timing=True)
-
-    def _clone_outputs_for_args(a: Tuple[Any, ...]) -> Tuple[Any, ...]:
-        a_list = list(a)
-        pos_c, pos_d = output_positions
-        if isinstance(a_list[pos_c], torch.Tensor):
-            a_list[pos_c] = a_list[pos_c].clone()
-        if isinstance(a_list[pos_d], torch.Tensor):
-            a_list[pos_d] = a_list[pos_d].clone()
-        return tuple(a_list)
-
-    # Warmup on cloned outputs
-    warm_args = _clone_outputs_for_args(args)
-    status = c_fn(*warm_args, **kwargs, **candidate)
-    if status != 0:
-        return status
-    torch.cuda.current_stream().synchronize()
-
-    # Timed iterations on fresh cloned outputs each time; return min latency
-    iters = 3
-    best_ms = float("inf")
-    for _ in range(iters):
-        run_args = _clone_outputs_for_args(args)
-        starter.record()
-        status = c_fn(*run_args, **kwargs, **candidate)
-        ender.record()
-        ender.synchronize()
-        if status != 0:
-            return status
-        ms = float(starter.elapsed_time(ender))
-        if ms < best_ms:
-            best_ms = ms
-    return best_ms
+def _status_runner_factory(c_fn, output_positions: Tuple[int, ...]):
+    runner = make_status_timing_runner(
+        c_fn, output_positions=output_positions, iters=3, reduction="min"
+    )
+    return lambda cand, a_kw, k_kw: runner(cand, a_kw, k_kw)
 
 
 # Public autotuned wrappers
@@ -193,9 +160,7 @@ cutlass_gemm_trAB_gather_autotuned = make_autotuned_op(
     c_fn=_C.gemm.cutlass_gemm_trAB_gather,
     param_space=_BENCHMARK_TRAB_GATHER_PARAMS,
     key_fn=_key_trAB_gather,
-    run_and_time_fn=lambda cand, a_kw, k_kw: _run_and_time_status(
-        _C.gemm.cutlass_gemm_trAB_gather, cand, a_kw, k_kw, output_positions=(2, 3)
-    ),
+    run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_trAB_gather, (2, 3)),
     record_failures_as_inf=False,
 )
 
@@ -204,8 +169,6 @@ cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
     c_fn=_C.gemm.cutlass_gemm_AD_gather_scatter,
     param_space=_BENCHMARK_AD_GATHER_SCATTER_PARAMS,
     key_fn=_key_AD_gather_scatter,
-    run_and_time_fn=lambda cand, a_kw, k_kw: _run_and_time_status(
-        _C.gemm.cutlass_gemm_AD_gather_scatter, cand, a_kw, k_kw, output_positions=(2, 3)
-    ),
+    run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)),
     record_failures_as_inf=False,
 )

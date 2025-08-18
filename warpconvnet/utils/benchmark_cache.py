@@ -638,23 +638,41 @@ def make_autotuned_op(
 
     cache.register_value_validator(namespace, _validator)
 
+    # Materialize candidate space once to derive the set of allowed tunable keys
+    try:
+        _candidates_list: List[Dict[str, Any]] = list(param_space)
+    except TypeError:
+        # Some iterables can be consumed only once; fallback to a shallow copy approach
+        _candidates_list = [c for c in param_space]
+    _allowed_param_keys: set[str] = set()
+    for _cand in _candidates_list:
+        if isinstance(_cand, dict):
+            _allowed_param_keys.update(_cand.keys())
+
     def _default_run_and_time(
         candidate: Dict[str, Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]
     ) -> float:
-        runner = make_timing_runner(
-            lambda cand, a, k: c_fn(*a, **k, **cand),
+        runner = make_status_timing_runner(
+            c_fn,
+            output_positions=(),
             iters=timing_iters,
             reduction=timing_reduction,
         )
         if record_failures_as_inf:
-            return runner(candidate, args, kwargs)
-        # on_error='raise' behavior: rethrow exceptions
+            result = runner(candidate, args, kwargs)
+            return float("inf") if isinstance(result, int) else float(result)
+        # on_error='raise' behavior: attempt to surface underlying error
         try:
-            return runner(candidate, args, kwargs)
+            result = runner(candidate, args, kwargs)
+            if isinstance(result, int):
+                logger.warning(
+                    f"Candidate {candidate} returned status {result} during timing. Triggering error path."
+                )
+                _ = c_fn(*args, **kwargs, **candidate)
+                return float("inf")
+            return float(result)
         except Exception as e:
             logger.warning(f"Candidate {candidate} failed during timing: {e}")
-            # make_timing_runner currently returns inf on errors; to simulate 'raise',
-            # call the function once more to trigger the error path
             _ = c_fn(*args, **kwargs, **candidate)
             return float("inf")  # unreachable; placate type checkers
 
@@ -669,14 +687,20 @@ def make_autotuned_op(
         if cached is not None:
             # Support both legacy dict and new list-of-results formats
             if isinstance(cached, list) and len(cached) > 0 and isinstance(cached[0], dict):
-                best_params = cached[0].get("params", {})
-                if not isinstance(best_params, dict):
+                best_params_raw = cached[0].get("params", {})
+                if not isinstance(best_params_raw, dict):
                     raise TypeError(
                         "Invalid cache entry: first list element missing 'params' dict"
                     )
+                # Filter to allowed tunable keys only
+                best_params = {
+                    k: v for k, v in best_params_raw.items() if k in _allowed_param_keys
+                }
                 return c_fn(*args, **kwargs, **best_params)
             elif isinstance(cached, dict):
-                return c_fn(*args, **kwargs, **cached)
+                # Legacy single-dict format; filter to allowed tunable keys only
+                filtered = {k: v for k, v in cached.items() if k in _allowed_param_keys}
+                return c_fn(*args, **kwargs, **filtered)
             else:
                 # Unexpected format; fall through to benchmarking to refresh entry
                 logger.debug(
@@ -695,8 +719,8 @@ def make_autotuned_op(
         best_metric: Optional[float] = None
         all_results: List[Dict[str, Any]] = []  # each entry: {"params": dict, "metric": float}
 
-        # Materialize param_space to a list to allow multi-pass
-        candidates: List[Dict[str, Any]] = list(param_space)
+        # Use pre-materialized candidate list
+        candidates: List[Dict[str, Any]] = _candidates_list
         if len(candidates) == 0:
             raise ValueError("param_space is empty for autotuned op")
 
@@ -754,72 +778,79 @@ def warmup_autotune(
             logger.debug(f"Warmup invocation failed for autotuned op: {e}")
 
 
-def make_timing_runner(
-    callable_with_candidate: Callable[[Dict[str, Any], Tuple[Any, ...], Dict[str, Any]], Any],
+def make_status_timing_runner(
+    c_fn: Callable[..., Any],
+    *,
+    output_positions: Tuple[int, ...],
     iters: int = 3,
-    reduction: str = "min",  # "min" or "avg"
-    on_error: str = "inf",  # "inf" or "raise"
-) -> Callable[[Dict[str, Any], Tuple[Any, ...], Dict[str, Any]], float]:
-    """Build a robust timing function that returns milliseconds and records inf on failure.
+    reduction: str = "min",
+) -> Callable[[Dict[str, Any], Tuple[Any, ...], Dict[str, Any]], float | int]:
+    """Timing runner for kernels that return an int status and write into output tensors.
 
-    - Warms up once to allow inner autotuning to settle
-    - Uses CUDA events if CUDA tensor inputs are detected; falls back to perf_counter otherwise
-    - Catches any exception and returns inf so the candidate remains in the cache
+    - Clones only the specified output args for each call
+    - If a non-zero status is returned at any point, returns the status immediately
+    - Otherwise returns latency in milliseconds (min or average)
     """
 
-    def _runner(candidate: Dict[str, Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> float:
-        import time as _time
+    def _clone_outputs_for_args(args: Tuple[Any, ...]) -> Tuple[Any, ...]:
+        args_list = list(args)
+        for pos in output_positions:
+            if 0 <= pos < len(args_list) and isinstance(args_list[pos], torch.Tensor):
+                args_list[pos] = args_list[pos].clone()
+        return tuple(args_list)
 
+    def _runner(
+        candidate: Dict[str, Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]
+    ) -> float | int:
         try:
-            # Warmup
-            with torch.no_grad():
-                _ = callable_with_candidate(candidate, args, kwargs)
-            if (
-                len(args) > 0
-                and isinstance(args[0], torch.Tensor)
-                and args[0].is_cuda
-                and torch.cuda.is_available()
-            ):
-                torch.cuda.synchronize()
+            # Warmup using cloned outputs
+            warm_args = _clone_outputs_for_args(args)
+            status = c_fn(*warm_args, **kwargs, **candidate)
+            if isinstance(status, int) and status != 0:
+                return status
 
-            # Timing section
-            times_ms: List[float] = []
-            if (
-                len(args) > 0
-                and isinstance(args[0], torch.Tensor)
-                and args[0].is_cuda
-                and torch.cuda.is_available()
-            ):
-                with torch.no_grad():
-                    for _ in range(iters):
-                        starter = torch.cuda.Event(enable_timing=True)
-                        ender = torch.cuda.Event(enable_timing=True)
-                        starter.record()
-                        _ = callable_with_candidate(candidate, args, kwargs)
-                        ender.record()
-                        torch.cuda.synchronize()
-                        times_ms.append(float(starter.elapsed_time(ender)))
-            else:
-                t0 = _time.perf_counter()
-                with torch.no_grad():
-                    for _ in range(iters):
-                        t_start = _time.perf_counter()
-                        _ = callable_with_candidate(candidate, args, kwargs)
-                        t_end = _time.perf_counter()
-                        times_ms.append(float((t_end - t_start) * 1000.0))
-                _ = t0  # keep variable usage consistent
-                _ = _time.perf_counter()
-
-            if reduction == "avg":
-                return (
-                    float(sum(times_ms) / float(len(times_ms)))
-                    if len(times_ms) > 0
-                    else float("inf")
+            # Choose timing backend
+            use_cuda_timing = (
+                any(
+                    isinstance(arg, torch.Tensor) and getattr(arg, "is_cuda", False)
+                    for arg in args
                 )
-            return float(min(times_ms)) if len(times_ms) > 0 else float("inf")
-        except Exception as e:
-            if on_error == "raise":
-                raise e
+                and torch.cuda.is_available()
+            )
+
+            times_ms: List[float] = []
+            if use_cuda_timing:
+                try:
+                    torch.cuda.current_stream().synchronize()
+                except Exception:
+                    pass
+                for _ in range(iters):
+                    run_args = _clone_outputs_for_args(args)
+                    starter = torch.cuda.Event(enable_timing=True)
+                    ender = torch.cuda.Event(enable_timing=True)
+                    starter.record()
+                    status = c_fn(*run_args, **kwargs, **candidate)
+                    ender.record()
+                    ender.synchronize()
+                    if isinstance(status, int) and status != 0:
+                        return status
+                    times_ms.append(float(starter.elapsed_time(ender)))
+            else:
+                for _ in range(iters):
+                    run_args = _clone_outputs_for_args(args)
+                    t0 = time.perf_counter()
+                    status = c_fn(*run_args, **kwargs, **candidate)
+                    t1 = time.perf_counter()
+                    if isinstance(status, int) and status != 0:
+                        return status
+                    times_ms.append(float((t1 - t0) * 1000.0))
+
+            if not times_ms:
+                return float("inf")
+            if reduction == "avg":
+                return float(sum(times_ms) / float(len(times_ms)))
+            return float(min(times_ms))
+        except Exception:
             return float("inf")
 
     return _runner
