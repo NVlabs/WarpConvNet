@@ -256,7 +256,6 @@ def test_sparse_conv_forward_backward_with_cutlass(setup_voxels):
         kernel_map,
         batch_indexed_in_coords.shape[0],
         accumulator_type=torch.float32,
-        split_k_slices=1,
     )
     assert torch.allclose(out_explicit, out_implicit, atol=1e-1, rtol=1e-3)
 

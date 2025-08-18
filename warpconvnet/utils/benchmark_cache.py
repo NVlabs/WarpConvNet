@@ -8,6 +8,7 @@ import pickle
 import threading
 import time
 import atexit
+import enum
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, Sequence, TypeVar, Generic, Callable, Iterable, List
 from dataclasses import dataclass
@@ -56,6 +57,73 @@ _SPARSE_CONV_CONFIG_DTYPE_TO_INT = {
     torch.float32: 2,
     torch.float64: 3,
 }
+
+
+# ----------------------
+# Small shared utilities
+# ----------------------
+
+
+def _atomic_pickle_replace(target_path: Path, data: Any) -> None:
+    """Atomically write pickle data to target by writing to a temp file then renaming."""
+    temp_file = target_path.with_suffix(".tmp")
+    with open(temp_file, "wb") as f:
+        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    temp_file.replace(target_path)
+
+
+def _sanitize_for_pickle(value: Any) -> Any:
+    """Recursively convert non-stable objects (Enums, dtypes, devices) to strings for safe pickling.
+
+    Primary goal: avoid importing heavy modules (e.g., Enum classes defined in other modules)
+    during unpickling that can break due to import-time side effects.
+    """
+    try:
+        # Enums -> their name (fallback to str)
+        if isinstance(value, enum.Enum):
+            try:
+                return str(value.name)
+            except Exception:
+                return str(value)
+
+        # Common torch types to stringify
+        try:
+            import torch as _torch  # local import to avoid mandatory global dependency at module load
+
+            if isinstance(value, _torch.dtype):
+                return str(value)
+            if isinstance(value, _torch.device):
+                return str(value)
+        except Exception:
+            pass
+
+        # Basic containers: preserve type where possible
+        if isinstance(value, dict):
+            return {_sanitize_for_pickle(k): _sanitize_for_pickle(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_sanitize_for_pickle(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(_sanitize_for_pickle(v) for v in value)
+        if isinstance(value, set):
+            return {_sanitize_for_pickle(v) for v in value}
+    except Exception:
+        # Best-effort sanitization; fall back to string on any unexpected issue
+        try:
+            return str(value)
+        except Exception:
+            return None
+    return value
+
+
+def _parse_version_to_major_minor(version_value: Any) -> Tuple[int, int]:
+    """Parse version like "v3.0" or 3.0 into (major, minor). Fallback to (1, 0)."""
+    version_str = re.sub(r"[^0-9.]", "", str(version_value))
+    parts = version_str.split(".")
+    if len(parts) >= 2:
+        return int(parts[0]), int(parts[1])
+    if len(parts) == 1 and parts[0] != "":
+        return int(parts[0]), 0
+    return 1, 0
 
 
 K = TypeVar("K")
@@ -114,376 +182,6 @@ class SpatiallySparseConvConfig:
             and self.kernel_volume == other.kernel_volume
             and self.in_dtype == other.in_dtype
         )
-
-
-class BenchmarkCache:
-    """
-    Manages saving and loading of benchmark results to/from disk.
-    Only rank 0 process saves to avoid conflicts in distributed training.
-    Uses a background thread for periodic saving to avoid blocking the main computation.
-
-    Version 2.0 supports multiple benchmark result types:
-    - sparse_conv_forward_results
-    - sparse_conv_backward_results
-    - sparse_conv_depthwise_forward_results
-    - sparse_conv_depthwise_backward_results
-    """
-
-    def __init__(self, cache_dir: str = WARPCONVNET_BENCHMARK_CACHE_DIR):
-        self.cache_dir = Path(cache_dir).expanduser()
-        self.cache_file = self.cache_dir / "benchmark_cache.pkl"
-        self.lock = threading.Lock()
-
-        # Periodic save settings
-        self.save_interval = 60.0  # seconds - reduced from 300 to 60 for more frequent saves
-        self.last_save_time = 0.0
-        self.pending_changes = False
-        self._shutdown_requested = False
-
-        # Background thread for saving
-        self._save_thread = None
-        self._save_condition = threading.Condition(self.lock)
-
-        # Ensure cache directory exists
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Start background save thread only for rank 0
-        if _is_rank_zero():
-            self._start_background_saver()
-            atexit.register(self._save_on_exit)
-
-    def _start_background_saver(self) -> None:
-        """Start the background thread for periodic saving."""
-        if self._save_thread is not None:
-            return
-
-        self._save_thread = threading.Thread(
-            target=self._background_save_worker, name="BenchmarkCacheSaver", daemon=True
-        )
-        self._save_thread.start()
-        logger.debug("Started background benchmark cache saver thread")
-
-    def _background_save_worker(self) -> None:
-        """Background worker thread that periodically saves the cache."""
-        while not self._shutdown_requested:
-            with self._save_condition:
-                # Wait for either pending changes or timeout
-                self._save_condition.wait(timeout=self.save_interval)
-
-                if self._shutdown_requested:
-                    break
-
-                # Check if we need to save
-                current_time = time.time()
-                if (
-                    self.pending_changes
-                    and (current_time - self.last_save_time) >= self.save_interval
-                ):
-                    self._do_save()
-
-    def _do_save(self) -> None:
-        """Internal method to perform the actual save (assumes lock is held)."""
-        if not self.pending_changes:
-            return
-
-        try:
-            # Import here to avoid circular imports
-            from warpconvnet.nn.functional.sparse_conv import (
-                _BENCHMARK_FORWARD_RESULTS,
-                _BENCHMARK_BACKWARD_RESULTS,
-            )
-
-            # Try to import depthwise results, but don't fail if not available
-            try:
-                from warpconvnet.nn.functional.sparse_conv_depth import (
-                    _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
-                    _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
-                )
-            except ImportError:
-                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS = {}
-                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS = {}
-
-            current_time = time.time()
-
-            # Prepare cache data in version 2.0 format
-            cache_data = {
-                "sparse_conv_forward_results": _BENCHMARK_FORWARD_RESULTS,
-                "sparse_conv_backward_results": _BENCHMARK_BACKWARD_RESULTS,
-                "sparse_conv_depthwise_forward_results": _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
-                "sparse_conv_depthwise_backward_results": _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
-                "timestamp": current_time,
-                "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
-            }
-
-            # Atomic write: write to temp file then rename
-            temp_file = self.cache_file.with_suffix(".tmp")
-            with open(temp_file, "wb") as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            # Atomic move
-            temp_file.replace(self.cache_file)
-
-            self.last_save_time = current_time
-            self.pending_changes = False
-
-            logger.debug(
-                f"Background saved benchmark cache: {len(_BENCHMARK_FORWARD_RESULTS)} forward, "
-                f"{len(_BENCHMARK_BACKWARD_RESULTS)} backward, "
-                f"{len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward, "
-                f"{len(_BENCHMARK_DEPTHWISE_BACKWARD_RESULTS)} depthwise backward configurations"
-            )
-
-        except Exception as e:
-            logger.warning(f"Failed to save benchmark cache in background: {e}")
-
-    def load_cache(self) -> Dict[str, Dict]:
-        """
-        Load benchmark results from cache file.
-
-        If the loaded version is less than the latest version, the cache will be reset.
-
-        Returns a dictionary with all cached benchmark results.
-        """
-        # Default empty results for all supported cache types
-        default_results = {
-            "sparse_conv_forward_results": {},
-            "sparse_conv_backward_results": {},
-            "sparse_conv_depthwise_forward_results": {},
-            "sparse_conv_depthwise_backward_results": {},
-        }
-
-        if not self.cache_file.exists():
-            logger.debug(f"No benchmark cache file found at {self.cache_file}")
-            return default_results
-
-        try:
-            with open(self.cache_file, "rb") as f:
-                cache_data = pickle.load(f)
-
-            if not isinstance(cache_data, dict):
-                logger.warning("Invalid cache file format, starting with empty cache")
-                return default_results
-
-            # Determine cache version and handle accordingly
-            version = cache_data.get("version", "1.0")
-            # Remove any string before and after major.minor
-            version = re.sub(r"[^0-9.]", "", str(version))
-            major_version, minor_version = version.split(".")
-
-            if int(major_version) == 3:
-                # Version 3.0 format - direct mapping
-                result = {
-                    "sparse_conv_forward_results": cache_data.get(
-                        "sparse_conv_forward_results", {}
-                    ),
-                    "sparse_conv_backward_results": cache_data.get(
-                        "sparse_conv_backward_results", {}
-                    ),
-                    "sparse_conv_depthwise_forward_results": cache_data.get(
-                        "sparse_conv_depthwise_forward_results", {}
-                    ),
-                    "sparse_conv_depthwise_backward_results": cache_data.get(
-                        "sparse_conv_depthwise_backward_results", {}
-                    ),
-                }
-
-                total_configs = sum(len(results) for results in result.values())
-                logger.info(f"Loaded benchmark cache v3.0: {total_configs} total configurations")
-
-            else:
-                logger.warning(
-                    f"Loaded benchmark cache v{version}, but expected v3.0. Resetting cache."
-                )
-                return default_results
-
-            return result
-
-        except Exception as e:
-            logger.warning(f"Failed to load benchmark cache: {e}. Starting with empty cache.")
-            return default_results
-
-    def save_cache(self, cache_results: Dict[str, Dict], force: bool = False) -> None:
-        """
-        Save benchmark results to cache file in version 2.0 format.
-
-        Args:
-            cache_results: Dictionary mapping cache types to their results. Current supported types are:
-                - sparse_conv_forward_results
-                - sparse_conv_backward_results
-                - sparse_conv_depthwise_forward_results
-                - sparse_conv_depthwise_backward_results
-            force: If True, save immediately. If False, schedule for background save.
-        """
-        if not _is_rank_zero():
-            return
-
-        if not force:
-            # For non-forced saves, just mark dirty and let background thread handle it
-            self.mark_dirty()
-            return
-
-        with self.lock:
-            current_time = time.time()
-
-            try:
-                # Prepare cache data in the latest version
-                cache_data = {
-                    "sparse_conv_forward_results": cache_results.get(
-                        "sparse_conv_forward_results", {}
-                    ),
-                    "sparse_conv_backward_results": cache_results.get(
-                        "sparse_conv_backward_results", {}
-                    ),
-                    "sparse_conv_depthwise_forward_results": cache_results.get(
-                        "sparse_conv_depthwise_forward_results", {}
-                    ),
-                    "sparse_conv_depthwise_backward_results": cache_results.get(
-                        "sparse_conv_depthwise_backward_results", {}
-                    ),
-                    "timestamp": current_time,
-                    "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
-                }
-
-                # Atomic write: write to temp file then rename
-                temp_file = self.cache_file.with_suffix(".tmp")
-                with open(temp_file, "wb") as f:
-                    pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-                # Atomic move
-                temp_file.replace(self.cache_file)
-
-                self.last_save_time = current_time
-                self.pending_changes = False
-
-                total_configs = sum(len(results) for results in cache_results.values())
-                logger.debug(
-                    f"Force saved benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {total_configs} total configurations"
-                )
-
-            except Exception as e:
-                logger.warning(
-                    f"Failed to force save benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
-                )
-
-    def mark_dirty(self) -> None:
-        """Mark that cache has pending changes that should be saved."""
-        if not _is_rank_zero():
-            return
-
-        with self._save_condition:
-            self.pending_changes = True
-            # Notify the background thread that there are changes
-            self._save_condition.notify()
-
-    def _save_on_exit(self) -> None:
-        """Save cache on program exit if there are pending changes."""
-        # Signal shutdown to background thread
-        self._shutdown_requested = True
-
-        # Wake up the background thread
-        with self._save_condition:
-            self._save_condition.notify()
-
-        # Wait for background thread to finish (with timeout)
-        if self._save_thread is not None:
-            self._save_thread.join(timeout=5.0)
-
-        # Perform final save if there are still pending changes
-        if self.pending_changes:
-            from warpconvnet.nn.functional.sparse_conv import (
-                _BENCHMARK_FORWARD_RESULTS,
-                _BENCHMARK_BACKWARD_RESULTS,
-            )
-
-            from warpconvnet.nn.functional.sparse_conv_depth import (
-                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
-                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
-            )
-
-            self.save_cache(
-                {
-                    "sparse_conv_forward_results": _BENCHMARK_FORWARD_RESULTS,
-                    "sparse_conv_backward_results": _BENCHMARK_BACKWARD_RESULTS,
-                    "sparse_conv_depthwise_forward_results": _BENCHMARK_DEPTHWISE_FORWARD_RESULTS,
-                    "sparse_conv_depthwise_backward_results": _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS,
-                },
-                force=True,
-            )
-
-
-# Global cache instance
-_benchmark_cache: Optional[BenchmarkCache] = None
-
-
-def get_benchmark_cache() -> BenchmarkCache:
-    """Get the global benchmark cache instance."""
-    global _benchmark_cache
-    if _benchmark_cache is None:
-        _benchmark_cache = BenchmarkCache()
-    return _benchmark_cache
-
-
-def load_sparse_conv_benchmark_cache() -> Tuple[Dict, Dict]:
-    """
-    Load benchmark cache and return (forward_results, backward_results) for backward compatibility.
-    For full v2.0 results, use get_benchmark_cache().load_cache() directly.
-    """
-    cache = get_benchmark_cache()
-    cache_results = cache.load_cache()
-
-    # Return legacy format for backward compatibility
-    forward_results = cache_results.get("sparse_conv_forward_results", {})
-    backward_results = cache_results.get("sparse_conv_backward_results", {})
-
-    return forward_results, backward_results
-
-
-def load_dict_benchmark_cache() -> Dict[str, Dict]:
-    """
-    Load benchmark cache in version 2.0 format.
-    Returns dictionary with all cached benchmark result types.
-    """
-    cache = get_benchmark_cache()
-    return cache.load_cache()
-
-
-def save_sparse_conv_benchmark_cache(
-    forward_results: Dict, backward_results: Dict, force: bool = False
-) -> None:
-    """
-    Save benchmark cache.
-
-    Args:
-        forward_results: Forward benchmark results
-        backward_results: Backward benchmark results
-        force: If True, save immediately. If False, schedule for background save.
-    """
-    cache = get_benchmark_cache()
-    cache.save_cache(
-        {
-            "sparse_conv_forward_results": forward_results,
-            "sparse_conv_backward_results": backward_results,
-        },
-        force=force,
-    )
-
-
-def save_dict_benchmark_cache(cache_results: Dict[str, Dict], force: bool = False) -> None:
-    """
-    Save benchmark cache in version 2.0 format.
-
-    Args:
-        cache_results: Dictionary mapping cache types to their results
-        force: If True, save immediately. If False, schedule for background save.
-    """
-    cache = get_benchmark_cache()
-    cache.save_cache(cache_results, force=force)
-
-
-def mark_benchmark_cache_dirty() -> None:
-    """Mark that benchmark cache has pending changes."""
-    cache = get_benchmark_cache()
-    cache.mark_dirty()
 
 
 # =============================
@@ -604,15 +302,20 @@ class GenericBenchmarkCache(Generic[K, V]):
             # Keep in-memory in sync with what we are about to write
             self._results = merged
 
+            # Sanitize values prior to pickling to avoid importing enum classes on load
+            sanitized_namespaces: Dict[str, Dict[K, V]] = {}
+            for ns, kv in merged.items():
+                sanitized_ns: Dict[K, V] = {}
+                for k, v in kv.items():
+                    sanitized_ns[k] = _sanitize_for_pickle(v)  # type: ignore[assignment]
+                sanitized_namespaces[ns] = sanitized_ns
+
             cache_data = {
-                "namespaces": merged,
+                "namespaces": sanitized_namespaces,
                 "timestamp": current_time,
                 "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
             }
-            temp_file = self.cache_file.with_suffix(".tmp")
-            with open(temp_file, "wb") as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            temp_file.replace(self.cache_file)
+            _atomic_pickle_replace(self.cache_file, cache_data)
             self.last_save_time = current_time
             self.pending_changes = False
             total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
@@ -631,27 +334,31 @@ class GenericBenchmarkCache(Generic[K, V]):
                 cache_data = pickle.load(f)
 
             if not isinstance(cache_data, dict):
-                logger.warning("Invalid generic cache file format, starting with empty cache")
+                logger.warning(
+                    "Invalid generic cache file format, deleting cache and starting with empty cache"
+                )
                 return {}
 
-            version = cache_data.get("version", "1.0")
-            version = re.sub(r"[^0-9.]", "", str(version))
-            major_version, minor_version = version.split(".")
+            major_version, minor_version = _parse_version_to_major_minor(
+                cache_data.get("version", "1.0")
+            )
 
             if int(major_version) == 3:
                 namespaces = cache_data.get("namespaces", {})
                 if not isinstance(namespaces, dict):
-                    logger.warning("Generic cache 'namespaces' is not a dict; resetting to empty")
+                    logger.warning(
+                        "Generic cache 'namespaces' is not a dict; deleting cache and resetting to empty"
+                    )
                     namespaces = {}
                 return namespaces
             else:
                 logger.warning(
-                    f"Loaded generic benchmark cache v{version}, but expected v3.0. Resetting cache."
+                    f"Loaded generic benchmark cache v{major_version}.{minor_version}, but expected v3.0. Deleting cache and resetting."
                 )
                 return {}
         except Exception as e:
             logger.warning(
-                f"Failed to load generic benchmark cache: {e}. Starting with empty cache."
+                f"Failed to load generic benchmark cache: {e}. Deleting cache and starting with empty cache."
             )
             return {}
 
@@ -698,15 +405,20 @@ class GenericBenchmarkCache(Generic[K, V]):
 
                 self._results = merged
 
+                # Sanitize before writing
+                sanitized_namespaces: Dict[str, Dict[K, V]] = {}
+                for ns, kv in merged.items():
+                    sanitized_ns: Dict[K, V] = {}
+                    for k, v in kv.items():
+                        sanitized_ns[k] = _sanitize_for_pickle(v)  # type: ignore[assignment]
+                    sanitized_namespaces[ns] = sanitized_ns
+
                 cache_data = {
-                    "namespaces": merged,
+                    "namespaces": sanitized_namespaces,
                     "timestamp": current_time,
                     "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
                 }
-                temp_file = self.cache_file.with_suffix(".tmp")
-                with open(temp_file, "wb") as f:
-                    pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                temp_file.replace(self.cache_file)
+                _atomic_pickle_replace(self.cache_file, cache_data)
                 self.last_save_time = current_time
                 self.pending_changes = False
                 total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
@@ -724,14 +436,25 @@ class GenericBenchmarkCache(Generic[K, V]):
         with self.lock:
             ns = self._results.setdefault(namespace, {})
             self._validate_value(namespace, value)
-            ns[key] = value
+            # Sanitize on write to in-memory structure so later merges inherit sanitized values
+            ns[key] = _sanitize_for_pickle(value)  # type: ignore[assignment]
         if force:
             self.save_cache(self._results, force=True)
         else:
             self.mark_dirty()
 
     def get_namespace(self, namespace: str) -> Dict[K, V]:
-        # Prefer reading from disk for cross-process visibility
+        # Fast path: if we have in-memory results for this namespace, return them immediately
+        # to enable same-process cache hits right after warmup/benchmarking.
+        try:
+            with self.lock:
+                ns_in_memory = self._results.get(namespace)
+                if isinstance(ns_in_memory, dict) and len(ns_in_memory) > 0:
+                    return dict(ns_in_memory)
+        except Exception:
+            pass
+
+        # Fallback to disk for cross-process visibility when in-memory is empty
         namespaces = self.load_cache()
         return namespaces.get(namespace, {})
 
@@ -860,6 +583,9 @@ def make_autotuned_op(
     ] = None,
     select_best: str = "min",  # or "max" if larger is better
     require_cached_when_compiling: bool = True,
+    timing_reduction: str = "min",  # "min" or "avg" across iters when using default timing
+    record_failures_as_inf: bool = True,
+    timing_iters: int = 3,
 ) -> Callable[..., Any]:
     """
     Factory that wraps a low-level function (e.g., CUTLASS-bound op) with autotuning via GenericBenchmarkCache.
@@ -877,6 +603,9 @@ def make_autotuned_op(
         run_and_time_fn: Optional custom timing function returning latency in ms. If None, a default torch.cuda timing runner is used.
         select_best: "min" to pick lowest latency, "max" to pick highest metric.
         require_cached_when_compiling: If True, disallow benchmarking during torch.compile or CUDA graph capture.
+        timing_reduction: "min" or "avg" across iters when using default timing
+        record_failures_as_inf: If True, record failures as inf and continue benchmarking.
+        timing_iters: Number of timing iterations to run for each candidate.
 
     Returns:
         Callable with same signature as c_fn (no explicit config argument).
@@ -909,25 +638,22 @@ def make_autotuned_op(
     def _default_run_and_time(
         candidate: Dict[str, Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]
     ) -> float:
-        import torch
-
-        # Use CUDA events for wall-time in milliseconds
-        starter = torch.cuda.Event(enable_timing=True)
-        ender = torch.cuda.Event(enable_timing=True)
-
-        # Warmup single run to populate caches for this candidate
-        c_fn(*args, **kwargs, **candidate)
-        torch.cuda.synchronize()
-
-        # Time a few runs to reduce noise
-        iters = 3
-        starter.record()
-        for _ in range(iters):
-            c_fn(*args, **kwargs, **candidate)
-        ender.record()
-        torch.cuda.synchronize()
-        elapsed_ms: float = float(starter.elapsed_time(ender)) / iters
-        return elapsed_ms
+        runner = make_timing_runner(
+            lambda cand, a, k: c_fn(*a, **k, **cand),
+            iters=timing_iters,
+            reduction=timing_reduction,
+        )
+        if record_failures_as_inf:
+            return runner(candidate, args, kwargs)
+        # on_error='raise' behavior: rethrow exceptions
+        try:
+            return runner(candidate, args, kwargs)
+        except Exception as e:
+            logger.warning(f"Candidate {candidate} failed during timing: {e}")
+            # make_timing_runner currently returns inf on errors; to simulate 'raise',
+            # call the function once more to trigger the error path
+            _ = c_fn(*args, **kwargs, **candidate)
+            return float("inf")  # unreachable; placate type checkers
 
     timing_fn = run_and_time_fn or _default_run_and_time
 
@@ -971,13 +697,14 @@ def make_autotuned_op(
         if len(candidates) == 0:
             raise ValueError("param_space is empty for autotuned op")
 
+        logger.debug(f"Benchmarking {namespace} {key}")
         for cand in candidates:
-            try:
-                metric = timing_fn(cand, args, kwargs)
-            except Exception as e:
-                # Skip invalid candidates, but continue searching
-                logger.debug(f"Candidate {cand} failed during timing: {e}")
-                continue
+            metric = timing_fn(cand, args, kwargs)
+            if isinstance(metric, int):
+                logger.warning(
+                    f"Candidate {cand} returned status {metric} during timing. Skipping."
+                )
+                return metric
 
             all_results.append({"params": cand, "metric": float(metric)})
             if best_metric is None:
@@ -1022,3 +749,74 @@ def warmup_autotune(
         except Exception as e:
             # Surface the first error, but continue attempting others
             logger.debug(f"Warmup invocation failed for autotuned op: {e}")
+
+
+def make_timing_runner(
+    callable_with_candidate: Callable[[Dict[str, Any], Tuple[Any, ...], Dict[str, Any]], Any],
+    iters: int = 3,
+    reduction: str = "min",  # "min" or "avg"
+    on_error: str = "inf",  # "inf" or "raise"
+) -> Callable[[Dict[str, Any], Tuple[Any, ...], Dict[str, Any]], float]:
+    """Build a robust timing function that returns milliseconds and records inf on failure.
+
+    - Warms up once to allow inner autotuning to settle
+    - Uses CUDA events if CUDA tensor inputs are detected; falls back to perf_counter otherwise
+    - Catches any exception and returns inf so the candidate remains in the cache
+    """
+
+    def _runner(candidate: Dict[str, Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> float:
+        import time as _time
+
+        try:
+            # Warmup
+            with torch.no_grad():
+                _ = callable_with_candidate(candidate, args, kwargs)
+            if (
+                len(args) > 0
+                and isinstance(args[0], torch.Tensor)
+                and args[0].is_cuda
+                and torch.cuda.is_available()
+            ):
+                torch.cuda.synchronize()
+
+            # Timing section
+            times_ms: List[float] = []
+            if (
+                len(args) > 0
+                and isinstance(args[0], torch.Tensor)
+                and args[0].is_cuda
+                and torch.cuda.is_available()
+            ):
+                with torch.no_grad():
+                    for _ in range(iters):
+                        starter = torch.cuda.Event(enable_timing=True)
+                        ender = torch.cuda.Event(enable_timing=True)
+                        starter.record()
+                        _ = callable_with_candidate(candidate, args, kwargs)
+                        ender.record()
+                        torch.cuda.synchronize()
+                        times_ms.append(float(starter.elapsed_time(ender)))
+            else:
+                t0 = _time.perf_counter()
+                with torch.no_grad():
+                    for _ in range(iters):
+                        t_start = _time.perf_counter()
+                        _ = callable_with_candidate(candidate, args, kwargs)
+                        t_end = _time.perf_counter()
+                        times_ms.append(float((t_end - t_start) * 1000.0))
+                _ = t0  # keep variable usage consistent
+                _ = _time.perf_counter()
+
+            if reduction == "avg":
+                return (
+                    float(sum(times_ms) / float(len(times_ms)))
+                    if len(times_ms) > 0
+                    else float("inf")
+                )
+            return float(min(times_ms)) if len(times_ms) > 0 else float("inf")
+        except Exception as e:
+            if on_error == "raise":
+                raise e
+            return float("inf")
+
+    return _runner

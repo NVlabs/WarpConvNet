@@ -142,7 +142,12 @@ def _run_and_time_status(
     kwargs: Dict[str, Any],
     *,
     output_positions: Tuple[int, int],
-) -> float:
+) -> float | int:
+    """
+    Returns:
+        float: The minimum latency in milliseconds.
+        int: The status code returned by the kernel.
+    """
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
 
@@ -159,7 +164,7 @@ def _run_and_time_status(
     warm_args = _clone_outputs_for_args(args)
     status = c_fn(*warm_args, **kwargs, **candidate)
     if status != 0:
-        raise RuntimeError(f"Kernel returned status {status} for candidate {candidate}")
+        return status
     torch.cuda.current_stream().synchronize()
 
     # Timed iterations on fresh cloned outputs each time; return min latency
@@ -172,9 +177,7 @@ def _run_and_time_status(
         ender.record()
         ender.synchronize()
         if status != 0:
-            raise RuntimeError(
-                f"Kernel returned status {status} during timing for candidate {candidate}"
-            )
+            return status
         ms = float(starter.elapsed_time(ender))
         if ms < best_ms:
             best_ms = ms
@@ -190,6 +193,7 @@ cutlass_gemm_trAB_gather_autotuned = make_autotuned_op(
     run_and_time_fn=lambda cand, a_kw, k_kw: _run_and_time_status(
         _C.gemm.cutlass_gemm_trAB_gather, cand, a_kw, k_kw, output_positions=(2, 3)
     ),
+    record_failures_as_inf=False,
 )
 
 cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
@@ -200,4 +204,5 @@ cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
     run_and_time_fn=lambda cand, a_kw, k_kw: _run_and_time_status(
         _C.gemm.cutlass_gemm_AD_gather_scatter, cand, a_kw, k_kw, output_positions=(2, 3)
     ),
+    record_failures_as_inf=False,
 )

@@ -52,9 +52,11 @@ class CUDATimer:
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.start_event.record()
+        return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.end_event.record()
         torch.cuda.synchronize()
         self.elapsed_time = self.start_event.elapsed_time(self.end_event)
-        return self.elapsed_time
+        # Do not suppress exceptions (including KeyboardInterrupt)
+        return False

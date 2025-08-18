@@ -22,9 +22,9 @@ from warpconvnet.utils.ntuple import ntuple
 from warpconvnet.utils.cuda_utils import load_kernel
 from warpconvnet.utils.logger import get_logger
 from warpconvnet.utils.benchmark_cache import (
-    load_dict_benchmark_cache,
-    save_dict_benchmark_cache,
-    mark_benchmark_cache_dirty,
+    generic_benchmark_get_namespace,
+    generic_benchmark_update_entry,
+    mark_generic_benchmark_cache_dirty,
 )
 from warpconvnet.nn.functional.sparse_conv import _BENCHMARK_NUM_RUNS
 from warpconvnet.utils.benchmark_cache import SpatiallySparseConvConfig
@@ -83,13 +83,10 @@ _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS: Dict[
 def _initialize_depthwise_benchmark_cache():
     """Load cached depthwise benchmark results and populate global dictionaries."""
     try:
-        cached_results = load_dict_benchmark_cache()
-        _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.update(
-            cached_results.get("sparse_conv_depthwise_forward_results", {})
-        )
-        _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.update(
-            cached_results.get("sparse_conv_depthwise_backward_results", {})
-        )
+        fwd_ns = generic_benchmark_get_namespace("sparse_conv_depthwise_forward")
+        bwd_ns = generic_benchmark_get_namespace("sparse_conv_depthwise_backward")
+        _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.update(fwd_ns)
+        _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.update(bwd_ns)
         if _BENCHMARK_DEPTHWISE_FORWARD_RESULTS or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS:
             logger.info(
                 f"Loaded {len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward and "
@@ -679,9 +676,10 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 custom_params=filtered_params,
             )
             _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[config] = all_fwd_benchmark_results
-            chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]  # Best is first
-
-            mark_benchmark_cache_dirty()
+            generic_benchmark_update_entry(
+                "sparse_conv_depthwise_forward", config, all_fwd_benchmark_results, force=False
+            )
+            chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
 
         # Step 5: Execute with optimal algorithm and parameters
         if chosen_fwd_algo == SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT:
@@ -831,9 +829,10 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 custom_params=filtered_params,
             )
             _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[config] = all_bwd_benchmark_results
-            chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]  # Best is first
-
-            mark_benchmark_cache_dirty()
+            generic_benchmark_update_entry(
+                "sparse_conv_depthwise_backward", config, all_bwd_benchmark_results, force=False
+            )
+            chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]
 
         # Step 5: Execute with optimal algorithm and parameters
         if chosen_bwd_algo == SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT:

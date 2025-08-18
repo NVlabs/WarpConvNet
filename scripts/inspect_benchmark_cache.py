@@ -2,39 +2,36 @@
 """
 Utility script to inspect and pretty print the stored benchmark cache.
 
+New generic cache workflow:
+  - By default, show a tree-like summary of all namespaces and their entry counts
+  - To view details for a specific namespace, pass: namespace=<name>
+
 Usage:
-    python inspect_benchmark_cache.py                    # Full inspection of all cached benchmarks
-    python inspect_benchmark_cache.py --best-only        # Show only the best algorithm for each config
-    python inspect_benchmark_cache.py --top-k K          # Show top K fastest algorithms for each config
-    python inspect_benchmark_cache.py --forward-only     # Show only forward pass results
-    python inspect_benchmark_cache.py --backward-only    # Show only backward pass results
-    python inspect_benchmark_cache.py <search_term>      # Search for configurations containing the term
-    python inspect_benchmark_cache.py --best-only <term> # Search and show only best results
+    python inspect_benchmark_cache.py                          # List namespaces (tree summary)
+    python inspect_benchmark_cache.py namespace=<name>         # Show details for a namespace
+    python inspect_benchmark_cache.py namespace=<name> --top-k K   # Show top K per-config results
+    python inspect_benchmark_cache.py namespace=<name> --best-only  # Show only best per-config
 
 Examples:
-    python inspect_benchmark_cache.py                           # Show all cached benchmarks
-    python inspect_benchmark_cache.py --best-only               # Show only best performing algorithms
-    python inspect_benchmark_cache.py --top-k 3                 # Show top 3 fastest algorithms for each config
-    python inspect_benchmark_cache.py --forward-only            # Show only forward pass results
-    python inspect_benchmark_cache.py --backward-only           # Show only backward pass results
-    python inspect_benchmark_cache.py --best-only --forward-only # Show only best forward results
-    python inspect_benchmark_cache.py --top-k 2 --forward-only  # Show top 2 fastest forward algorithms
-    python inspect_benchmark_cache.py "float16"                 # Find configurations with float16
-    python inspect_benchmark_cache.py --best-only "32"          # Find 32-channel configs, show only best
-    python inspect_benchmark_cache.py --top-k 3 "EXPLICIT_GEMM" # Find EXPLICIT_GEMM, show top 3 results
+    python inspect_benchmark_cache.py
+    python inspect_benchmark_cache.py namespace=sparse_conv_forward
+    python inspect_benchmark_cache.py namespace=sparse_conv_forward_implicit --best-only
+    python inspect_benchmark_cache.py namespace=sparse_conv_backward --top-k 3
 
-The script loads benchmark results from ~/.cache/warpconvnet/benchmark_cache.pkl and formats them
-for human-readable inspection. Each configuration shows:
-- Configuration parameters (input/output sizes, channels, kernel volume, etc.)
-- Algorithm performance results (execution times in milliseconds)
-- Failed algorithms (shown as 'inf' for infinite time)
+The script loads benchmark results from the generic cache
+(~/.cache/warpconvnet/benchmark_cache_generic.pkl) and formats them
+for human-readable inspection.
 """
 
 import sys
 from datetime import datetime
 from typing import Dict, Any
 
-from warpconvnet.utils.benchmark_cache import load_sparse_conv_benchmark_cache, get_benchmark_cache
+from warpconvnet.utils.benchmark_cache import (
+    get_generic_benchmark_cache,
+    load_generic_benchmark_cache,
+    generic_benchmark_get_namespace,
+)
 
 
 def format_value(value: Any, indent: int = 0, top_k: int = None) -> str:
@@ -57,30 +54,46 @@ def format_value(value: Any, indent: int = 0, top_k: int = None) -> str:
             return "[]"
 
         # If top_k is specified and this looks like benchmark results, show only the top K results
+        # Case 1: legacy tuple/list results
         if (
             top_k is not None
             and len(value) > 0
             and isinstance(value[0], (list, tuple))
             and len(value[0]) >= 3
         ):
-            # This looks like benchmark results - show only the top K results
             top_results = value[:top_k]
             if len(top_results) == 1:
-                # Single result, format inline
                 formatted_item = format_value(top_results[0], indent + 1, top_k)
                 return f"[\n{spaces}  {formatted_item}\n{spaces}]"
             else:
-                # Multiple results, format each
                 lines = ["["]
-                for i, result in enumerate(top_results):
+                for result in top_results:
                     formatted_item = format_value(result, indent + 1, top_k)
                     lines.append(f"{spaces}  {formatted_item}")
                 lines.append(f"{spaces}]")
                 return "\n".join(lines)
 
-        if len(value) <= 3 and all(isinstance(x, (int, float, str)) for x in value):
-            # Keep short lists on one line
-            return str(value)
+        # Case 2: new generic cache format: list of dicts with 'params'/'metric'
+        if (
+            top_k is not None
+            and len(value) > 0
+            and isinstance(value[0], dict)
+            and ("params" in value[0] and "metric" in value[0])
+        ):
+            top_results = value[:top_k]
+            lines = ["["]
+            for result in top_results:
+                formatted_item = format_value(result, indent + 1, top_k)
+                lines.append(f"{spaces}  {formatted_item}")
+            lines.append(f"{spaces}]")
+            return "\n".join(lines)
+
+        # Keep short, simple lists on one line. Allow primitives and empty dicts.
+        if len(value) <= 3 and all(
+            isinstance(x, (int, float, str)) or (isinstance(x, dict) and not x) for x in value
+        ):
+            inner = ", ".join(format_value(x, indent, top_k) for x in value)
+            return f"[{inner}]"
 
         lines = ["["]
         for item in value:
@@ -127,7 +140,7 @@ def pretty_print_benchmark_results(results: Dict, title: str, top_k: int = None)
         print(f"(Showing top {top_k} performing algorithms for each configuration)")
     print()
 
-    # Sort configurations by in_channels (primary) and out_channels (secondary)
+    # Sort configurations by in_channels (primary) and out_channels (secondary) when possible
     def get_sort_key(item):
         config_key, result = item
         config_str = str(config_key)
@@ -185,30 +198,45 @@ def pretty_print_benchmark_results(results: Dict, title: str, top_k: int = None)
 
         # Print the result
         if top_k == 1:
-            print("Best Algorithm:")
+            print("Best Result:")
         elif top_k is not None:
-            print(f"Top {top_k} Algorithms:")
+            print(f"Top {top_k} Results:")
         else:
-            print("Benchmark Results:")
+            print("Results:")
         formatted_result = format_value(result, 1, top_k)
         print(f"  {formatted_result}")
         print()
 
 
-def load_and_inspect_cache(
-    top_k: int = None, show_forward: bool = True, show_backward: bool = True
-) -> None:
-    """Load and display the benchmark cache in a human-readable format."""
+def print_cache_tree(namespaces: Dict[str, Dict[Any, Any]]) -> None:
+    """Print a tree-like summary of namespaces and their entry counts."""
+    print(f"\n{'='*60}")
+    print("NAMESPACE TREE")
+    print(f"{'='*60}")
+    if not namespaces:
+        print("No namespaces found.")
+        return
+    names = sorted(namespaces.keys())
+    print(f"Total namespaces: {len(names)}\n")
+    for name in names:
+        try:
+            count = len(namespaces.get(name, {}))
+        except Exception:
+            count = 0
+        print(f"- {name}: {count} entry(ies)")
+
+
+def load_and_inspect_cache(top_k: int = None, namespace: str | None = None) -> None:
+    """Load and display the generic benchmark cache summary, and optional namespace details."""
     print("Loading benchmark cache...")
 
     # Get cache file info
-    cache = get_benchmark_cache()
+    cache = get_generic_benchmark_cache()
     cache_file = cache.cache_file
 
     print(f"Cache file location: {cache_file}")
 
     if cache_file.exists():
-        # Get file modification time
         mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
         size = cache_file.stat().st_size
         print(f"Cache file size: {size:,} bytes")
@@ -217,119 +245,62 @@ def load_and_inspect_cache(
         print("Cache file does not exist.")
         return
 
-    # Load the cache
     try:
-        forward_results, backward_results = load_sparse_conv_benchmark_cache()
+        namespaces = load_generic_benchmark_cache()
+        print_cache_tree(namespaces)
 
-        # Print summary
-        print("\nCache Summary:")
-        if show_forward:
-            print(f"  Forward configurations: {len(forward_results)}")
-        if show_backward:
-            print(f"  Backward configurations: {len(backward_results)}")
+        if namespace is None:
+            print("\nTip: pass namespace=<name> to view details for a specific namespace.")
+            print(f"{'='*60}")
+            return
 
-        # Pretty print forward results
-        if show_forward:
-            pretty_print_benchmark_results(
-                forward_results, "🔄 Forward Pass Benchmark Results", top_k
-            )
+        if namespace not in namespaces:
+            print(f"\nNamespace not found: '{namespace}'")
+            print("Available namespaces:")
+            for name in sorted(namespaces.keys()):
+                print(f"  - {name}")
+            print(f"{'='*60}")
+            return
 
-        # Pretty print backward results
-        if show_backward:
-            pretty_print_benchmark_results(
-                backward_results, "⏪ Backward Pass Benchmark Results", top_k
-            )
-
+        # Show details for selected namespace
+        results = generic_benchmark_get_namespace(namespace)
+        pretty_print_benchmark_results(results, f"Namespace: {namespace}", top_k)
         print(f"\n{'='*60}")
         print("Inspection complete.")
         print(f"{'='*60}")
-
     except Exception as e:
         print(f"Error loading cache: {e}")
 
 
-def search_cache(
-    pattern: str, top_k: int = None, show_forward: bool = True, show_backward: bool = True
-) -> None:
-    """Search for configurations matching a pattern."""
-    forward_results, backward_results = load_sparse_conv_benchmark_cache()
-
-    print(f"\nSearching for configurations containing: '{pattern}'")
-    if top_k == 1:
-        print("(Showing only best results)")
-    elif top_k is not None:
-        print(f"(Showing top {top_k} results)")
+def search_cache(pattern: str, namespace: str | None = None) -> None:
+    """Search namespaces or configurations matching a pattern."""
+    print(f"\nSearching for: '{pattern}'")
     print(f"{'='*50}")
 
-    # Helper function to sort configurations
-    def get_sort_key(config_key):
-        config_str = str(config_key)
+    if namespace is None:
+        # Search namespace names
+        namespaces = load_generic_benchmark_cache()
+        matched = [name for name in namespaces.keys() if pattern.lower() in name.lower()]
+        if matched:
+            print(f"Matching namespaces ({len(matched)}):")
+            for i, name in enumerate(sorted(matched), 1):
+                print(f"  {i}. {name} ({len(namespaces.get(name, {}))} entry(ies))")
+        else:
+            print("No matching namespaces found.")
+        return
 
-        # Default values if parsing fails
-        in_channels = 999999
-        out_channels = 999999
-
-        if "SpatiallySparseConvConfig" in config_str:
-            try:
-                params_str = config_str.replace("SpatiallySparseConvConfig(", "").replace(")", "")
-                parts = params_str.split(", ")
-
-                for part in parts:
-                    if "=" in part:
-                        key, value = part.split("=", 1)
-                        key = key.strip()
-                        value = value.strip()
-
-                        if key == "in_channels":
-                            in_channels = int(value)
-                        elif key == "out_channels":
-                            out_channels = int(value)
-            except (ValueError, IndexError):
-                pass
-
-        return (in_channels, out_channels)
-
-    # Search forward results
-    if show_forward:
-        forward_matches = {
-            k: v for k, v in forward_results.items() if pattern.lower() in str(k).lower()
-        }
-        if forward_matches:
-            print(f"\n🔄 Forward Pass Matches ({len(forward_matches)}):")
-            # Sort the matches
-            sorted_forward_matches = sorted(forward_matches.keys(), key=get_sort_key)
-            for i, config_key in enumerate(sorted_forward_matches, 1):
-                config_str = str(config_key)
-                if len(config_str) > 80:
-                    # Truncate long config strings for search results
-                    config_str = config_str[:77] + "..."
-                print(f"  {i}. {config_str}")
-
-    # Search backward results
-    if show_backward:
-        backward_matches = {
-            k: v for k, v in backward_results.items() if pattern.lower() in str(k).lower()
-        }
-        if backward_matches:
-            print(f"\n⏪ Backward Pass Matches ({len(backward_matches)}):")
-            # Sort the matches
-            sorted_backward_matches = sorted(backward_matches.keys(), key=get_sort_key)
-            for i, config_key in enumerate(sorted_backward_matches, 1):
-                config_str = str(config_key)
-                if len(config_str) > 80:
-                    # Truncate long config strings for search results
-                    config_str = config_str[:77] + "..."
-                print(f"  {i}. {config_str}")
-
-    if show_forward and show_backward:
-        if not forward_matches and not backward_matches:
-            print("No matches found.")
-    elif show_forward:
-        if not forward_matches:
-            print("No forward matches found.")
-    elif show_backward:
-        if not backward_matches:
-            print("No backward matches found.")
+    # Search within a specific namespace's keys
+    ns_map = generic_benchmark_get_namespace(namespace)
+    matches = [k for k in ns_map.keys() if pattern.lower() in str(k).lower()]
+    if matches:
+        print(f"Matches in '{namespace}' ({len(matches)}):")
+        for i, k in enumerate(matches, 1):
+            k_str = str(k)
+            if len(k_str) > 100:
+                k_str = k_str[:97] + "..."
+            print(f"  {i}. {k_str}")
+    else:
+        print(f"No matches found in namespace '{namespace}'.")
 
 
 if __name__ == "__main__":
@@ -367,30 +338,21 @@ if __name__ == "__main__":
             print("Error: --top-k requires a valid integer argument")
             sys.exit(1)
 
-    forward_only = "--forward-only" in sys.argv
-    if forward_only:
-        sys.argv.remove("--forward-only")
+    # Extract optional namespace=<name>
+    namespace = None
+    for arg in list(sys.argv[1:]):
+        if arg.startswith("namespace="):
+            namespace = arg.split("=", 1)[1].strip()
+            sys.argv.remove(arg)
+            break
 
-    backward_only = "--backward-only" in sys.argv
-    if backward_only:
-        sys.argv.remove("--backward-only")
-
-    # Determine what to show
-    show_forward = True
-    show_backward = True
-
-    if forward_only and backward_only:
-        print("Error: Cannot specify both --forward-only and --backward-only")
-        sys.exit(1)
-    elif forward_only:
-        show_backward = False
-    elif backward_only:
-        show_forward = False
-
-    if len(sys.argv) > 1:
-        # Search mode
-        pattern = " ".join(sys.argv[1:])
-        search_cache(pattern, top_k, show_forward, show_backward)
+    # If there are leftover args after removing known flags, treat them as a search query
+    leftover_args = sys.argv[1:]
+    if leftover_args:
+        # First, show tree and then search either namespaces or within provided namespace
+        load_and_inspect_cache(top_k=None, namespace=None)
+        pattern = " ".join(leftover_args)
+        search_cache(pattern, namespace)
     else:
-        # Full inspection mode
-        load_and_inspect_cache(top_k, show_forward, show_backward)
+        # Show tree, and optionally the selected namespace details
+        load_and_inspect_cache(top_k, namespace)
