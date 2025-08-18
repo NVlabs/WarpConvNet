@@ -319,7 +319,7 @@ class GenericBenchmarkCache(Generic[K, V]):
             self.last_save_time = current_time
             self.pending_changes = False
             total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
-            logger.debug(
+            logger.info(
                 f"Background saved generic benchmark cache: {len(self._results)} namespaces, {total_entries} total entries"
             )
         except Exception as e:
@@ -339,11 +339,14 @@ class GenericBenchmarkCache(Generic[K, V]):
                 )
                 return {}
 
-            major_version, minor_version = _parse_version_to_major_minor(
+            file_major, file_minor = _parse_version_to_major_minor(
                 cache_data.get("version", "1.0")
             )
+            expected_major, expected_minor = _parse_version_to_major_minor(
+                WARPCONVNET_BENCHMARK_CACHE_VERSION
+            )
 
-            if int(major_version) == 3:
+            if int(file_major) == int(expected_major):
                 namespaces = cache_data.get("namespaces", {})
                 if not isinstance(namespaces, dict):
                     logger.warning(
@@ -353,7 +356,7 @@ class GenericBenchmarkCache(Generic[K, V]):
                 return namespaces
             else:
                 logger.warning(
-                    f"Loaded generic benchmark cache v{major_version}.{minor_version}, but expected v3.0. Deleting cache and resetting."
+                    f"Loaded generic benchmark cache v{file_major}.{file_minor}, but expected v{expected_major}.{expected_minor}. Deleting cache and resetting."
                 )
                 return {}
         except Exception as e:
@@ -422,7 +425,7 @@ class GenericBenchmarkCache(Generic[K, V]):
                 self.last_save_time = current_time
                 self.pending_changes = False
                 total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
-                logger.debug(
+                logger.info(
                     f"Force saved generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {len(self._results)} namespaces, {total_entries} total entries"
                 )
             except Exception as e:
