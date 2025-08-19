@@ -7,6 +7,8 @@ from typing import Optional, Mapping
 import torch
 import torch.distributed as dist
 
+from warpconvnet.utils.dist import _get_current_rank
+
 
 class ColorFormatter(logging.Formatter):
     """Custom formatter with colors"""
@@ -20,10 +22,20 @@ class ColorFormatter(logging.Formatter):
     }
     RESET = "\033[0m"
 
+    def __init__(self, fmt=None, datefmt=None, include_rank=False):
+        super().__init__(fmt, datefmt)
+        self.include_rank = include_rank
+
     def format(self, record):
         # Add color to the level name
         color = self.COLORS.get(record.levelname, "")
         record.levelname = f"{color}{record.levelname}{self.RESET}"
+
+        # Add rank if needed
+        if self.include_rank and hasattr(record, "rank"):
+            record.rank_prefix = f"[Rank {record.rank}] "
+        else:
+            record.rank_prefix = ""
 
         return super().format(record)
 
@@ -41,12 +53,12 @@ class RankedLogger(logging.LoggerAdapter):
         logger = logging.getLogger(name)
         super().__init__(logger=logger, extra=extra)
         self.rank_zero_only = rank_zero_only
-        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        self.rank = _get_current_rank()  # Use consistent rank detection
 
     def log(self, level: int, msg: str, rank: Optional[int] = None, *args, **kwargs) -> None:
         if self.isEnabledFor(level):
             msg, kwargs = self.process(msg, kwargs)
-            current_rank = self.rank
+            current_rank = _get_current_rank()  # Get rank dynamically for accuracy
             # Determine how many additional stack frames to skip so that the
             # reported filename and line number correspond to the original
             # caller (the user code) rather than this wrapper.
@@ -55,6 +67,11 @@ class RankedLogger(logging.LoggerAdapter):
             #   user code -> RankedLogger.<level>() -> RankedLogger.log() -> logging.Logger.log()
             # we need to skip two extra frames to reach the user code.
             stacklevel = kwargs.pop("stacklevel", 1) + 2
+
+            # Add rank info to extra for formatting
+            extra = kwargs.get("extra") or {}
+            extra["rank"] = current_rank
+            kwargs["extra"] = extra
 
             if self.rank_zero_only:
                 if current_rank == 0:
@@ -89,10 +106,11 @@ def get_logger(name: str = None, rank_zero_only: bool = True) -> RankedLogger:
         # Create stderr handler
         handler = logging.StreamHandler(sys.stderr)
 
-        # Format: [LEVEL] filename:line - message
+        # Format: [LEVEL] filename:line - message (with optional rank prefix)
         formatter = ColorFormatter(
-            fmt="[%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+            fmt="%(rank_prefix)s[%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
+            include_rank=not rank_zero_only,
         )
 
         handler.setFormatter(formatter)

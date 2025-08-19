@@ -19,12 +19,18 @@ def _dtype_name(dtype: torch.dtype) -> str:
     return s.split(".")[-1] if "." in s else s
 
 
-def _device_sm_dtype_key(*tensors: torch.Tensor) -> Tuple[int, Tuple[int, int], str]:
+def _sm_dtype_key(*tensors: torch.Tensor) -> Tuple[Tuple[int, int], str]:
+    """Device-agnostic version that only includes SM capability and dtype.
+
+    This allows cache sharing between identical GPUs in multi-GPU setups,
+    since the performance characteristics should be the same.
+    """
     dev = tensors[0].device.index if tensors else torch.cuda.current_device()
     sm = torch.cuda.get_device_capability(dev)
-    # Use first tensor's dtype as representative; ops below are homogeneous dtypes by design
     dtype = _dtype_name(tensors[0].dtype) if tensors else _dtype_name(torch.float16)
-    return dev, sm, dtype
+    # Returns (sm_major, sm_minor), dtype_str), e.g., ((8, 6), 'bfloat16')
+    # Device index is excluded for cache sharing between identical GPUs
+    return sm, dtype
 
 
 def _key_trAB_gather(
@@ -41,7 +47,7 @@ def _key_trAB_gather(
     alpha: float = 1.0,
     beta: float = 1.0,
 ) -> Tuple[Any, ...]:
-    dev, sm, dtype = _device_sm_dtype_key(tensor_a)
+    sm, dtype = _sm_dtype_key(tensor_a)
     # Shapes: A[M_A, K], B[M_B, N], output K x N
     # Keep channel sizes exact (K, N); bucket indices length in log2 space
     _, K = tensor_a.shape
@@ -52,7 +58,6 @@ def _key_trAB_gather(
     log_len_b = int(math.ceil(math.log2(len_b))) if len_b > 0 else 0
     return (
         "cutlass_gemm_trAB_gather",
-        dev,
         sm,
         dtype,
         _dtype_name(accumulator_type),
@@ -77,7 +82,7 @@ def _key_AD_gather_scatter(
     alpha: float = 1.0,
     beta: float = 1.0,
 ) -> Tuple[Any, ...]:
-    dev, sm, dtype = _device_sm_dtype_key(tensor_a)
+    sm, dtype = _sm_dtype_key(tensor_a)
     # Shapes: A[M, K], B[K, N], output D[out_size, N]
     _, K = tensor_a.shape
     K2, N = tensor_b.shape
@@ -89,7 +94,6 @@ def _key_AD_gather_scatter(
     # Keep channel sizes exact (K, N); indices lengths in log2 space
     return (
         "cutlass_gemm_AD_gather_scatter",
-        dev,
         sm,
         dtype,
         _dtype_name(accumulator_type),

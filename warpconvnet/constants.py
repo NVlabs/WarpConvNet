@@ -138,6 +138,12 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
 
 WARPCONVNET_BENCHMARK_CACHE_VERSION = 4.0
 
+# Additional cache directory for explicit override (useful for debugging multi-GPU issues)
+# If set, this takes precedence over the default cache directory
+WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE = os.environ.get(
+    "WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE"
+)
+
 # --- Types ---
 
 # --- Functions ---

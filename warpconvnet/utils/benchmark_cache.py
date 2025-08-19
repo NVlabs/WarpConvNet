@@ -18,29 +18,15 @@ import torch
 from warpconvnet.constants import (
     WARPCONVNET_BENCHMARK_CACHE_DIR,
     WARPCONVNET_BENCHMARK_CACHE_VERSION,
+    WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE,
 )
 from warpconvnet.utils.logger import get_logger
+from warpconvnet.utils.dist import _get_current_rank, _is_rank_zero
 
-logger = get_logger(__name__)
-
-
-def _get_current_rank() -> int:
-    """Get current process rank for distributed training."""
-    # Check common distributed training environment variables
-    if "RANK" in os.environ:
-        return int(os.environ["RANK"])
-    elif "LOCAL_RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        return int(os.environ["LOCAL_RANK"])
-    elif "SLURM_PROCID" in os.environ:
-        return int(os.environ["SLURM_PROCID"])
-    else:
-        # Not in distributed mode or rank 0
-        return 0
+logger = get_logger(__name__, rank_zero_only=False)
 
 
-def _is_rank_zero() -> bool:
-    """Check if current process is rank 0."""
-    return _get_current_rank() == 0
+# Rank detection is now handled by the dist module
 
 
 def _int_sequence_hash(arr: Sequence[int]) -> int:  # noqa: F821
@@ -206,9 +192,36 @@ class GenericBenchmarkCache(Generic[K, V]):
     """
 
     def __init__(self, cache_dir: str = WARPCONVNET_BENCHMARK_CACHE_DIR):
-        self.cache_dir = Path(cache_dir).expanduser()
+        # Use override cache directory if available (for debugging multi-GPU issues)
+        if WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE:
+            cache_dir = WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE
+            logger.debug(f"Using override cache directory: {cache_dir}")
+
+        self.cache_dir = Path(cache_dir).expanduser().resolve()  # Resolve symlinks
         self.cache_file = self.cache_dir / "benchmark_cache_generic.pkl"
         self.lock = threading.Lock()
+
+        # Only log essential cache initialization info
+        current_rank = _get_current_rank()
+        if self.cache_file.exists():
+            total_entries = 0
+            try:
+                with open(self.cache_file, "rb") as f:
+                    cache_data = pickle.load(f)
+                    if isinstance(cache_data, dict) and "namespaces" in cache_data:
+                        namespaces = cache_data["namespaces"]
+                        total_entries = sum(len(ns_dict) for ns_dict in namespaces.values())
+                logger.info(
+                    f"[Rank {current_rank}] Loaded benchmark cache: {total_entries} entries from {self.cache_file}"
+                )
+            except Exception:
+                logger.info(
+                    f"[Rank {current_rank}] Found cache file but failed to read: {self.cache_file}"
+                )
+        else:
+            logger.info(
+                f"[Rank {current_rank}] No existing cache found, will create: {self.cache_file}"
+            )
 
         # In-memory accumulated results to be flushed by background saver
         # Preload existing cache to reduce risk of overwriting cross-process writes
@@ -232,13 +245,19 @@ class GenericBenchmarkCache(Generic[K, V]):
         # Preload from disk
         try:
             self._results = self.load_cache()
-        except Exception:
+            total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
+            logger.debug(
+                f"[Rank {current_rank}] Loaded cache: {len(self._results)} namespaces, {total_entries} total entries"
+            )
+        except Exception as e:
+            logger.debug(f"[Rank {current_rank}] Failed to load cache: {e}")
             self._results = {}
 
         # Start background save thread only for rank 0
         if _is_rank_zero():
             self._start_background_saver()
             atexit.register(self._save_on_exit)
+            logger.debug(f"[Rank {current_rank}] Started background saver (rank 0)")
 
     def register_value_validator(self, namespace: str, validator: Callable[[V], None]) -> None:
         """Register a validator for a namespace. Validator should raise ValueError/TypeError on invalid value."""
@@ -458,8 +477,21 @@ class GenericBenchmarkCache(Generic[K, V]):
             pass
 
         # Fallback to disk for cross-process visibility when in-memory is empty
+        logger.debug(f"Loading from disk for namespace '{namespace}'")
         namespaces = self.load_cache()
-        return namespaces.get(namespace, {})
+        result = namespaces.get(namespace, {})
+
+        if result:
+            logger.debug(f"Cache hit on disk for namespace '{namespace}': {len(result)} entries")
+            # Update in-memory cache with disk results for future fast access
+            with self.lock:
+                if namespace not in self._results:
+                    self._results[namespace] = {}
+                self._results[namespace].update(result)
+        else:
+            logger.debug(f"Cache miss for namespace '{namespace}'")
+
+        return result
 
     def mark_dirty(self) -> None:
         if not _is_rank_zero():
@@ -703,8 +735,8 @@ def make_autotuned_op(
                 return c_fn(*args, **kwargs, **filtered)
             else:
                 # Unexpected format; fall through to benchmarking to refresh entry
-                logger.debug(
-                    f"Cache entry for namespace '{namespace}' key '{key}' has unexpected format; re-benchmarking."
+                logger.warning(
+                    f"Cache entry has unexpected format, re-benchmarking: namespace='{namespace}'"
                 )
 
         # Cache miss
@@ -724,7 +756,8 @@ def make_autotuned_op(
         if len(candidates) == 0:
             raise ValueError("param_space is empty for autotuned op")
 
-        logger.debug(f"Benchmarking {namespace} {key}")
+        # Only log benchmarking for important operations
+        logger.debug(f"Benchmarking {namespace} ({len(candidates)} candidates)")
         for cand in candidates:
             metric = timing_fn(cand, args, kwargs)
             if isinstance(metric, int):
@@ -752,8 +785,11 @@ def make_autotuned_op(
             reverse = True if select_best == "max" else False
             all_results.sort(key=lambda r: r["metric"], reverse=reverse)
             cache.update_entry(namespace, key, all_results, force=False)
+            logger.debug(
+                f"Cached best result for {namespace}: {best_candidate} ({best_metric:.2f}ms)"
+            )
         except Exception as e:
-            logger.debug(f"Failed to update generic benchmark cache for {namespace}: {e}")
+            logger.warning(f"Failed to update benchmark cache for {namespace}: {e}")
 
         return c_fn(*args, **kwargs, **best_candidate)
 
