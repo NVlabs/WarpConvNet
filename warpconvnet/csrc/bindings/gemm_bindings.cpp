@@ -1,6 +1,9 @@
 // Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 // SPDX-License-Identifier: Apache-2.0
 
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cutlass/arch/arch.h>
 #include <cutlass/numeric_types.h>
@@ -14,6 +17,27 @@
 #include "../include/gemm_mma_tiles.h"
 
 namespace py = pybind11;
+
+// Forward declare WMMA SM80 run helper (templated) implemented in CUDA
+namespace warpconvnet {
+namespace wmma_implicit_gemm_sm80 {
+template <typename ElementInput, typename ElementOutput>
+int run(const void *A,
+        const void *B,
+        const void *C,
+        void *D,
+        const long *a_inds,
+        const long *d_inds,
+        int M,
+        int K,
+        int N,
+        int P,
+        int Q,
+        float alpha,
+        float beta,
+        cudaStream_t stream);
+}  // namespace wmma_implicit_gemm_sm80
+}  // namespace warpconvnet
 
 // Forward declarations for CUDA kernels and GEMM launchers in their namespaces
 namespace warpconvnet {
@@ -819,6 +843,132 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
   return status;
 }
 
+// Public API function instead of lambda
+int wmma_implicit_gemm_sm80(torch::Tensor tensor_a,
+                            torch::Tensor tensor_b,
+                            torch::Tensor tensor_c,
+                            torch::Tensor tensor_d,
+                            torch::Tensor indices_a,
+                            torch::Tensor indices_d,
+                            float alpha,
+                            float beta) {
+  TORCH_CHECK(tensor_a.dim() == 2 && tensor_b.dim() == 2 && tensor_d.dim() == 2,
+              "tensor_a, tensor_b, and tensor_d must be 2D");
+  if (beta != 0.0f) {
+    TORCH_CHECK(tensor_c.dim() == 2, "tensor_c must be 2D when beta != 0");
+  }
+  TORCH_CHECK(indices_a.dim() == 1 && indices_d.dim() == 1, "indices_a and indices_d must be 1D");
+  TORCH_CHECK(tensor_a.is_cuda() && tensor_b.is_cuda() && tensor_d.is_cuda() &&
+                  indices_a.is_cuda() && indices_d.is_cuda(),
+              "A, B, D, indices_a, and indices_d must be CUDA tensors");
+  if (beta != 0.0f) {
+    TORCH_CHECK(tensor_c.is_cuda(), "C must be CUDA tensor when beta != 0");
+  }
+  tensor_a = tensor_a.contiguous();
+  tensor_b = tensor_b.contiguous();
+  if (beta != 0.0f) tensor_c = tensor_c.contiguous();
+  tensor_d = tensor_d.contiguous();
+  indices_a = indices_a.contiguous();
+  indices_d = indices_d.contiguous();
+
+  int64_t M = tensor_a.size(0);
+  int64_t K = tensor_a.size(1);
+  int64_t N = tensor_b.size(1);
+  TORCH_CHECK(tensor_b.size(0) == K, "B.rows must equal A.cols");
+  if (beta != 0.0f) {
+    TORCH_CHECK(tensor_c.size(0) == M && tensor_c.size(1) == N, "C must be [M,N]");
+  }
+  int64_t Q = tensor_d.size(0);
+  TORCH_CHECK(tensor_d.size(1) == N, "D must be [Q,N]");
+  int64_t P = indices_a.size(0);
+  TORCH_CHECK(indices_d.size(0) == P, "indices_a and indices_d must have same length");
+
+  if (indices_a.scalar_type() != torch::kInt64) indices_a = indices_a.to(torch::kInt64);
+  if (indices_d.scalar_type() != torch::kInt64) indices_d = indices_d.to(torch::kInt64);
+
+  const void *Aptr = tensor_a.data_ptr();
+  const void *Bptr = tensor_b.data_ptr();
+  const void *Cptr = (beta == 0.0f) ? nullptr : tensor_c.data_ptr();
+  void *Dptr = tensor_d.data_ptr();
+  const long *a_inds_ptr = indices_a.data_ptr<long>();
+  const long *d_inds_ptr = indices_d.data_ptr<long>();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto dtA = tensor_a.scalar_type();
+  auto dtB = tensor_b.scalar_type();
+  auto dtD = tensor_d.scalar_type();
+  TORCH_CHECK(dtA == dtB, "A and B dtypes must match");
+
+  int status = 0;
+  if (dtA == torch::kFloat16 && dtD == torch::kFloat32) {
+    status = ::warpconvnet::wmma_implicit_gemm_sm80::run<half, float>(Aptr,
+                                                                      Bptr,
+                                                                      Cptr,
+                                                                      Dptr,
+                                                                      a_inds_ptr,
+                                                                      d_inds_ptr,
+                                                                      (int)M,
+                                                                      (int)K,
+                                                                      (int)N,
+                                                                      (int)P,
+                                                                      (int)Q,
+                                                                      alpha,
+                                                                      beta,
+                                                                      stream);
+  } else if (dtA == torch::kFloat16 && dtD == torch::kFloat16) {
+    status = ::warpconvnet::wmma_implicit_gemm_sm80::run<half, half>(Aptr,
+                                                                     Bptr,
+                                                                     Cptr,
+                                                                     Dptr,
+                                                                     a_inds_ptr,
+                                                                     d_inds_ptr,
+                                                                     (int)M,
+                                                                     (int)K,
+                                                                     (int)N,
+                                                                     (int)P,
+                                                                     (int)Q,
+                                                                     alpha,
+                                                                     beta,
+                                                                     stream);
+#ifndef DISABLE_BFLOAT16
+  } else if (dtA == torch::kBFloat16 && dtD == torch::kFloat32) {
+    status = ::warpconvnet::wmma_implicit_gemm_sm80::run<nv_bfloat16, float>(Aptr,
+                                                                             Bptr,
+                                                                             Cptr,
+                                                                             Dptr,
+                                                                             a_inds_ptr,
+                                                                             d_inds_ptr,
+                                                                             (int)M,
+                                                                             (int)K,
+                                                                             (int)N,
+                                                                             (int)P,
+                                                                             (int)Q,
+                                                                             alpha,
+                                                                             beta,
+                                                                             stream);
+  } else if (dtA == torch::kBFloat16 && dtD == torch::kBFloat16) {
+    status = ::warpconvnet::wmma_implicit_gemm_sm80::run<nv_bfloat16, nv_bfloat16>(Aptr,
+                                                                                   Bptr,
+                                                                                   Cptr,
+                                                                                   Dptr,
+                                                                                   a_inds_ptr,
+                                                                                   d_inds_ptr,
+                                                                                   (int)M,
+                                                                                   (int)K,
+                                                                                   (int)N,
+                                                                                   (int)P,
+                                                                                   (int)Q,
+                                                                                   alpha,
+                                                                                   beta,
+                                                                                   stream);
+#endif
+  } else {
+    TORCH_CHECK(false, "Unsupported dtype combination for WMMA SM80");
+  }
+  TORCH_CHECK(status == 0, "WMMA SM80 run failed");
+  return status;
+}
+
 void register_gemm(py::module_ &m) {
   py::module_ gemm = m.def_submodule(
       "gemm", "CUTLASS GEMM with gather/scatter operations supporting multiple precisions");
@@ -889,6 +1039,21 @@ void register_gemm(py::module_ &m) {
            py::arg("indices_b"),
            py::arg("split_k_factor") = 4,
            py::arg("block_size") = 16);
+
+  // Thin dispatcher that mirrors other CUTLASS-style helpers
+  gemm.def("wmma_implicit_gemm_sm80",
+           &wmma_implicit_gemm_sm80,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_d"),
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 0.0f,
+           "SM80 WMMA implicit GEMM with gather/scatter and CBLAS-style alpha/beta epilogue."
+           " Skips loading C when beta == 0."
+           "Default alpha = 1.0, beta = 0.0.");
 }
 
 }  // namespace bindings
