@@ -384,7 +384,12 @@ class GenericBenchmarkCache(Generic[K, V]):
             )
             return {}
 
-    def save_cache(self, cache_results: Dict[str, Dict[K, V]], force: bool = False) -> None:
+    def save_cache(
+        self,
+        cache_results: Dict[str, Dict[K, V]],
+        force: bool = False,
+        suppress_logging: bool = False,
+    ) -> None:
         if not _is_rank_zero():
             return
         if not force:
@@ -444,13 +449,15 @@ class GenericBenchmarkCache(Generic[K, V]):
                 self.last_save_time = current_time
                 self.pending_changes = False
                 total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
-                logger.info(
-                    f"Force saved generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {len(self._results)} namespaces, {total_entries} total entries"
-                )
+                if not suppress_logging:
+                    logger.info(
+                        f"Force saved generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {len(self._results)} namespaces, {total_entries} total entries"
+                    )
             except Exception as e:
-                logger.warning(
-                    f"Failed to force save generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
-                )
+                if not suppress_logging:
+                    logger.warning(
+                        f"Failed to force save generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
+                    )
 
     def update_entry(self, namespace: str, key: K, value: V, force: bool = False) -> None:
         if not _is_rank_zero():
@@ -507,7 +514,7 @@ class GenericBenchmarkCache(Generic[K, V]):
         if self._save_thread is not None:
             self._save_thread.join(timeout=5.0)
         if self.pending_changes:
-            self.save_cache(self._results, force=True)
+            self.save_cache(self._results, force=True, suppress_logging=True)
 
 
 # Global generic cache instance

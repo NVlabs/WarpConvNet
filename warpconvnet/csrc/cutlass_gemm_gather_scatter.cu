@@ -466,8 +466,8 @@ int run_cutlass_gemm_with_operations_templated(
 }  // namespace gemm
 }  // namespace warpconvnet
 
-// Use the namespace for convenience in the rest of the file
-using namespace warpconvnet::gemm;
+namespace warpconvnet {
+namespace gemm {
 
 // Helper function for AD gather scatter
 template <typename ElementInputA,
@@ -565,6 +565,7 @@ int run_cutlass_gemm_trAB_gather(const void *tensor_a,
       beta);
 }
 
+// Instantiate all configurations inside the warpconvnet::gemm namespace
 // Instantiate all configurations for the default architecture (SM80 Tile128x128x32)
 INSTANTIATE_AD_GS_FOR_ARCH(Tile128x128x32, DefaultSmArch)
 INSTANTIATE_TRAB_FOR_ARCH(Tile128x128x32, DefaultSmArch)
@@ -578,3 +579,6 @@ INSTANTIATE_TRAB_FOR_ARCH(Tile64x128x32, DefaultSmArch)
 
 INSTANTIATE_AD_GS_FOR_ARCH(Tile64x64x32, DefaultSmArch)
 INSTANTIATE_TRAB_FOR_ARCH(Tile64x64x32, DefaultSmArch)
+
+}  // namespace gemm
+}  // namespace warpconvnet

@@ -73,13 +73,18 @@ nvcc_args = [
     "--expt-relaxed-constexpr",
     "--expt-extended-lambda",
     "-DWITH_CUDA",
-    "-arch=sm_80",  # Adjust based on your GPU architecture
-    "-gencode=arch=compute_80,code=sm_80",
-    "-gencode=arch=compute_86,code=sm_86",
-    "-gencode=arch=compute_89,code=sm_89",
+    # Intentionally omit -gencode/-arch flags. PyTorch will inject these
+    # based on TORCH_CUDA_ARCH_LIST or its internal defaults.
     "--allow-unsupported-compiler",
     "--compiler-options=-fpermissive,-w",
 ]
+
+# Informative log about TORCH_CUDA_ARCH_LIST usage
+cuda_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
+if cuda_arch_list:
+    print(f"TORCH_CUDA_ARCH_LIST detected: {cuda_arch_list}")
+else:
+    print("TORCH_CUDA_ARCH_LIST not set; using PyTorch default arch list")
 
 # Check DISABLE_BFLOAT16
 if os.environ.get("DISABLE_BFLOAT16", "0") == "1":
@@ -99,6 +104,9 @@ ext_modules = [
         name="warpconvnet._C",
         sources=[
             "warpconvnet/csrc/warpconvnet_pybind.cpp",
+            "warpconvnet/csrc/bindings/gemm_bindings.cpp",
+            "warpconvnet/csrc/bindings/fma_bindings.cpp",
+            "warpconvnet/csrc/bindings/utils_bindings.cpp",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter.cu",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter_sm80_fp32.cu",
             "warpconvnet/csrc/cub_sort.cu",
