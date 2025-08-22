@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 from pytest_benchmark.fixture import BenchmarkFixture
 
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
@@ -15,21 +14,6 @@ from warpconvnet.geometry.coords.search.warp_discrete import (
 )
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
-from warpconvnet.utils.timer import Timer
-
-
-@pytest.fixture
-def setup_voxels():
-    """Setup test voxels with random coordinates and features."""
-    wp.init()
-    device = torch.device("cuda:0")
-    B, min_N, max_N, C = 3, 100000, 1000000, 7
-    Ns = torch.randint(min_N, max_N, (B,))
-    coords = [torch.rand((N, 3)) for N in Ns]
-    features = [torch.rand((N, C)) for N in Ns]
-    voxel_size = 0.025
-    voxel_coords = [torch.floor(coords / voxel_size).int() for coords in coords]
-    return Voxels(voxel_coords, features, device=device).unique()
 
 
 def test_kernel_map_from_offset(setup_voxels):

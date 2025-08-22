@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
 from warpconvnet.geometry.coords.ops.stride import stride_coords
@@ -30,36 +29,6 @@ from warpconvnet.nn.functional.sparse_conv import (
 )
 from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
-
-
-@pytest.fixture
-def setup_voxels():
-    """Setup test voxels with random coordinates."""
-    wp.init()
-    torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    B, min_N, max_N, C = 3, 100000, 1000000, 16
-    Ns = torch.randint(min_N, max_N, (B,))
-    voxel_size = 0.01
-    coords = [(torch.rand((N, 3)) / voxel_size).int() for N in Ns]
-    features = [torch.rand((N, C)) for N in Ns]
-    return Voxels(coords, features, device=device).unique()
-
-
-@pytest.fixture
-def setup_small_voxels():
-    """Setup small voxels for gradient checking."""
-    wp.init()
-    torch.manual_seed(0)
-    device = torch.device("cuda:0")
-
-    B, min_N, max_N, C = 3, 10, 20, 7
-    Ns = torch.randint(min_N, max_N, (B,))
-    voxel_size = 0.2
-    coords = [(torch.rand((N, 3)) / voxel_size).int() for N in Ns]
-    features = [torch.rand((N, C)) for N in Ns]
-    return Voxels(coords, features, device=device).unique()
 
 
 def test_generate_output_coords(setup_voxels):

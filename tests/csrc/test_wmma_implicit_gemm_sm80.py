@@ -8,19 +8,7 @@ import torch
 
 import warpconvnet._C as _C
 
-
-def _randn_clamped(shape, dtype, device, scale=0.1):
-    return torch.clamp(torch.randn(shape, dtype=dtype, device=device) * scale, -scale, scale)
-
-
-def _rand_indices(size, indices_size, device):
-    return torch.sort(torch.randperm(size, device=device)[:indices_size], dim=0)[0].long()
-
-
-def _compare_results(result_auto, d_ref):
-    all_diff = torch.abs(result_auto.to(torch.float32) - d_ref.to(torch.float32))
-    max_diff = all_diff.max().item()
-    print(f"Max abs diff: {max_diff}")
+from ..common import rand_clamped, rand_indices, compare_results
 
 
 @pytest.mark.parametrize(
@@ -44,12 +32,12 @@ def test_wmma_implicit_gemm_sm80(N, C_in, C_out, indices_ratio, in_dtype, out_dt
     Q = N
 
     # Indices
-    indices_a = _rand_indices(M, P, "cuda")
-    indices_d = _rand_indices(Q, P, "cuda")
+    indices_a = rand_indices(M, P, "cuda")
+    indices_d = rand_indices(Q, P, "cuda")
 
     # Inputs
-    A = _randn_clamped((M, K), in_dtype, "cuda")
-    B = _randn_clamped((K, C_out), in_dtype, "cuda")
+    A = rand_clamped((M, K), in_dtype, "cuda", distribution="normal")
+    B = rand_clamped((K, C_out), in_dtype, "cuda", distribution="normal")
     C = torch.zeros((M, C_out), dtype=in_dtype, device="cuda")
 
     # Output
@@ -67,11 +55,11 @@ def test_wmma_implicit_gemm_sm80(N, C_in, C_out, indices_ratio, in_dtype, out_dt
     D_ref = torch.zeros_like(D)
     D_ref[indices_d] = prod
 
-    _compare_results(D, D_ref)
+    compare_results(D, D_ref)
 
     # Accumulation test: call again with beta=0, should add a second copy of prod
     status = _C.gemm.wmma_implicit_gemm_sm80(A, B, C, D, indices_a, indices_d, 1.0, 0.0)
     torch.cuda.synchronize()
     assert status == 0
     D_ref[indices_d] += prod
-    _compare_results(D, D_ref)
+    compare_results(D, D_ref)

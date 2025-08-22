@@ -20,45 +20,18 @@ import torch
 
 import warpconvnet._C as _C
 
-
-def compare_results(result_auto, d_ref, indices_d):
-    # Check all results are finite
-    if not torch.all(torch.isfinite(result_auto)) or not torch.all(torch.isfinite(d_ref)):
-        print("❌ Results contain NaNs or Infs!")
-
-    all_diff = torch.abs(result_auto - d_ref)
-    max_diff_idx = torch.argmax(all_diff)
-    max_diff = all_diff.view(-1)[max_diff_idx]
-
-    rel_diff = torch.abs((result_auto - d_ref) / (d_ref + 1e-6))
-    max_rel_diff_idx = torch.argmax(rel_diff)
-    max_rel_diff = rel_diff.view(-1)[max_rel_diff_idx]
-
-    print(
-        f"Max diff (all): {max_diff.item()} and value at max diff: {result_auto.view(-1)[max_diff_idx].item()}, {d_ref.view(-1)[max_diff_idx].item()}"
-    )
-    print(
-        f"Max rel diff (all): {max_rel_diff.item()} and value at max rel diff: {result_auto.view(-1)[max_rel_diff_idx].item()}, {d_ref.view(-1)[max_rel_diff_idx].item()}"
-    )
-
-
-def rand_clamped(shape, dtype, device, scale=0.1):
-    return torch.rand(shape, dtype=dtype, device=device) * scale
-
-
-def rand_indices(size, indices_size, device):
-    return torch.sort(torch.randperm(size, device=device)[:indices_size], dim=0)[0].int()
+from ..common import compare_results, rand_clamped, rand_indices
 
 
 @pytest.mark.parametrize(
     "N, C_a, C_b, indices_ratio, dtype",
     [
-        (2**14, 3, 16, 0.5, torch.float32),
-        (2**14, 3, 16, 0.5, torch.float16),
-        (2**14, 3, 16, 0.5, torch.bfloat16),
-        (2**20, 3, 16, 0.5, torch.float32),
-        (2**20, 3, 16, 0.5, torch.float16),
-        (2**20, 3, 16, 0.5, torch.bfloat16),
+        (2**14, 8, 16, 0.5, torch.float32),
+        (2**14, 8, 16, 0.5, torch.float16),
+        (2**14, 8, 16, 0.5, torch.bfloat16),
+        (2**20, 8, 16, 0.5, torch.float32),
+        (2**20, 8, 16, 0.5, torch.float16),
+        (2**20, 8, 16, 0.5, torch.bfloat16),
     ],
     ids=[
         "f32_small",
@@ -108,7 +81,7 @@ def test_split_k_implicit_gemm(N, C_a, C_b, indices_ratio, dtype):
         indices_a,
         indices_b,
         split_k_factor=4,
-        block_size=16,
+        block_size=256,
     )
     torch.cuda.synchronize()
     assert status == 0, f"Error in split_k_implicit_gemm: status {status}"
@@ -126,11 +99,7 @@ def test_split_k_implicit_gemm(N, C_a, C_b, indices_ratio, dtype):
     c_ref = tensor_c_original + torch.matmul(a_gathered.T, b_gathered)
 
     # Compare results
-    compare_results(tensor_c, c_ref, None)
-
-    # Check numerical accuracy
-    max_abs_diff = torch.max(torch.abs(tensor_c - c_ref)).item()
-    max_rel_diff = torch.max(torch.abs((tensor_c - c_ref) / (c_ref + 1e-6))).item()
+    max_abs_diff, max_rel_diff = compare_results(tensor_c, c_ref, verbose=False)
 
     # Set tolerance based on data type
     if dtype == torch.float32:

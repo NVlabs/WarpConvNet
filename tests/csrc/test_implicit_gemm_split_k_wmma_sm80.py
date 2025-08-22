@@ -20,33 +20,7 @@ import torch
 
 import warpconvnet._C as _C
 
-
-def compare_results(result_auto, d_ref):
-    if not torch.all(torch.isfinite(result_auto)) or not torch.all(torch.isfinite(d_ref)):
-        print("❌ Results contain NaNs or Infs!")
-
-    all_diff = torch.abs(result_auto - d_ref)
-    max_diff_idx = torch.argmax(all_diff)
-    max_diff = all_diff.view(-1)[max_diff_idx]
-
-    rel_diff = torch.abs((result_auto - d_ref) / (d_ref + 1e-6))
-    max_rel_diff_idx = torch.argmax(rel_diff)
-    max_rel_diff = rel_diff.view(-1)[max_rel_diff_idx]
-
-    print(
-        f"Max diff (all): {max_diff.item()} and value at max diff: {result_auto.view(-1)[max_diff_idx].item()}, {d_ref.view(-1)[max_diff_idx].item()}"
-    )
-    print(
-        f"Max rel diff (all): {max_rel_diff.item()} and value at max rel diff: {result_auto.view(-1)[max_rel_diff_idx].item()}, {d_ref.view(-1)[max_rel_diff_idx].item()}"
-    )
-
-
-def rand_clamped(shape, dtype, device, scale=0.1):
-    return torch.rand(shape, dtype=dtype, device=device) * scale
-
-
-def rand_indices(size, indices_size, device):
-    return torch.sort(torch.randperm(size, device=device)[:indices_size], dim=0)[0].int()
+from ..common import compare_results, rand_clamped, rand_indices
 
 
 @pytest.mark.parametrize(
@@ -116,10 +90,7 @@ def test_wmma_split_k_implicit_gemm(N, C_a, C_b, indices_ratio, dtype):
     # Cast reference to match output dtype
     c_ref = c_ref.to(tensor_c.dtype)
 
-    compare_results(tensor_c, c_ref)
-
-    max_abs_diff = torch.max(torch.abs(tensor_c - c_ref)).item()
-    max_rel_diff = torch.max(torch.abs((tensor_c - c_ref) / (c_ref + 1e-6))).item()
+    max_abs_diff, max_rel_diff = compare_results(tensor_c, c_ref, verbose=False)
 
     if tensor_c.dtype == torch.float32:
         # WMMA path multiplies with half-precision inputs; allow slightly higher tolerance
