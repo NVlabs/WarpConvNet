@@ -41,6 +41,19 @@ int run(const void *A,
 
 // Forward declarations for CUDA kernels and GEMM launchers in their namespaces
 namespace warpconvnet {
+namespace wmma_split_k_sm80 {
+template <typename ElementIn, typename ElementOut, typename Itype>
+int run_split_k_wmma_templated(const void *tensor_a,
+                               const void *tensor_b,
+                               void *tensor_c,
+                               const Itype *indices_a,
+                               const Itype *indices_b,
+                               int N,
+                               int C_a,
+                               int C_b,
+                               int K,
+                               int split_k_factor);
+}  // namespace wmma_split_k_sm80
 namespace implicit_gemm {
 template <typename ElementA, typename ElementB, typename ElementC, typename Itype>
 int run_implicit_gemm_templated(const void *tensor_a,
@@ -843,6 +856,93 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
   return status;
 }
 
+// WMMA SM80 split-K implicit GEMM
+int wmma_split_k_implicit_gemm_sm80(torch::Tensor a,
+                                    torch::Tensor b,
+                                    torch::Tensor c,
+                                    torch::Tensor indices_a,
+                                    torch::Tensor indices_b,
+                                    int split_k_factor) {
+  TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2, "a, b, and c must be 2D");
+  TORCH_CHECK(indices_a.dim() == 1 && indices_b.dim() == 1, "indices_a and indices_b must be 1D");
+  TORCH_CHECK(indices_a.scalar_type() == torch::kInt32 && indices_b.scalar_type() == torch::kInt32,
+              "indices_a and indices_b must be int32");
+  TORCH_CHECK(a.scalar_type() == b.scalar_type(), "a and b must have the same type");
+  TORCH_CHECK(
+      a.is_cuda() && b.is_cuda() && c.is_cuda() && indices_a.is_cuda() && indices_b.is_cuda(),
+      "a, b, c, indices_a, and indices_b must be on GPU");
+
+  // Validate dimensions
+  int N = std::max(a.size(0), b.size(0));
+  int C_a = a.size(1);
+  int C_b = b.size(1);
+  int K = indices_a.size(0);
+  TORCH_CHECK(c.size(0) == C_a && c.size(1) == C_b, "c.shape must be match a.shape and b.shape");
+  TORCH_CHECK(indices_b.size(0) == K, "indices_b.size(0) must be match K");
+
+  // Contiguous tensors
+  a = a.contiguous();
+  b = b.contiguous();
+  c = c.contiguous();
+  indices_a = indices_a.contiguous();
+  indices_b = indices_b.contiguous();
+
+  int status = 0;
+  auto dt = a.scalar_type();
+  if (dt == torch::kFloat16) {
+    TORCH_CHECK(c.scalar_type() == torch::kFloat16, "For float16 inputs, c must be float16");
+    status = ::warpconvnet::wmma_split_k_sm80::run_split_k_wmma_templated<half, half, int>(
+        a.data_ptr(),
+        b.data_ptr(),
+        c.data_ptr(),
+        indices_a.data_ptr<int>(),
+        indices_b.data_ptr<int>(),
+        N,
+        C_a,
+        C_b,
+        K,
+        split_k_factor);
+#ifndef DISABLE_BFLOAT16
+  } else if (dt == torch::kBFloat16) {
+    TORCH_CHECK(c.scalar_type() == torch::kBFloat16, "For bfloat16 inputs, c must be bfloat16");
+    status =
+        ::warpconvnet::wmma_split_k_sm80::run_split_k_wmma_templated<nv_bfloat16, nv_bfloat16, int>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            indices_a.data_ptr<int>(),
+            indices_b.data_ptr<int>(),
+            N,
+            C_a,
+            C_b,
+            K,
+            split_k_factor);
+#endif
+  } else if (dt == torch::kFloat32) {
+    // Convert A and B to half precision; accumulate into float32 C
+    auto a_half = a.to(torch::kFloat16);
+    auto b_half = b.to(torch::kFloat16);
+    TORCH_CHECK(c.scalar_type() == torch::kFloat32, "For float32 case, c must be float32");
+    status = ::warpconvnet::wmma_split_k_sm80::run_split_k_wmma_templated<half, float, int>(
+        a_half.data_ptr(),
+        b_half.data_ptr(),
+        c.data_ptr(),
+        indices_a.data_ptr<int>(),
+        indices_b.data_ptr<int>(),
+        N,
+        C_a,
+        C_b,
+        K,
+        split_k_factor);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for WMMA split-K implicit GEMM");
+  }
+
+  TORCH_CHECK(status == 0,
+              "WMMA split-K implicit GEMM kernel failed with status: " + std::to_string(status));
+  return status;
+}
+
 // Public API function instead of lambda
 int wmma_implicit_gemm_sm80(torch::Tensor tensor_a,
                             torch::Tensor tensor_b,
@@ -1039,6 +1139,15 @@ void register_gemm(py::module_ &m) {
            py::arg("indices_b"),
            py::arg("split_k_factor") = 4,
            py::arg("block_size") = 16);
+
+  gemm.def("wmma_split_k_implicit_gemm_sm80",
+           &wmma_split_k_implicit_gemm_sm80,
+           py::arg("a"),
+           py::arg("b"),
+           py::arg("c"),
+           py::arg("indices_a"),
+           py::arg("indices_b"),
+           py::arg("split_k_factor") = 4);
 
   // Thin dispatcher that mirrors other CUTLASS-style helpers
   gemm.def("wmma_implicit_gemm_sm80",

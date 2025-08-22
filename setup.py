@@ -108,6 +108,7 @@ ext_modules = [
             "warpconvnet/csrc/bindings/fma_bindings.cpp",
             "warpconvnet/csrc/bindings/utils_bindings.cpp",
             "warpconvnet/csrc/implicit_gemm_wmma_sm80.cu",
+            "warpconvnet/csrc/implicit_gemm_split_k_wmma_sm80.cu",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter.cu",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter_sm80_fp32.cu",
             "warpconvnet/csrc/cub_sort.cu",

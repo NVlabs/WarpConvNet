@@ -176,3 +176,89 @@ cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
     run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)),
     record_failures_as_inf=False,
 )
+
+
+# ---------------- WMMA SM80 implicit GEMM (gather/scatter) -----------------
+def _key_wmma_implicit(
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
+    tensor_c: torch.Tensor,
+    tensor_d: torch.Tensor,
+    indices_a: torch.Tensor,
+    indices_d: torch.Tensor,
+    *,
+    alpha: float = 1.0,
+    beta: float = 0.0,
+) -> Tuple[Any, ...]:
+    sm, dtype = _sm_dtype_key(tensor_a)
+    M, K = tensor_a.shape
+    K2, N = tensor_b.shape
+    assert K2 == K
+    P = int(indices_a.numel())
+    assert P == int(indices_d.numel())
+    log_P = int(math.ceil(math.log2(P))) if P > 0 else 0
+    # Alpha/Beta generally don't change kernel selection; exclude from key
+    return (
+        "wmma_implicit_gemm_sm80",
+        sm,
+        dtype,
+        K,
+        N,
+        log_P,
+    )
+
+
+# TODO(cchoy): add MMA tile size
+_BENCHMARK_WMMA_IMPLICIT_PARAMS = [
+    {},
+]
+
+
+wmma_implicit_gemm_sm80_autotuned = make_autotuned_op(
+    namespace="wmma_implicit_gemm_sm80",
+    c_fn=_C.gemm.wmma_implicit_gemm_sm80,
+    param_space=_BENCHMARK_WMMA_IMPLICIT_PARAMS,
+    key_fn=_key_wmma_implicit,
+    run_and_time_fn=_status_runner_factory(_C.gemm.wmma_implicit_gemm_sm80, (2, 3)),
+    record_failures_as_inf=False,
+)
+
+
+# ---------------- WMMA SM80 split-K implicit GEMM -----------------
+def _key_wmma_split_k(
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
+    tensor_c: torch.Tensor,
+    indices_a: torch.Tensor,
+    indices_b: torch.Tensor,
+    *,
+    split_k_factor: int = 4,
+) -> Tuple[Any, ...]:
+    sm, dtype = _sm_dtype_key(tensor_a)
+    # Shapes: A[N, C_a], B[N, C_b], output [C_a, C_b]
+    _, C_a = tensor_a.shape
+    _, C_b = tensor_b.shape
+    K = int(indices_a.numel())
+    log_K = int(math.ceil(math.log2(K))) if K > 0 else 0
+    return (
+        "wmma_split_k_implicit_gemm_sm80",
+        sm,
+        dtype,
+        C_a,
+        C_b,
+        log_K,
+    )
+
+
+# TODO(cchoy): add MMA tile size
+_BENCHMARK_WMMA_SPLITK_PARAMS = [{"split_k_factor": k} for k in [2, 4, 8, 16, 32]]
+
+
+wmma_split_k_implicit_gemm_sm80_autotuned = make_autotuned_op(
+    namespace="wmma_split_k_implicit_gemm_sm80",
+    c_fn=_C.gemm.wmma_split_k_implicit_gemm_sm80,
+    param_space=_BENCHMARK_WMMA_SPLITK_PARAMS,
+    key_fn=_key_wmma_split_k,
+    run_and_time_fn=_status_runner_factory(_C.gemm.wmma_split_k_implicit_gemm_sm80, (2,)),
+    record_failures_as_inf=False,
+)
