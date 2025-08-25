@@ -39,6 +39,53 @@ int run(const void *A,
 }  // namespace wmma_implicit_gemm_sm80
 }  // namespace warpconvnet
 
+// Forward declare Segmented WMMA SM80 run helper (templated) implemented in CUDA
+namespace warpconvnet {
+namespace wmma_segmented_gemm_sm80 {
+template <typename ElementInput, typename ElementOutput>
+int run_segmented(const void *A,
+                  const void *B_multi,
+                  const void *C,
+                  void *D,
+                  const long *a_inds,
+                  const long *d_inds,
+                  const float *gates,
+                  const int *seg_offsets,
+                  int M,
+                  int K,
+                  int N,
+                  int P,
+                  int Q,
+                  int E,
+                  float alpha,
+                  float beta,
+                  cudaStream_t stream);
+}  // namespace wmma_segmented_gemm_sm80
+}  // namespace warpconvnet
+
+// Forward declare Segmented tr(A)B gather-scatter WMMA SM80 run helper (templated)
+namespace warpconvnet {
+namespace wmma_segmented_trab_sm80 {
+template <typename ElementInput, typename ElementOutput>
+int run_segmented_trab(const void *X,
+                       const void *DY,
+                       void *D_all,
+                       const long *a_inds,
+                       const long *d_inds,
+                       const float *gates,
+                       const int *seg_offsets,
+                       int N_rows,
+                       int M_rows,
+                       int C_in,
+                       int C_out,
+                       int P,
+                       int num_segments,
+                       float alpha,
+                       float beta,
+                       cudaStream_t stream);
+}  // namespace wmma_segmented_trab_sm80
+}  // namespace warpconvnet
+
 // Forward declarations for CUDA kernels and GEMM launchers in their namespaces
 namespace warpconvnet {
 namespace wmma_split_k_sm80 {
@@ -1163,6 +1210,375 @@ void register_gemm(py::module_ &m) {
            "SM80 WMMA implicit GEMM with gather/scatter and CBLAS-style alpha/beta epilogue."
            " Skips loading C when beta == 0."
            "Default alpha = 1.0, beta = 0.0.");
+
+  // Segmented WMMA SM80 implicit GEMM (per-segment B, per-row gates)
+  gemm.def(
+      "wmma_segmented_gemm_sm80",
+      [](torch::Tensor tensor_a,
+         torch::Tensor tensor_b_multi,
+         torch::Tensor tensor_c,
+         torch::Tensor tensor_d,
+         torch::Tensor indices_a,
+         torch::Tensor indices_d,
+         torch::Tensor gates,
+         torch::Tensor seg_offsets,
+         float alpha,
+         float beta) {
+        TORCH_CHECK(tensor_a.dim() == 2, "tensor_a must be 2D [M,K]");
+        TORCH_CHECK(tensor_b_multi.dim() == 3, "tensor_b_multi must be 3D [E,K,N]");
+        if (beta != 0.0f) {
+          TORCH_CHECK(tensor_c.dim() == 2, "tensor_c must be 2D when beta != 0");
+        }
+        TORCH_CHECK(tensor_d.dim() == 2, "tensor_d must be 2D [Q,N]");
+        TORCH_CHECK(indices_a.dim() == 1 && indices_d.dim() == 1, "indices_a/d must be 1D");
+        TORCH_CHECK(gates.dim() == 1, "gates must be 1D");
+        TORCH_CHECK(seg_offsets.dim() == 1, "seg_offsets must be 1D [E+1]");
+
+        TORCH_CHECK(tensor_a.is_cuda() && tensor_b_multi.is_cuda() && tensor_d.is_cuda() &&
+                        indices_a.is_cuda() && indices_d.is_cuda() && gates.is_cuda() &&
+                        seg_offsets.is_cuda(),
+                    "All inputs must be CUDA tensors");
+        if (beta != 0.0f) TORCH_CHECK(tensor_c.is_cuda(), "tensor_c must be CUDA when beta != 0");
+
+        tensor_a = tensor_a.contiguous();
+        tensor_b_multi = tensor_b_multi.contiguous();
+        if (beta != 0.0f) tensor_c = tensor_c.contiguous();
+        tensor_d = tensor_d.contiguous();
+        indices_a = indices_a.contiguous();
+        indices_d = indices_d.contiguous();
+        gates = gates.contiguous();
+        seg_offsets = seg_offsets.contiguous();
+
+        int64_t M = tensor_a.size(0);
+        int64_t K = tensor_a.size(1);
+        int64_t E = tensor_b_multi.size(0);
+        TORCH_CHECK(tensor_b_multi.size(1) == K, "B_multi[:,K,:] must match A.cols");
+        int64_t N = tensor_b_multi.size(2);
+        int64_t Q = tensor_d.size(0);
+        TORCH_CHECK(tensor_d.size(1) == N, "tensor_d second dim must be N");
+        int64_t P = indices_a.size(0);
+        TORCH_CHECK(indices_d.size(0) == P, "indices_a and indices_d length mismatch");
+        TORCH_CHECK(gates.size(0) == P, "gates length must equal P");
+        TORCH_CHECK(seg_offsets.size(0) == E + 1, "seg_offsets must be length E+1");
+
+        if (indices_a.scalar_type() != torch::kInt64) indices_a = indices_a.to(torch::kInt64);
+        if (indices_d.scalar_type() != torch::kInt64) indices_d = indices_d.to(torch::kInt64);
+        TORCH_CHECK(gates.scalar_type() == torch::kFloat32, "gates must be float32");
+        if (seg_offsets.scalar_type() != torch::kInt32) seg_offsets = seg_offsets.to(torch::kInt32);
+
+        auto dtA = tensor_a.scalar_type();
+        auto dtB = tensor_b_multi.scalar_type();
+        auto dtD = tensor_d.scalar_type();
+        TORCH_CHECK(dtA == dtB, "A and B_multi dtypes must match");
+
+        const void *Aptr = tensor_a.data_ptr();
+        const void *Bptr = tensor_b_multi.data_ptr();
+        const void *Cptr = (beta == 0.0f) ? nullptr : tensor_c.data_ptr();
+        void *Dptr = tensor_d.data_ptr();
+        const long *a_inds_ptr = indices_a.data_ptr<long>();
+        const long *d_inds_ptr = indices_d.data_ptr<long>();
+        const float *gates_ptr = gates.data_ptr<float>();
+        const int *seg_offsets_ptr = seg_offsets.data_ptr<int>();
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+        int status = 0;
+        if (dtA == torch::kFloat16 && dtD == torch::kFloat32) {
+          status =
+              ::warpconvnet::wmma_segmented_gemm_sm80::run_segmented<half, float>(Aptr,
+                                                                                  Bptr,
+                                                                                  Cptr,
+                                                                                  Dptr,
+                                                                                  a_inds_ptr,
+                                                                                  d_inds_ptr,
+                                                                                  gates_ptr,
+                                                                                  seg_offsets_ptr,
+                                                                                  (int)M,
+                                                                                  (int)K,
+                                                                                  (int)N,
+                                                                                  (int)P,
+                                                                                  (int)Q,
+                                                                                  (int)E,
+                                                                                  alpha,
+                                                                                  beta,
+                                                                                  stream);
+        } else if (dtA == torch::kFloat16 && dtD == torch::kFloat16) {
+          status =
+              ::warpconvnet::wmma_segmented_gemm_sm80::run_segmented<half, half>(Aptr,
+                                                                                 Bptr,
+                                                                                 Cptr,
+                                                                                 Dptr,
+                                                                                 a_inds_ptr,
+                                                                                 d_inds_ptr,
+                                                                                 gates_ptr,
+                                                                                 seg_offsets_ptr,
+                                                                                 (int)M,
+                                                                                 (int)K,
+                                                                                 (int)N,
+                                                                                 (int)P,
+                                                                                 (int)Q,
+                                                                                 (int)E,
+                                                                                 alpha,
+                                                                                 beta,
+                                                                                 stream);
+#ifndef DISABLE_BFLOAT16
+        } else if (dtA == torch::kBFloat16 && dtD == torch::kFloat32) {
+          status = ::warpconvnet::wmma_segmented_gemm_sm80::run_segmented<nv_bfloat16, float>(
+              Aptr,
+              Bptr,
+              Cptr,
+              Dptr,
+              a_inds_ptr,
+              d_inds_ptr,
+              gates_ptr,
+              seg_offsets_ptr,
+              (int)M,
+              (int)K,
+              (int)N,
+              (int)P,
+              (int)Q,
+              (int)E,
+              alpha,
+              beta,
+              stream);
+        } else if (dtA == torch::kBFloat16 && dtD == torch::kBFloat16) {
+          status = ::warpconvnet::wmma_segmented_gemm_sm80::run_segmented<nv_bfloat16, nv_bfloat16>(
+              Aptr,
+              Bptr,
+              Cptr,
+              Dptr,
+              a_inds_ptr,
+              d_inds_ptr,
+              gates_ptr,
+              seg_offsets_ptr,
+              (int)M,
+              (int)K,
+              (int)N,
+              (int)P,
+              (int)Q,
+              (int)E,
+              alpha,
+              beta,
+              stream);
+#endif
+        } else if (dtA == torch::kFloat32 && dtD == torch::kFloat32) {
+          // Convert inputs to half; accumulate to float32
+          auto a_half = tensor_a.to(torch::kFloat16);
+          auto b_half = tensor_b_multi.to(torch::kFloat16);
+          status =
+              ::warpconvnet::wmma_segmented_gemm_sm80::run_segmented<half, float>(a_half.data_ptr(),
+                                                                                  b_half.data_ptr(),
+                                                                                  Cptr,
+                                                                                  Dptr,
+                                                                                  a_inds_ptr,
+                                                                                  d_inds_ptr,
+                                                                                  gates_ptr,
+                                                                                  seg_offsets_ptr,
+                                                                                  (int)M,
+                                                                                  (int)K,
+                                                                                  (int)N,
+                                                                                  (int)P,
+                                                                                  (int)Q,
+                                                                                  (int)E,
+                                                                                  alpha,
+                                                                                  beta,
+                                                                                  stream);
+        } else {
+          TORCH_CHECK(false, "Unsupported dtype combination for WMMA segmented GEMM");
+        }
+        TORCH_CHECK(status == 0, "WMMA segmented GEMM run failed");
+        return status;
+      },
+      py::arg("tensor_a"),
+      py::arg("tensor_b_multi"),
+      py::arg("tensor_c"),
+      py::arg("tensor_d"),
+      py::arg("indices_a"),
+      py::arg("indices_d"),
+      py::arg("gates"),
+      py::arg("seg_offsets"),
+      py::arg("alpha") = 1.0f,
+      py::arg("beta") = 0.0f,
+      "Segmented implicit GEMM (SM80 WMMA): per-segment B tiles with per-row gates.");
+
+  // Segmented tr(A)B gather-scatter for MoE dW (SM80 WMMA)
+  gemm.def(
+      "wmma_segmented_trab_gather_sm80",
+      [](torch::Tensor tensor_x,     // [N_rows, C_in]
+         torch::Tensor tensor_dy,    // [M_rows, C_out]
+         torch::Tensor tensor_dw,    // [S, C_in, C_out] (usually S==E)
+         torch::Tensor indices_a,    // [P] int64
+         torch::Tensor indices_d,    // [P] int64
+         torch::Tensor gates,        // [P] float32
+         torch::Tensor seg_offsets,  // [S+1] int32
+         float alpha,
+         float beta) {
+        TORCH_CHECK(tensor_x.dim() == 2, "tensor_x must be 2D [N_rows, C_in]");
+        TORCH_CHECK(tensor_dy.dim() == 2, "tensor_dy must be 2D [M_rows, C_out]");
+        TORCH_CHECK(tensor_dw.dim() == 3, "tensor_dw must be 3D [S, C_in, C_out]");
+        TORCH_CHECK(indices_a.dim() == 1 && indices_d.dim() == 1, "indices must be 1D");
+        TORCH_CHECK(gates.dim() == 1, "gates must be 1D");
+        TORCH_CHECK(seg_offsets.dim() == 1, "seg_offsets must be 1D [S+1]");
+
+        TORCH_CHECK(tensor_x.is_cuda() && tensor_dy.is_cuda() && tensor_dw.is_cuda() &&
+                        indices_a.is_cuda() && indices_d.is_cuda() && gates.is_cuda() &&
+                        seg_offsets.is_cuda(),
+                    "All inputs must be CUDA tensors");
+
+        // Make contiguous
+        tensor_x = tensor_x.contiguous();
+        tensor_dy = tensor_dy.contiguous();
+        tensor_dw = tensor_dw.contiguous();
+        indices_a = indices_a.contiguous();
+        indices_d = indices_d.contiguous();
+        gates = gates.contiguous();
+        seg_offsets = seg_offsets.contiguous();
+
+        const int64_t N_rows = tensor_x.size(0);
+        const int64_t C_in = tensor_x.size(1);
+        const int64_t M_rows = tensor_dy.size(0);
+        const int64_t C_out = tensor_dy.size(1);
+        TORCH_CHECK(tensor_dw.size(1) == C_in && tensor_dw.size(2) == C_out,
+                    "tensor_dw must be [S, C_in, C_out]");
+        const int64_t S = tensor_dw.size(0);
+        const int64_t P = indices_a.size(0);
+        TORCH_CHECK(indices_d.size(0) == P, "indices_a and indices_d must have same length");
+        TORCH_CHECK(gates.size(0) == P, "gates length must equal P");
+        TORCH_CHECK(seg_offsets.size(0) == S + 1,
+                    "seg_offsets length must be S+1 matching tensor_dw.shape[0]");
+
+        if (indices_a.scalar_type() != torch::kInt64) indices_a = indices_a.to(torch::kInt64);
+        if (indices_d.scalar_type() != torch::kInt64) indices_d = indices_d.to(torch::kInt64);
+        TORCH_CHECK(gates.scalar_type() == torch::kFloat32, "gates must be float32");
+        if (seg_offsets.scalar_type() != torch::kInt32) seg_offsets = seg_offsets.to(torch::kInt32);
+
+        auto dtX = tensor_x.scalar_type();
+        auto dtDY = tensor_dy.scalar_type();
+        auto dtDW = tensor_dw.scalar_type();
+        TORCH_CHECK(dtX == dtDY, "X and DY dtypes must match");
+
+        const void *Xptr = tensor_x.data_ptr();
+        const void *DYptr = tensor_dy.data_ptr();
+        void *DWptr = tensor_dw.data_ptr();
+        const long *a_inds_ptr = indices_a.data_ptr<long>();
+        const long *d_inds_ptr = indices_d.data_ptr<long>();
+        const float *gates_ptr = gates.data_ptr<float>();
+        const int *seg_offsets_ptr = seg_offsets.data_ptr<int>();
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+        int status = 0;
+        if (dtX == torch::kFloat16 && dtDW == torch::kFloat32) {
+          status = ::warpconvnet::wmma_segmented_trab_sm80::run_segmented_trab<half, float>(
+              Xptr,
+              DYptr,
+              DWptr,
+              a_inds_ptr,
+              d_inds_ptr,
+              gates_ptr,
+              seg_offsets_ptr,
+              (int)N_rows,
+              (int)M_rows,
+              (int)C_in,
+              (int)C_out,
+              (int)P,
+              (int)S,
+              alpha,
+              beta,
+              stream);
+        } else if (dtX == torch::kFloat16 && dtDW == torch::kFloat16) {
+          status = ::warpconvnet::wmma_segmented_trab_sm80::run_segmented_trab<half, half>(
+              Xptr,
+              DYptr,
+              DWptr,
+              a_inds_ptr,
+              d_inds_ptr,
+              gates_ptr,
+              seg_offsets_ptr,
+              (int)N_rows,
+              (int)M_rows,
+              (int)C_in,
+              (int)C_out,
+              (int)P,
+              (int)S,
+              alpha,
+              beta,
+              stream);
+#ifndef DISABLE_BFLOAT16
+        } else if (dtX == torch::kBFloat16 && dtDW == torch::kFloat32) {
+          status = ::warpconvnet::wmma_segmented_trab_sm80::run_segmented_trab<nv_bfloat16, float>(
+              Xptr,
+              DYptr,
+              DWptr,
+              a_inds_ptr,
+              d_inds_ptr,
+              gates_ptr,
+              seg_offsets_ptr,
+              (int)N_rows,
+              (int)M_rows,
+              (int)C_in,
+              (int)C_out,
+              (int)P,
+              (int)S,
+              alpha,
+              beta,
+              stream);
+        } else if (dtX == torch::kBFloat16 && dtDW == torch::kBFloat16) {
+          status =
+              ::warpconvnet::wmma_segmented_trab_sm80::run_segmented_trab<nv_bfloat16, nv_bfloat16>(
+                  Xptr,
+                  DYptr,
+                  DWptr,
+                  a_inds_ptr,
+                  d_inds_ptr,
+                  gates_ptr,
+                  seg_offsets_ptr,
+                  (int)N_rows,
+                  (int)M_rows,
+                  (int)C_in,
+                  (int)C_out,
+                  (int)P,
+                  (int)S,
+                  alpha,
+                  beta,
+                  stream);
+#endif
+        } else if (dtX == torch::kFloat32 && dtDW == torch::kFloat32) {
+          // Convert X, DY to fp16 compute; accumulate into fp32 DW
+          auto x_half = tensor_x.to(torch::kFloat16);
+          auto dy_half = tensor_dy.to(torch::kFloat16);
+          status = ::warpconvnet::wmma_segmented_trab_sm80::run_segmented_trab<half, float>(
+              x_half.data_ptr(),
+              dy_half.data_ptr(),
+              DWptr,
+              a_inds_ptr,
+              d_inds_ptr,
+              gates_ptr,
+              seg_offsets_ptr,
+              (int)N_rows,
+              (int)M_rows,
+              (int)C_in,
+              (int)C_out,
+              (int)P,
+              (int)S,
+              alpha,
+              beta,
+              stream);
+        } else {
+          TORCH_CHECK(false, "Unsupported dtype combination for WMMA segmented tr(A)B gather");
+        }
+
+        TORCH_CHECK(status == 0, "WMMA segmented tr(A)B kernel failed");
+        return status;
+      },
+      py::arg("tensor_x"),
+      py::arg("tensor_dy"),
+      py::arg("tensor_dw"),
+      py::arg("indices_a"),
+      py::arg("indices_d"),
+      py::arg("gates"),
+      py::arg("seg_offsets"),
+      py::arg("alpha") = 1.0f,
+      py::arg("beta") = 0.0f,
+      "Segmented tr(A)B gather-scatter for MoE dW using SM80 WMMA. Writes into [S,C_in,C_out].");
 }
 
 }  // namespace bindings
