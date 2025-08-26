@@ -40,6 +40,10 @@ from .cutlass import (
     _cutlass_implicit_gemm_forward_logic,
     _cutlass_implicit_gemm_backward_logic,
 )
+from .implicit_wmma import (
+    _wmma_implicit_gemm_forward_logic,
+    _wmma_implicit_gemm_backward_logic,
+)
 
 logger = get_logger(__name__)
 
@@ -49,6 +53,7 @@ _BENCHMARK_NUM_RUNS = 2
 # Forward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (block size), EXPLICIT
 _BENCHMARK_FORWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
+    ("wmma_implicit_gemm", {}),
     *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
     ("explicit_gemm", {}),
 ]
@@ -56,6 +61,7 @@ _BENCHMARK_FORWARD_PARAMS = [
 # Backward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (configs), EXPLICIT
 _BENCHMARK_BACKWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
+    ("wmma_implicit_gemm", {}),
     *[
         (
             "implicit_gemm",
@@ -87,6 +93,7 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
+    WMMA_IMPLICIT_GEMM = "wmma_implicit_gemm"
     # EXPLICIT_GEMM_BATCHED = "explicit_gemm_batched" # TODO: Add if supporting
     AUTO = "auto"  # Benchmark and select the best algorithm
 
@@ -95,6 +102,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
+    WMMA_IMPLICIT_GEMM = "wmma_implicit_gemm"
     # EXPLICIT_GEMM_BATCHED = "explicit_gemm_batched" # TODO: Add if supporting
     AUTO = "auto"  # Benchmark and select the best algorithm
 
@@ -273,6 +281,15 @@ def _run_forward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
+        elif algo_mode == "wmma_implicit_gemm":
+            status = _wmma_implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+            )
+            if isinstance(status, int) and status != 0:
+                return status
         else:
             # Should not happen with current _BENCHMARK_FORWARD_PARAMS
             raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
@@ -390,6 +407,17 @@ def _run_backward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
+        elif algo_mode == "wmma_implicit_gemm":
+            status_or_tensor, _ = _wmma_implicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(True, True),
+                device=device,
+            )
+            if isinstance(status_or_tensor, int) and status_or_tensor != 0:
+                return status_or_tensor
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
 
@@ -608,6 +636,17 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 raise RuntimeError(
                     f"Error in _cutlass_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
                 )
+        elif chosen_fwd_algo == "wmma_implicit_gemm":
+            output_feature_tensor = _wmma_implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+            )
+            if isinstance(output_feature_tensor, int) and output_feature_tensor != 0:
+                raise RuntimeError(
+                    f"Error in _wmma_implicit_gemm_forward_logic: status {output_feature_tensor}"
+                )
         else:
             raise ValueError(f"Unsupported forward algorithm: {chosen_fwd_algo}")
 
@@ -820,6 +859,19 @@ class UnifiedSpatiallySparseConvFunction(Function):
             if isinstance(grad_in_features, int) and grad_in_features != 0:
                 raise RuntimeError(
                     f"Error in _cutlass_implicit_gemm_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
+                )
+        elif chosen_bwd_algo == "wmma_implicit_gemm":
+            grad_in_features, grad_weight = _wmma_implicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
+                device=device,
+            )
+            if isinstance(grad_in_features, int) and grad_in_features != 0:
+                raise RuntimeError(
+                    f"Error in _wmma_implicit_gemm_backward_logic: status {grad_in_features}"
                 )
 
         # elif chosen_bwd_algo == SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM_BATCHED: # TODO

@@ -21,7 +21,6 @@ def _wmma_implicit_gemm_forward_logic(
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
     num_out_coords: int,
-    accumulator_type: torch.dtype = torch.float32,
 ) -> Union[Float[Tensor, "M C_out"], int]:
     assert (
         _C is not None and wmma_implicit_gemm_sm80_autotuned is not None
@@ -35,7 +34,9 @@ def _wmma_implicit_gemm_forward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
+            dtype=min_dtype
+        )
     else:
         output_feature_tensor = torch.zeros(
             num_out_coords, weight.shape[-1], device=device, dtype=min_dtype
@@ -71,7 +72,6 @@ def _wmma_implicit_gemm_backward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
-    accumulator_type: torch.dtype = torch.float32,
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
 ) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
@@ -90,7 +90,7 @@ def _wmma_implicit_gemm_backward_logic(
     _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
-    grad_weight = torch.zeros_like(weight, device=device)
+    grad_weight = torch.zeros_like(weight, device=device, dtype=min_dtype)
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
@@ -148,14 +148,12 @@ class SpatiallySparseConvWMMAImplicitGEMMFunction(Function):
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
         num_out_coords: int,
-        accumulator_type: torch.dtype = torch.float32,
     ) -> Union[Float[Tensor, "M C_out"], int]:
         output_feature_tensor = _wmma_implicit_gemm_forward_logic(
             in_features,
             weight,
             kernel_map,
             num_out_coords,
-            accumulator_type,
         )
         if isinstance(output_feature_tensor, int):
             raise RuntimeError(
@@ -164,9 +162,6 @@ class SpatiallySparseConvWMMAImplicitGEMMFunction(Function):
 
         ctx.save_for_backward(in_features, weight)
         ctx.kernel_map = kernel_map
-        ctx.wmma_params = {
-            "accumulator_type": accumulator_type,
-        }
         ctx.device = in_features.device
         return output_feature_tensor
 
@@ -184,7 +179,6 @@ class SpatiallySparseConvWMMAImplicitGEMMFunction(Function):
     ]:
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
-        params = ctx.wmma_params
         device = ctx.device
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
@@ -202,7 +196,6 @@ class SpatiallySparseConvWMMAImplicitGEMMFunction(Function):
             in_features,
             weight,
             kernel_map,
-            accumulator_type=params["accumulator_type"],
             requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
             device=device,
         )

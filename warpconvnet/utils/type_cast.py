@@ -11,6 +11,7 @@ TYPE_ORDER = [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
 
 def _min_dtype(*dtypes):
+    dtypes = [dtype.dtype if isinstance(dtype, torch.Tensor) else dtype for dtype in dtypes]
     assert all(dtype in TYPE_ORDER for dtype in dtypes), f"Invalid dtype: {dtypes}"
     return TYPE_ORDER[min(TYPE_ORDER.index(dtype) for dtype in dtypes)]
 
