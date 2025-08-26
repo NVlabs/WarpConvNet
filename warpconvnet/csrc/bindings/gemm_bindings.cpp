@@ -1,6 +1,7 @@
 // Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cstddef>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>

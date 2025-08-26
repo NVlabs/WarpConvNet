@@ -1,6 +1,8 @@
 // Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 // SPDX-License-Identifier: Apache-2.0
 
+// CUTLASS size_t requires cstddef
+#include <cstddef>
 #include <cutlass/numeric_types.h>
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
