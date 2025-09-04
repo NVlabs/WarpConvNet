@@ -187,7 +187,7 @@ __global__ void wmma_splitk_stage1(
   stage_load_tiles(/*k0=*/0, /*stage=*/stage);
   cp_async_commit();
   cp_async_wait_all();
-  __syncthreads();
+  __syncwarp();
 
   // K loop (in TILE_K steps)
   for (int k0 = 0; k0 < chunk_size; k0 += TILE_K) {
@@ -204,13 +204,13 @@ __global__ void wmma_splitk_stage1(
     wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
 
     if (k0 + TILE_K < chunk_size) cp_async_wait_all();
-    __syncthreads();
+    __syncwarp();
     stage = next_stage;
   }
 
   // Dump accumulator to smem (row-major MxN)
   wmma::store_matrix_sync(OutTile, acc_frag, TILE_N, wmma::mem_row_major);
-  __syncthreads();
+  __syncwarp();
 
   // Store to C_partial without atomics (one split writes its own buffer)
   // 2x loops over 32 lanes => 64 chunks of 4 floats -> 256 elements

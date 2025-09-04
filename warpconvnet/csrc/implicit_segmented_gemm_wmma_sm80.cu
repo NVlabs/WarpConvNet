@@ -167,7 +167,7 @@ __global__ void segmented_implicit_gemm_wmma(
       d_row_idx[lane] = in_seg && (p < P) ? d_inds[p] : -1;
       row_gate[lane] = in_seg && (p < P) ? gates[p] : 0.0f;
     }
-    __syncthreads();
+    __syncwarp();
 
     const InT *B = B_multi + (size_t)e * (size_t)K * (size_t)N;
     wmma::fill_fragment(acc_frag, 0.0f);
@@ -194,7 +194,7 @@ __global__ void segmented_implicit_gemm_wmma(
     stage_load_tiles(0, stage);
     cp_async_commit();
     cp_async_wait_all();
-    __syncthreads();
+    __syncwarp();
 
     for (int k0 = 0; k0 < K; k0 += TILE_K) {
       const int next_stage = stage ^ 1;
@@ -206,12 +206,12 @@ __global__ void segmented_implicit_gemm_wmma(
       wmma::load_matrix_sync(b_frag, &Bsmem[stage][0], TILE_N);
       wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
       if (k0 + TILE_K < K) cp_async_wait_all();
-      __syncthreads();
+      __syncwarp();
       stage = next_stage;
     }
 
     wmma::store_matrix_sync(OutTile, acc_frag, TILE_N, wmma::mem_row_major);
-    __syncthreads();
+    __syncwarp();
 
     if constexpr (std::is_same<OutT, float>::value) {
 #pragma unroll
@@ -343,7 +343,7 @@ __global__ void segmented_implicit_gemm_wmma(
     }
 
     t += gridDim.y;
-    __syncthreads();
+    __syncwarp();
   }
 }
 

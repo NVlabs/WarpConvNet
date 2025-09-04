@@ -42,6 +42,7 @@ def _wmma_implicit_gemm_forward_logic(
             num_out_coords, weight.shape[-1], device=device, dtype=min_dtype
         )
 
+    C_empty = torch.empty(0, device=device, dtype=min_dtype)
     for i in range(len(kernel_map)):
         if i == iden_idx:
             continue
@@ -55,12 +56,12 @@ def _wmma_implicit_gemm_forward_logic(
         status = wmma_implicit_gemm_sm80_autotuned(
             _in_features_detached,
             _weight_detached[i],
-            output_feature_tensor,
+            C_empty,
             output_feature_tensor,
             in_map,
             out_map,
             alpha=1.0,
-            beta=1.0,
+            beta=0.0,  # atomic addition to D[out_map]
         )
         if status != 0:
             return status
@@ -99,6 +100,7 @@ def _wmma_implicit_gemm_backward_logic(
     else:
         grad_in_features = torch.zeros_like(_in_features_detached, device=device)
 
+    C_empty = torch.empty(0, device=device, dtype=min_dtype)
     for i in range(len(kernel_map)):
         if i == iden_idx:
             continue
@@ -113,12 +115,12 @@ def _wmma_implicit_gemm_backward_logic(
             status = wmma_implicit_gemm_sm80_autotuned(
                 _grad_output_detached,
                 _weight_detached[i].T.contiguous(),
-                grad_in_features,
+                C_empty,
                 grad_in_features,
                 out_map,
                 in_map,
                 alpha=1.0,
-                beta=1.0,
+                beta=0.0,  # atomic addition to D[out_map]
             )
             if status != 0:
                 return status, i

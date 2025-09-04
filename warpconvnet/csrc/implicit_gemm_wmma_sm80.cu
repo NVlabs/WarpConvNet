@@ -363,7 +363,7 @@ __global__ void implicit_gemm_wmma(
     stage_load_tiles(/*k0=*/0, /*stage=*/stage);
     cp_async_commit();
     cp_async_wait_all();
-    __syncthreads();
+    __syncwarp();
 
     // K-loop with ping-pong
     for (int k0 = 0; k0 < K; k0 += TILE_K) {
@@ -380,13 +380,13 @@ __global__ void implicit_gemm_wmma(
       wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
 
       if (k0 + TILE_K < K) cp_async_wait_all();
-      __syncthreads();
+      __syncwarp();
       stage = next_stage;
     }
 
     // Dump accumulator to smem (row-major)
     wmma::store_matrix_sync(OutTile, acc_frag, TILE_N, wmma::mem_row_major);
-    __syncthreads();
+    __syncwarp();
 
     // ---------------- Epilogue (CBLAS: D = alpha*AB + beta*C) ----------------
     // Strategy:
