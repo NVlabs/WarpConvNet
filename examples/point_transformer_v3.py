@@ -10,7 +10,6 @@ https://arxiv.org/abs/2312.10035
 from typing import Literal, Optional, Tuple
 
 import pytest
-import random
 
 import torch
 import torch.nn as nn
@@ -231,23 +230,29 @@ class PointTransformerV3(BaseSpatialModel):
         else:
             self.final = nn.Identity()
 
+    def _select_order(self, blk_idx: int) -> POINT_ORDERING:
+        """Selects the point ordering for a block.
+
+        Use `torch.manual_seed` to control randomness.
+        """
+        if self.shuffle_orders:
+            idx = torch.randint(0, len(self.orders), (1,)).item()
+            return self.orders[idx]
+        return self.orders[blk_idx % len(self.orders)]
+
     def forward(self, x: Geometry) -> Geometry:
         x = self.conv(x)
         skips = []
 
+        blk_idx = 0
         # Encoder
         for level in range(self.num_level):
-            # Randomly select an order for this level
-            selected_order = (
-                random.choice(self.orders)
-                if self.shuffle_orders
-                else self.orders[level % len(self.orders)]
-            )
-
             # Process each block individually in this level
             level_blocks = self.encs[level]
             for block in level_blocks.children():
+                selected_order = self._select_order(blk_idx)
                 x = block(x, selected_order)
+                blk_idx += 1
 
             if level < self.num_level - 1:
                 skips.append(x)
@@ -257,17 +262,11 @@ class PointTransformerV3(BaseSpatialModel):
         for level in range(self.num_level - 1):
             x = self.up_convs[level](x, skips[-(level + 1)])
 
-            # Randomly select an order for this level
-            selected_order = (
-                random.choice(self.orders)
-                if self.shuffle_orders
-                else self.orders[level % len(self.orders)]
-            )
-
-            # Process each block individually in this level
             level_blocks = self.decs[level]
             for block in level_blocks.children():
+                selected_order = self._select_order(blk_idx)
                 x = block(x, selected_order)
+                blk_idx += 1
 
         return self.final(x)
 
