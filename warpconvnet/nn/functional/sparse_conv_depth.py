@@ -26,7 +26,7 @@ from warpconvnet.utils.benchmark_cache import (
     generic_benchmark_update_entry,
     mark_generic_benchmark_cache_dirty,
 )
-from warpconvnet.nn.functional.sparse_conv import _BENCHMARK_NUM_RUNS
+from warpconvnet.nn.functional.sparse_conv.detail.unified import _BENCHMARK_NUM_RUNS
 from warpconvnet.utils.benchmark_cache import SpatiallySparseConvConfig
 from warpconvnet.utils.type_cast import _min_dtype, _max_dtype, _maybe_cast
 from warpconvnet.utils.timer import CUDATimer
@@ -359,7 +359,7 @@ def _run_depthwise_forward_benchmarks(
     warmup_iters = max(warmup_iters, 1)
     benchmark_iters = max(benchmark_iters, 1)
 
-    logger.warn(
+    logger.warning(
         "Using benchmarked depthwise forward algo. Until the algorithm finds the best parameters, forward performance will be slow."
     )
     all_benchmark_results: List[
@@ -681,6 +681,9 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             )
             chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
 
+        if isinstance(chosen_fwd_algo, str):
+            chosen_fwd_algo = SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE(chosen_fwd_algo.lower())
+
         # Step 5: Execute with optimal algorithm and parameters
         if chosen_fwd_algo == SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT:
             output_feature_tensor = _explicit_depthwise_forward_logic(
@@ -833,6 +836,9 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
                 "sparse_conv_depthwise_backward", config, all_bwd_benchmark_results, force=False
             )
             chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]
+
+        if isinstance(chosen_bwd_algo, str):
+            chosen_bwd_algo = SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(chosen_bwd_algo.lower())
 
         # Step 5: Execute with optimal algorithm and parameters
         if chosen_bwd_algo == SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT:

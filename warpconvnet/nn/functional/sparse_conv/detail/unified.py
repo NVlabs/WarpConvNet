@@ -53,7 +53,7 @@ _BENCHMARK_NUM_RUNS = 2
 # Forward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (block size), EXPLICIT
 _BENCHMARK_FORWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
-    ("wmma_implicit_gemm", {}),
+    # ("wmma_implicit_gemm", {}),
     *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
     ("explicit_gemm", {}),
 ]
@@ -61,7 +61,7 @@ _BENCHMARK_FORWARD_PARAMS = [
 # Backward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (configs), EXPLICIT
 _BENCHMARK_BACKWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
-    ("wmma_implicit_gemm", {}),
+    # ("wmma_implicit_gemm", {}),
     *[
         (
             "implicit_gemm",
@@ -93,7 +93,7 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
-    WMMA_IMPLICIT_GEMM = "wmma_implicit_gemm"
+    # WMMA_IMPLICIT_GEMM = "wmma_implicit_gemm"
     # EXPLICIT_GEMM_BATCHED = "explicit_gemm_batched" # TODO: Add if supporting
     AUTO = "auto"  # Benchmark and select the best algorithm
 
@@ -102,7 +102,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
-    WMMA_IMPLICIT_GEMM = "wmma_implicit_gemm"
+    # WMMA_IMPLICIT_GEMM = "wmma_implicit_gemm"
     # EXPLICIT_GEMM_BATCHED = "explicit_gemm_batched" # TODO: Add if supporting
     AUTO = "auto"  # Benchmark and select the best algorithm
 

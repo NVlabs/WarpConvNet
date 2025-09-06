@@ -28,6 +28,7 @@ from warpconvnet.geometry.coords.grid import GridCoords
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.functional.encodings import sinusoidal_encoding, get_freqs
 from warpconvnet.nn.modules.base_module import BaseSpatialModule
+from warpconvnet.nn.modules.sequential import Sequential
 from warpconvnet.nn.functional.factor_grid import (
     factor_grid_transform,
     factor_grid_cat,
@@ -513,7 +514,7 @@ class FactorGridProjection(BaseSpatialModule):
         for compressed_spatial_dim, compressed_memory_format in zip(
             compressed_spatial_dims, compressed_memory_formats
         ):
-            block = nn.Sequential(
+            block = Sequential(
                 nn.Conv2d(
                     in_channels * compressed_spatial_dim,
                     out_channels * compressed_spatial_dim,
