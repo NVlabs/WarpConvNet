@@ -272,25 +272,22 @@ class GridCoords(Coords):
 
     def half(self):
         if not self.is_initialized:
-            lazy_init = self._lazy_params.replace(dtype=torch.float16)
             return GridCoords.from_tensor(
-                self.batched_tensor.half(), self.offsets, self.grid_shape, self.bounds, lazy_init
+                self.batched_tensor.half(), self.offsets, self.grid_shape, self.bounds
             )
         return super().half()
 
     def float(self):
         if not self.is_initialized:
-            lazy_init = self._lazy_params.replace(dtype=torch.float32)
             return GridCoords.from_tensor(
-                self.batched_tensor.float(), self.offsets, self.grid_shape, self.bounds, lazy_init
+                self.batched_tensor.float(), self.offsets, self.grid_shape, self.bounds
             )
         return super().float()
 
     def double(self):
         if not self.is_initialized:
-            lazy_init = self._lazy_params.replace(dtype=torch.float64)
             return GridCoords.from_tensor(
-                self.batched_tensor.double(), self.offsets, self.grid_shape, self.bounds, lazy_init
+                self.batched_tensor.double(), self.offsets, self.grid_shape, self.bounds
             )
         return super().double()
 

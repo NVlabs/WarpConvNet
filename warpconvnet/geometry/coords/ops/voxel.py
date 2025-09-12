@@ -221,10 +221,8 @@ def voxel_downsample_mapping(
         down_batched_points = down_batched_points.int()
 
     # Get the batch index
-    up_bcoords = batch_indexed_coordinates(up_batched_points, up_offsets, return_type="torch")
-    down_bcoords = batch_indexed_coordinates(
-        down_batched_points, down_offsets, return_type="torch"
-    )
+    up_bcoords = batch_indexed_coordinates(up_batched_points, up_offsets)
+    down_bcoords = batch_indexed_coordinates(down_batched_points, down_offsets)
 
     down_table = TorchHashTable.from_keys(down_bcoords)
     # Get the map that maps up_batched_points[up_map] ~= down_batched_points.

@@ -376,8 +376,7 @@ def generate_kernel_map(
     Generate the kernel map for the spatially sparse convolution using TorchHashTable.
 
     in_to_out_stride_ratio: the ratio of the input stride to the output stride. This will be multiplied to output coordinates to find matching input coordinates.
-    method: 'query' directly queries the hash table for each offset point (can be slower for large kernels but flexible).
-            'offset' pre-calculates all kernel offsets and uses a custom kernel to find matches (generally faster).
+    method: 'offset' pre-calculates all kernel offsets and uses a custom kernel to find matches (generally faster).
             'size' uses a specialized kernel for 4D coordinates if applicable, otherwise falls back to 'offset'.
     skip_symmetric_kernel_map: If True, skip symmetric parts of the kernel map for odd-sized kernels.
     """
