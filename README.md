@@ -24,11 +24,15 @@ pip install cupy-cuda12x  # use cupy-cuda11x for CUDA 11.x
 pip install git+https://github.com/rusty1s/pytorch_scatter.git
 pip install flash-attn --no-build-isolation
 
+# For CUDA 11.x
+# export CC=/usr/bin/gcc-9
+# export CXX=/usr/bin/g++-9
+
 # Install warpconvnet from source
 git clone https://github.com/NVlabs/WarpConvNet.git
 cd WarpConvNet
 git submodule update --init 3rdparty/cutlass
-pip install .
+pip install .  # For CUDA 11.x: pip install . --no-build-isolation
 ```
 
 Available optional dependency groups:
