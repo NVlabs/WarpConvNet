@@ -99,6 +99,7 @@ def sparse_reduce(
             batch_indexed_out_coords.shape[0],
             in_features.shape[1],
             device=voxels.device,
+            dtype=voxels.dtype,
         )
         new_out_features[unique_out_maps] = out_features
         out_features = new_out_features
