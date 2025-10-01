@@ -97,7 +97,13 @@ WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP = _get_env_bool(
 )
 
 # String constants with validation
-VALID_ALGOS = ["explicit_gemm", "implicit_gemm", "cutlass_implicit_gemm", "auto"]
+VALID_ALGOS = [
+    "explicit_gemm",
+    "implicit_gemm",
+    "cutlass_implicit_gemm",
+    "wmma_implicit_gemm",
+    "auto",
+]
 
 # Algorithm selection constants
 # These environment variables support both single algorithm and list of algorithms:

@@ -29,6 +29,10 @@ git clone https://github.com/NVlabs/WarpConvNet.git
 cd WarpConvNet
 git submodule update --init 3rdparty/cutlass
 pip install .
+
+# If this fails, please create an issue on https://github.com/NVlabs/WarpConvNet/issues and try running the following commands:
+cd WarpConvNet
+pip install -e .
 ```
 
 Available optional dependency groups:
