@@ -51,6 +51,7 @@ nav:
     - Geometry Tutorial: user_guide/geometry_tutorial.md
     - Network Tutorial: user_guide/network_tutorial.md
     - Sparse Convolutions: user_guide/sparse_convolutions.md
+    - Inspect Benchmark Cache: user_guide/inspect_benchmark_cache.md
     - Point Convolutions: user_guide/point_convolutions.md
     - Normalizations: user_guide/normalizations.md
     - Diagram Generation: user_guide/diagrams.md
@@ -74,4 +75,4 @@ nav:
   - Examples:
     - ScanNet: examples/scannet.md
     - ModelNet: examples/modelnet.md
-  - Contributing: contributing.md 
+  - Contributing: contributing.md
