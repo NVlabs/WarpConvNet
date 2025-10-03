@@ -1,5 +1,7 @@
 # Geometry Tutorial
 
+See also: the concise type catalog in [Geometry Types](geometry_types.md).
+
 This tutorial demonstrates how to create basic geometry types used by WarpConvNet.
 
 ## Creating `Points`
@@ -15,6 +17,17 @@ features = [torch.rand(N1, 7), torch.rand(N2, 7)]
 
 points = Points(coords, features)
 print(points.batch_size)
+```
+
+You can also build `Points` from concatenated tensors and `offsets`:
+
+```python
+# same N1, N2 as above
+coords_cat = torch.cat([coords[0], coords[1]], dim=0)            # (N1+N2, 3)
+feats_cat = torch.cat([features[0], features[1]], dim=0)         # (N1+N2, 7)
+offsets = torch.tensor([0, N1, N1 + N2], dtype=torch.int32)
+
+points_cat = Points(coords_cat, feats_cat, offsets)
 ```
 
 ## Creating `Voxels`
@@ -34,10 +47,21 @@ voxels = Voxels(voxel_coords, voxel_feats)
 print(voxels.batch_size)
 ```
 
-`Points` can be downsampled into `Voxels` and voxel grids can be converted back to dense tensors:
+Or, using concatenation plus `offsets` (integer coordinates expected):
 
 ```python
-downsampled = points.voxel_downsample(voxel_size)
-dense = voxels.to_dense(channel_dim=1)
-restored = Voxels.from_dense(dense, dense_tensor_channel_dim=1)
+coords_cat = torch.cat(voxel_coords, dim=0)                      # (N1+N2, 3) int
+feats_cat = torch.cat(voxel_feats, dim=0)                        # (N1+N2, C)
+offsets = torch.tensor([0, N1, N1 + N2], dtype=torch.int32)
+
+voxels_cat = Voxels(coords_cat, feats_cat, offsets)
+```
+
+## Conversions
+
+Downsample `Points` to `Voxels` and convert grids to/from dense:
+
+```python
+from warpconvnet.geometry.types.conversion.to_voxels import points_to_voxels
+voxels = points_to_voxels(points, voxel_size=0.02, reduction="mean")
 ```

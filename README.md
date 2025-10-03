@@ -33,22 +33,21 @@ from warpconvnet.nn.modules.sequential import Sequential
 from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig
 from warpconvnet.ops.reductions import REDUCTIONS
 
-# coords: Float[Tensor, "B N 3"]  # your input point clouds
-point = Sequential(
+point_conv = Sequential(
     PointConv(24, 64, neighbor_search_args=RealSearchConfig("knn", knn_k=16)),
     nn.LayerNorm(64),
     nn.ReLU(),
 )
-sparse = Sequential(
+sparse_conv = Sequential(
     SparseConv3d(64, 128, kernel_size=3, stride=2),
     nn.ReLU(),
 )
 
 coords: Float[Tensor, "B N 3"]  # noqa: F821
 pc: Points = Points.from_list_of_coordinates(coords, encoding_channels=8, encoding_range=1)
-pc = point(pc)
+pc = point_conv(pc)
 vox: Voxels = pc.to_voxels(reduction=REDUCTIONS.MEAN, voxel_size=0.05)
-vox = sparse(vox)
+vox = sparse_conv(vox)
 dense: Tensor = vox.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=(2, 2, 2))
 # feed `dense` to your 3D CNN head for classification
 ```
