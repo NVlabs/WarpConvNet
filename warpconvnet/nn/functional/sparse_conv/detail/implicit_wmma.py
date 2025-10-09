@@ -89,7 +89,7 @@ def _wmma_implicit_gemm_backward_logic(
     min_dtype = _min_dtype(in_features.dtype, weight.dtype, grad_output.dtype)
     if min_dtype not in [torch.float16, torch.bfloat16]:
         # wmma not supported for data types other than float16 and bfloat16
-        return int(_C.gemm.GemmStatus.kErrorInvalidParameters)
+        return int(_C.gemm.GemmStatus.kErrorInvalidParameters), -1
     _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
