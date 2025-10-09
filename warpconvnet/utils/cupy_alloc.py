@@ -19,6 +19,8 @@ def _torch_alloc(size: int, device_id: int) -> Any:
 
 
 def _torch_free(mem_ptr: int, device_id: int) -> None:
+    if torch is None:
+        return
     torch.cuda.caching_allocator_delete(mem_ptr)
 
 
