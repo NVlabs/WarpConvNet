@@ -53,7 +53,7 @@ def voxel_downsample_csr_mapping(
     batched_points: Float[Tensor, "N 3"],  # noqa: F722,F821
     offsets: Int[Tensor, "B + 1"],  # noqa: F722,F821
     voxel_size: float,
-    unique_method: Literal["torch", "ravel", "morton"] | None = None,
+    unique_method: Literal["torch", "ravel", "morton"] = "torch",
 ) -> Tuple[
     Int[Tensor, "M 3"],  # noqa: F821
     Int[Tensor, "B+1"],  # noqa: F821
@@ -221,10 +221,8 @@ def voxel_downsample_mapping(
         down_batched_points = down_batched_points.int()
 
     # Get the batch index
-    up_bcoords = batch_indexed_coordinates(up_batched_points, up_offsets, return_type="torch")
-    down_bcoords = batch_indexed_coordinates(
-        down_batched_points, down_offsets, return_type="torch"
-    )
+    up_bcoords = batch_indexed_coordinates(up_batched_points, up_offsets)
+    down_bcoords = batch_indexed_coordinates(down_batched_points, down_offsets)
 
     down_table = TorchHashTable.from_keys(down_bcoords)
     # Get the map that maps up_batched_points[up_map] ~= down_batched_points.

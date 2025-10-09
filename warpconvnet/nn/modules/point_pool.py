@@ -35,7 +35,7 @@ class PointPoolBase(BaseSpatialModule):
         Output geometry type. Defaults to ``"point"``.
     unique_method : {"torch", "ravel", "morton"}, optional
         Method used to find unique voxel indices. Defaults to ``"torch"``.
-    avereage_pooled_coordinates : bool, optional
+    average_pooled_coordinates : bool, optional
         If ``True`` average coordinates of points within each voxel. Defaults to ``False``.
     return_neighbor_search_result : bool, optional
         If ``True`` also return the neighbor search result. Defaults to ``False``.
@@ -48,7 +48,7 @@ class PointPoolBase(BaseSpatialModule):
         downsample_voxel_size: Optional[float] = None,
         return_type: Literal["point", "sparse"] = "point",
         unique_method: Literal["torch", "ravel", "morton"] = "torch",
-        avereage_pooled_coordinates: bool = False,
+        average_pooled_coordinates: bool = False,
         return_neighbor_search_result: bool = False,
     ):
         super().__init__()
@@ -60,7 +60,7 @@ class PointPoolBase(BaseSpatialModule):
         self.return_type = return_type
         self.return_neighbor_search_result = return_neighbor_search_result
         self.unique_method = unique_method
-        self.avereage_pooled_coordinates = avereage_pooled_coordinates
+        self.average_pooled_coordinates = average_pooled_coordinates
 
     def forward(self, pc: Points) -> Union[Geometry, Tuple[Geometry, RealSearchResult]]:
         return point_pool(
@@ -71,7 +71,7 @@ class PointPoolBase(BaseSpatialModule):
             return_type=self.return_type,
             return_neighbor_search_result=self.return_neighbor_search_result,
             unique_method=self.unique_method,
-            avereage_pooled_coordinates=self.avereage_pooled_coordinates,
+            average_pooled_coordinates=self.average_pooled_coordinates,
         )
 
 
