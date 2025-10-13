@@ -18,13 +18,38 @@ from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.modules.activations import GELU, DropPath
-from warpconvnet.nn.modules.attention import FeedForward, PatchAttention
+from warpconvnet.nn.modules.attention import PatchAttention
 from warpconvnet.nn.modules.base_module import BaseSpatialModel, BaseSpatialModule
 from warpconvnet.nn.modules.mlp import Linear
 from warpconvnet.nn.modules.normalizations import LayerNorm
-from warpconvnet.nn.modules.sequential import Sequential, TupleSequential
+from warpconvnet.nn.modules.sequential import Sequential
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
 from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper, SparseMaxPool, SparseUnpool
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        hidden_channels=None,
+        out_channels=None,
+        act_layer=nn.GELU,
+        drop=0.0,
+    ):
+        super().__init__()
+        out_channels = out_channels or in_channels
+        hidden_channels = hidden_channels or in_channels
+        self.mlp = Sequential(
+            nn.Linear(in_channels, hidden_channels),
+            act_layer(),
+            nn.Dropout(drop),
+            nn.Linear(hidden_channels, out_channels),
+            nn.Dropout(drop),
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+        return x
 
 
 class PatchAttentionBlock(BaseSpatialModule):
@@ -77,9 +102,11 @@ class PatchAttentionBlock(BaseSpatialModule):
             order=order,
         )
         self.norm2 = norm_layer(attention_channels)
-        self.mlp = FeedForward(
-            dim=attention_channels,
-            hidden_dim=int(attention_channels * mlp_ratio),
+        self.mlp = MLP(
+            in_channels=attention_channels,
+            hidden_channels=int(attention_channels * mlp_ratio),
+            out_channels=attention_channels,
+            drop=proj_drop,
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -92,6 +119,51 @@ class PatchAttentionBlock(BaseSpatialModule):
         # MLP block
         x = self.drop_path(self.mlp(self.norm2(x))) + x
         return x
+
+
+class SerializedUnpooling(BaseSpatialModule):
+    """Unpooling module that adds projected features instead of concatenating them.
+
+    This matches the official Point Transformer V3 implementation's SerializedUnpooling.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        skip_channels: int,
+        out_channels: int,
+        kernel_size: int = 2,
+        stride: int = 2,
+        norm_layer: type = nn.BatchNorm1d,
+        act_layer: type = GELU,
+    ):
+        super().__init__()
+        self.proj = Sequential(
+            nn.Linear(in_channels, out_channels),
+            norm_layer(out_channels) if norm_layer is not None else nn.Identity(),
+            act_layer() if act_layer is not None else nn.Identity(),
+        )
+        self.proj_skip = Sequential(
+            nn.Linear(skip_channels, out_channels),
+            norm_layer(out_channels) if norm_layer is not None else nn.Identity(),
+            act_layer() if act_layer is not None else nn.Identity(),
+        )
+        self.unpool = SparseUnpool(
+            kernel_size=kernel_size,
+            stride=stride,
+            concat_unpooled_st=False,
+        )
+
+    def forward(self, x: Geometry, skip: Geometry) -> Geometry:
+        # Project upsampled features
+        x = self.proj(x)
+        # Unpool to original resolution, using skip for unpooling metadata
+        x = self.unpool(x, skip)
+        # Project skip connection features
+        skip = self.proj_skip(skip)
+        # Add them together
+        out = x.replace(batched_features=x.batched_features + skip.batched_features)
+        return out
 
 
 class PointTransformerV3(BaseSpatialModel):
@@ -137,6 +209,7 @@ class PointTransformerV3(BaseSpatialModel):
                 in_channels,
                 enc_channels[0],
                 kernel_size=5,
+                bias=False,
             ),
             nn.BatchNorm1d(enc_channels[0]),
             nn.GELU(),
@@ -184,17 +257,14 @@ class PointTransformerV3(BaseSpatialModel):
         dec_channels_list = list(dec_channels) + [enc_channels[-1]]
         for i in reversed(range(num_level - 1)):
             up_convs.append(
-                TupleSequential(
-                    nn.Linear(dec_channels_list[i + 1], dec_channels_list[i]),
-                    SparseUnpool(
-                        kernel_size=2,
-                        stride=2,
-                        concat_unpooled_st=True,
-                    ),
-                    nn.Linear(dec_channels_list[i] + enc_channels[i], dec_channels_list[i]),
-                    nn.BatchNorm1d(dec_channels_list[i]),
-                    nn.GELU(),
-                    tuple_layer=1,
+                SerializedUnpooling(
+                    in_channels=dec_channels_list[i + 1],
+                    skip_channels=enc_channels[i],
+                    out_channels=dec_channels_list[i],
+                    kernel_size=2,
+                    stride=2,
+                    norm_layer=nn.BatchNorm1d,
+                    act_layer=GELU,
                 )
             )
             level_blocks = nn.ModuleList(
