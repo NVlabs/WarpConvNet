@@ -77,7 +77,10 @@ pip install .
 
 # If this fails, please create an issue on https://github.com/NVlabs/WarpConvNet/issues and try running the following commands:
 cd WarpConvNet
-pip install -e .
+# Option 1
+python setup.py build_ext --inplace
+# Option 2
+pip install -e . --no-deps
 ```
 
 Available optional dependency groups:
