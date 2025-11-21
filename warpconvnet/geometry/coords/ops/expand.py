@@ -29,40 +29,51 @@ def expand_coords(
       - Adding coords in a GPU kernel.
         - instead of creating coords explicitly, generate the new coords in shared memory and add them to the hashtable directly.
     """
-    num_total_kernels = np.prod(kernel_size)
-    if kernel_batch is None:
-        kernel_batch = num_total_kernels // kernel_size[0]
-    # Create a vector hashtable for the batched coordinates
-    hashtable = TorchHashTable.from_keys(batch_indexed_coords)
-    # Initialize the unique coordinates with the batched coordinates
-    unique_coords = batch_indexed_coords
+    target_device = batch_indexed_coords.device
+    if target_device.type != "cuda":
+        raise ValueError(f"expand_coords requires CUDA tensors, got {target_device}")
 
-    offsets = kernel_offsets_from_size(kernel_size, kernel_dilation).to(
-        batch_indexed_coords.device
+    coords = batch_indexed_coords.to(dtype=torch.int32, device=target_device).contiguous()
+    num_input = coords.shape[0]
+
+    num_total_kernels = int(np.prod(kernel_size))
+    if kernel_batch is None:
+        kernel_batch = max(1, num_total_kernels // kernel_size[0])
+    else:
+        kernel_batch = max(1, min(kernel_batch, num_total_kernels))
+
+    offsets = kernel_offsets_from_size(kernel_size, kernel_dilation, device=target_device)
+    offsets = offsets.to(dtype=torch.int32).contiguous()
+
+    # Start with a moderate load factor and grow as needed.
+    table_capacity = max(16, int(max(1, num_input) * 4))
+    hashtable = TorchHashTable.from_keys(
+        coords,
+        device=target_device,
+        capacity=table_capacity,
+        vector_capacity=num_input,
     )
 
     for batch_start in range(0, num_total_kernels, kernel_batch):
         batch_end = min(batch_start + kernel_batch, num_total_kernels)
-        # Calculate offsets
         curr_offsets = offsets[batch_start:batch_end]
+        if curr_offsets.numel() == 0:
+            continue
+        # Ensure the table has enough free slots for the upcoming insertions.
+        potential_entries = hashtable.num_entries + num_input * curr_offsets.shape[0]
+        if potential_entries > hashtable.capacity // 2:
+            new_capacity = max(potential_entries * 2, hashtable.capacity * 2)
+            new_vector_capacity = max(potential_entries, hashtable.num_entries * 2)
+            hashtable = TorchHashTable.from_keys(
+                hashtable.vector_keys,
+                hash_method=hashtable.hash_method,
+                device=target_device,
+                capacity=new_capacity,
+                vector_capacity=new_vector_capacity,
+            )
+        hashtable.expand_with_offsets(coords, curr_offsets)
 
-        # Apply offsets in batch
-        new_batched_coords = batch_indexed_coords.unsqueeze(0) + curr_offsets.unsqueeze(1)
-        new_batched_coords = new_batched_coords.view(-1, 4)
-
-        # Query the hashtable for all new coordinates at once
-        indices = hashtable.search(new_batched_coords)
-        not_in_hashtable = indices < 0
-
-        # Add unique coordinates
-        unique_coords = torch.cat([unique_coords, new_batched_coords[not_in_hashtable]], dim=0)
-        # Update hashtable with new unique coordinates
-        hashtable = TorchHashTable.from_keys(unique_coords)
-        # Get the unique coordinates
-        unique_coords = hashtable.unique_vector_keys
-
-    # sort the coordinates and return the coordinate and offset
-    # sort the batch index
+    unique_coords = hashtable.vector_keys.contiguous()
     out_coords = unique_coords[torch.argsort(unique_coords[:, 0])]
     out_batch_index = out_coords[:, 0]
     out_offsets = offsets_from_batch_index(out_batch_index)

@@ -4,7 +4,7 @@
 import enum
 import math
 import os
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 
 import cupy as cp
 import numpy as np
@@ -12,6 +12,10 @@ import torch
 from torch import Tensor
 
 from warpconvnet.utils.cuda_utils import load_kernel
+
+_EXPAND_STATUS_SUCCESS = 0
+_EXPAND_STATUS_VECTOR_OVERFLOW = 1
+_EXPAND_STATUS_TABLE_FULL = 2
 
 
 class HashMethod(enum.Enum):
@@ -44,10 +48,13 @@ class TorchHashTable:
     _vector_keys: Tensor = None  # Shape: (num_keys, key_dim), dtype=torch.int32
     _key_dim: int = -1
     _device: torch.device = None
+    _num_entries: int = 0
+    _vector_capacity: int = 0
 
     _prepare_kernel: cp.RawKernel
     _insert_kernel: cp.RawKernel  # Will hold the specific insert kernel (e.g., _fnv1a)
     _search_kernel: cp.RawKernel  # Will hold the specific search kernel (e.g., _fnv1a)
+    _expand_kernel: cp.RawKernel
 
     def __init__(
         self,
@@ -71,6 +78,8 @@ class TorchHashTable:
         self._capacity = capacity
         self._hash_method_enum = hash_method
         self._device = torch.device(device)
+        self._num_entries = 0
+        self._vector_capacity = 0
 
         # Load CUDA kernels using cupy RawKernel loader
         # cuda_utils.py automatically handles the csrc path for just filename
@@ -80,6 +89,7 @@ class TorchHashTable:
         suffix = hash_method.kernel_suffix()
         self._insert_kernel = load_kernel(f"insert_kernel_{suffix}", "hashmap_kernels.cu")
         self._search_kernel = load_kernel(f"search_kernel_{suffix}", "hashmap_kernels.cu")
+        self._expand_kernel = load_kernel(f"expand_insert_kernel_{suffix}", "hashmap_kernels.cu")
 
     @property
     def capacity(self) -> int:
@@ -99,7 +109,16 @@ class TorchHashTable:
     def key_dim(self) -> int:
         return self._key_dim
 
-    def insert(self, vec_keys: Tensor, threads_per_block: int = 256):
+    @property
+    def num_entries(self) -> int:
+        return self._num_entries
+
+    def insert(
+        self,
+        vec_keys: Tensor,
+        threads_per_block: int = 256,
+        storage_capacity: Optional[int] = None,
+    ):
         """Insert vector keys (PyTorch Tensor) into the hash table.
 
         Args:
@@ -130,8 +149,14 @@ class TorchHashTable:
                     f"Input vec_keys must have dtype torch.int32, got {vec_keys.dtype}"
                 )
 
+        vec_keys = vec_keys.contiguous()
+
         num_keys, key_dim = vec_keys.shape
         self._key_dim = key_dim
+
+        if storage_capacity is None:
+            storage_capacity = num_keys
+        storage_capacity = max(storage_capacity, num_keys)
 
         assert self._capacity > 0
         assert (
@@ -140,8 +165,13 @@ class TorchHashTable:
 
         # Allocate table on the target device
         self._table_kvs = torch.empty((self._capacity, 2), dtype=torch.int32, device=self.device)
-        # Store reference to original keys (already checked for device/dtype)
-        self._vector_keys = vec_keys
+        # Allocate storage for vector keys to allow future growth
+        self._vector_keys = torch.empty(
+            (storage_capacity, key_dim), dtype=torch.int32, device=self.device
+        )
+        self._vector_keys[:num_keys] = vec_keys
+        self._vector_capacity = storage_capacity
+        self._num_entries = num_keys
 
         # --- Launch Prepare Kernel ---
         grid_size_prep = math.ceil(self._capacity / threads_per_block)
@@ -175,6 +205,8 @@ class TorchHashTable:
         vec_keys: Union[Tensor, np.ndarray],
         hash_method: HashMethod = HashMethod.CITY,
         device: Union[str, torch.device] = "cuda",
+        capacity: Optional[int] = None,
+        vector_capacity: Optional[int] = None,
     ):
         """Create a hash table from a set of vector keys.
 
@@ -215,11 +247,14 @@ class TorchHashTable:
                 f"Input vec_keys for from_keys must be 2D, got {vec_keys.ndim} dimensions"
             )
 
+        vec_keys = vec_keys.contiguous()
+
         num_keys = len(vec_keys)
-        capacity = max(16, int(num_keys * 2))
+        chosen_capacity = capacity if capacity is not None else max(16, int(num_keys * 2))
+        storage_capacity = vector_capacity if vector_capacity is not None else num_keys
         # Pass the hash_method and device to the constructor
-        obj = cls(capacity=capacity, hash_method=hash_method, device=target_device)
-        obj.insert(vec_keys)
+        obj = cls(capacity=chosen_capacity, hash_method=hash_method, device=target_device)
+        obj.insert(vec_keys, storage_capacity=storage_capacity)
         return obj
 
     def search(
@@ -300,6 +335,88 @@ class TorchHashTable:
 
         return results
 
+    def expand_with_offsets(
+        self,
+        base_coords: Tensor,
+        offsets: Tensor,
+        threads_per_block: int = 256,
+    ):
+        """Expand the hash table by applying offsets to base coordinates on device."""
+        if self._table_kvs is None or self._vector_keys is None:
+            raise RuntimeError(
+                "Hash table has not been populated. Call insert() or from_keys() first."
+            )
+
+        target_device = self.device
+        if not isinstance(base_coords, torch.Tensor):
+            base_coords = torch.as_tensor(base_coords, device=target_device)
+        if not isinstance(offsets, torch.Tensor):
+            offsets = torch.as_tensor(offsets, device=target_device)
+
+        if base_coords.device != target_device:
+            base_coords = base_coords.to(target_device)
+        if offsets.device != target_device:
+            offsets = offsets.to(target_device)
+
+        if base_coords.dtype != torch.int32:
+            base_coords = base_coords.to(dtype=torch.int32)
+        if offsets.dtype != torch.int32:
+            offsets = offsets.to(dtype=torch.int32)
+
+        base_coords = base_coords.contiguous()
+        offsets = offsets.contiguous()
+
+        if base_coords.ndim != 2 or offsets.ndim != 2:
+            raise ValueError("base_coords and offsets must be 2D tensors.")
+        if base_coords.shape[1] != self._key_dim or offsets.shape[1] != self._key_dim:
+            raise ValueError("Key dimension mismatch between hash table and inputs.")
+
+        num_base = base_coords.shape[0]
+        num_offsets = offsets.shape[0]
+        if num_base == 0 or num_offsets == 0:
+            return
+
+        total_candidates = num_base * num_offsets
+        self._ensure_vector_storage(self._num_entries + total_candidates)
+
+        num_entries_tensor = torch.tensor(
+            [self._num_entries], dtype=torch.int32, device=target_device
+        )
+        status_tensor = torch.zeros(1, dtype=torch.int32, device=target_device)
+
+        grid_size = (total_candidates + threads_per_block - 1) // threads_per_block
+        shared_mem = threads_per_block * self._key_dim * 4
+
+        self._expand_kernel(
+            (grid_size,),
+            (threads_per_block,),
+            (
+                self._table_kvs.data_ptr(),
+                self._vector_keys.data_ptr(),
+                base_coords.data_ptr(),
+                offsets.data_ptr(),
+                num_base,
+                num_offsets,
+                self._key_dim,
+                self._capacity,
+                self._vector_capacity,
+                num_entries_tensor.data_ptr(),
+                status_tensor.data_ptr(),
+            ),
+            shared_mem=shared_mem,
+        )
+        torch.cuda.synchronize(target_device)
+
+        status = int(status_tensor.item())
+        if status == _EXPAND_STATUS_VECTOR_OVERFLOW:
+            raise RuntimeError(
+                "TorchHashTable.expand_with_offsets exceeded vector storage capacity."
+            )
+        if status == _EXPAND_STATUS_TABLE_FULL:
+            raise RuntimeError("TorchHashTable.expand_with_offsets ran out of hash table slots.")
+
+        self._num_entries = int(num_entries_tensor.item())
+
     @property
     def unique_index(self) -> Tensor:
         """Get sorted unique indices from the hash table.
@@ -315,7 +432,8 @@ class TorchHashTable:
                 "Hash table has not been populated. Call insert() or from_keys() first."
             )
 
-        indices = self.search(self._vector_keys)
+        vec_keys = self.vector_keys
+        indices = self.search(vec_keys)
         valid_indices = indices[indices != -1]
         # torch.unique returns sorted unique values
         unique_indices = torch.unique(valid_indices)
@@ -328,7 +446,7 @@ class TorchHashTable:
             raise RuntimeError(
                 "Hash table has not been populated. Call insert() or from_keys() first."
             )
-        return self._vector_keys
+        return self._vector_keys[: self._num_entries]
 
     @property
     def unique_vector_keys(self) -> Tensor:
@@ -344,7 +462,24 @@ class TorchHashTable:
         if unique_idx.numel() == 0:  # Use numel() for checking empty tensors
             # Return an empty tensor with the correct shape, dtype, and device
             return torch.empty((0, self.key_dim), dtype=torch.int32, device=self.device)
-        return self._vector_keys[unique_idx]
+        vec_keys = self.vector_keys
+        return vec_keys[unique_idx]
+
+    def _ensure_vector_storage(self, required_capacity: int):
+        if self._vector_keys is None:
+            raise RuntimeError(
+                "Hash table has not been populated. Call insert() or from_keys() first."
+            )
+        if required_capacity <= self._vector_capacity:
+            return
+        growth = max(required_capacity // 2, 1)
+        new_capacity = max(required_capacity, self._vector_capacity + growth)
+        new_storage = torch.empty(
+            (new_capacity, self._key_dim), dtype=torch.int32, device=self.device
+        )
+        new_storage[: self._num_entries] = self.vector_keys
+        self._vector_keys = new_storage
+        self._vector_capacity = new_capacity
 
     def to_dict(self) -> dict:
         """Serializes the data arrays and metadata (transfers tensors to CPU as NumPy arrays)."""
@@ -354,7 +489,7 @@ class TorchHashTable:
         else:
             # Ensure tensors are on CPU before converting to numpy
             table_kvs_np = self._table_kvs.cpu().numpy()
-            vec_keys_np = self._vector_keys.cpu().numpy()
+            vec_keys_np = self.vector_keys.cpu().numpy()
 
         return {
             "table_kvs": table_kvs_np,
@@ -363,6 +498,8 @@ class TorchHashTable:
             "capacity": self._capacity,
             "key_dim": self._key_dim,
             "device": str(self.device),  # Store device as string
+            "num_entries": self._num_entries,
+            "vector_capacity": self._vector_capacity,
         }
 
     def from_dict(self, data: dict):
@@ -378,6 +515,8 @@ class TorchHashTable:
             "table_kvs",
             "vec_keys",
             "device",
+            "num_entries",
+            "vector_capacity",
         }
         if not required_keys.issubset(data.keys()):
             raise ValueError(f"Data dictionary missing required keys. Need: {required_keys}")
@@ -389,6 +528,8 @@ class TorchHashTable:
         vec_keys_np = data["vec_keys"]
         device_str = data["device"]
         target_device = torch.device(device_str)
+        num_entries = int(data["num_entries"])
+        vector_capacity = int(data["vector_capacity"])
 
         # Re-initialize the object with the correct capacity, hash method, and device
         self.__init__(
@@ -396,6 +537,8 @@ class TorchHashTable:
         )
 
         self._key_dim = key_dim
+        self._vector_capacity = vector_capacity
+        self._num_entries = num_entries
 
         # Load data if present, creating tensors on the target device
         if table_kvs_np is not None:
@@ -408,16 +551,14 @@ class TorchHashTable:
             self._table_kvs = None
 
         if vec_keys_np is not None:
-            self._vector_keys = torch.as_tensor(
-                vec_keys_np, dtype=torch.int32, device=target_device
+            # Allocate full storage and copy populated rows.
+            self._vector_keys = torch.empty(
+                (self._vector_capacity, self._key_dim), dtype=torch.int32, device=target_device
             )
-            assert self._vector_keys.ndim == 2
-            # If key_dim wasn't -1 initially, check consistency
-            if self._key_dim != -1:
-                assert self._vector_keys.shape[1] == self._key_dim
-            else:  # Infer key_dim if it wasn't set (e.g., loading into a fresh object)
-                self._key_dim = self._vector_keys.shape[1]
-            assert self._vector_keys.dtype == torch.int32
+            vec_keys_t = torch.as_tensor(vec_keys_np, dtype=torch.int32, device=target_device)
+            assert vec_keys_t.ndim == 2
+            assert vec_keys_t.shape[1] == self._key_dim
+            self._vector_keys[: self._num_entries] = vec_keys_t
         else:
             self._vector_keys = None
 

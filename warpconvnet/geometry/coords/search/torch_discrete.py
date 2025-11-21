@@ -209,7 +209,7 @@ def _kernel_map_from_offsets(
 
     # Ensure contiguous tensors for kernel launch
     table_kvs_cont = cp.from_dlpack(hashtable._table_kvs.contiguous())
-    vector_keys_cont = cp.from_dlpack(hashtable._vector_keys.contiguous())
+    vector_keys_cont = cp.from_dlpack(hashtable.vector_keys.contiguous())
     query_coords_cont = cp.from_dlpack(batched_query_coords.contiguous())
     kernel_offsets_cont = cp.from_dlpack(kernel_offsets.contiguous())
 
@@ -306,7 +306,7 @@ def _kernel_map_from_size(
 
         # Prepare kernel arguments
         table_kvs_cont = cp.from_dlpack(hashtable._table_kvs.contiguous())
-        vector_keys_cont = cp.from_dlpack(hashtable._vector_keys.contiguous())
+        vector_keys_cont = cp.from_dlpack(hashtable.vector_keys.contiguous())
         query_coords_cont = cp.from_dlpack(batched_query_coords.contiguous())
         kernel_size_arg = cp.array(kernel_sizes, dtype=cp.int32)
 
