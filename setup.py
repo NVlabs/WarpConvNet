@@ -3,11 +3,21 @@
 
 import os
 import subprocess
+import sys
 from setuptools import setup
 
 import torch
 import torch.utils.cpp_extension
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+version_str = getattr(torch, "__version__", "")
+if isinstance(version_str, str) and "cpu" in version_str.lower():
+    print(
+        f"ERROR: warpconvnet requires a CUDA-enabled PyTorch build; detected CPU-only PyTorch ({version_str}). "
+        "Please install a CUDA build of PyTorch.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 # Get CUDA toolkit path

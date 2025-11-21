@@ -23,6 +23,11 @@ def expand_coords(
 ) -> Tuple[Int[Tensor, "M D+1"], Int[Tensor, "B + 1"]]:  # noqa: F821
     """
     Expand the coordinates by the kernel size
+
+    TODOs(cchoy@2025-11-21):
+      - Fix inefficiency from generating the new coords in a loop
+      - Adding coords in a GPU kernel.
+        - instead of creating coords explicitly, generate the new coords in shared memory and add them to the hashtable directly.
     """
     num_total_kernels = np.prod(kernel_size)
     if kernel_batch is None:

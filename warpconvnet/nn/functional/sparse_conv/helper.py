@@ -17,9 +17,6 @@ from warpconvnet.geometry.coords.ops.stride import stride_coords
 from warpconvnet.geometry.coords.search.cache import IntSearchCache, IntSearchCacheKey
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
-from warpconvnet.geometry.coords.ops.expand import (
-    expand_coords,
-)
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, encode
 from warpconvnet.nn.functional.sparse_pool import sparse_reduce
 from warpconvnet.utils.ntuple import ntuple
@@ -38,6 +35,81 @@ logger = get_logger(__name__)
 class STRIDED_CONV_MODE(Enum):
     REDUCE_AND_STRIDE = "reduce_and_stride"  # Apply convolution on the pooled input. This increases the density of the input
     STRIDE_ONLY = "stride_only"
+
+
+def _intcoords_from_batch_indexed(
+    reference: IntCoords,
+    batch_indexed_coords: Int[Tensor, "N D+1"],  # noqa: F821
+    offsets: Int[Tensor, "B+1"],  # noqa: F821
+) -> IntCoords:
+    """
+    Instantiate an IntCoords using metadata from a reference coordinate set.
+    """
+    offsets_cpu = offsets.to(device="cpu", dtype=reference.offsets.dtype)
+    return reference.__class__(
+        batch_indexed_coords[:, 1:],
+        offsets_cpu,
+        voxel_size=reference.voxel_size,
+        voxel_origin=reference.voxel_origin,
+        tensor_stride=reference.tensor_stride,
+        device=reference.batched_tensor.device,
+    )
+
+
+def _apply_generative_policy(
+    input_sparse_tensor: Voxels,
+    kernel_size: Tuple[int, ...],
+    kernel_dilation: Tuple[int, ...],
+    stride: Tuple[int, ...],
+    stride_mode: STRIDED_CONV_MODE,
+    transposed: bool,
+) -> Tuple[Int[Tensor, "N D+1"], Int[Tensor, "B+1"], Int[Tensor, "N D+1"]]:  # noqa: F821
+    """
+    Resolve generative output coordinates using IntCoords primitives.
+
+    Returns:
+        batch_indexed_out_coords: Expanded coordinates with batch column.
+        out_offsets: Offsets for the expanded coordinates.
+        updated_batch_indexed_in_coords: Coordinates to use when building the kernel map.
+    """
+    if transposed:
+        raise AssertionError("Transposed and generative convolution is not supported yet")
+
+    input_coords = input_sparse_tensor.batched_coordinates
+    batch_indexed_in_coords = input_sparse_tensor.batch_indexed_coordinates
+
+    if all(s == 1 for s in stride):
+        expanded_coords = input_coords.expand(kernel_size, kernel_dilation)
+        return (
+            expanded_coords.batch_indexed_coordinates,
+            expanded_coords.offsets,
+            batch_indexed_in_coords,
+        )
+
+    if stride_mode not in (STRIDED_CONV_MODE.STRIDE_ONLY, STRIDED_CONV_MODE.REDUCE_AND_STRIDE):
+        raise ValueError(f"Unsupported stride_mode {stride_mode} for generative convolution")
+
+    strided_batch_indexed_coords, strided_offsets = stride_coords(
+        batch_indexed_in_coords,
+        stride,
+    )
+    strided_coords = _intcoords_from_batch_indexed(
+        input_coords,
+        strided_batch_indexed_coords,
+        strided_offsets,
+    )
+    expanded_coords = strided_coords.expand(kernel_size, kernel_dilation)
+
+    if stride_mode == STRIDED_CONV_MODE.STRIDE_ONLY:
+        kernel_map_in_coords = batch_indexed_in_coords
+    else:  # REDUCE_AND_STRIDE
+        kernel_map_in_coords = strided_coords.batch_indexed_coordinates
+
+    return (
+        expanded_coords.batch_indexed_coordinates,
+        expanded_coords.offsets,
+        kernel_map_in_coords,
+    )
 
 
 def spatially_sparse_conv(
@@ -231,35 +303,24 @@ def generate_output_coords_and_kernel_map(
         ), "Output spatially sparse tensor is not supported with generative convolution"
         batch_indexed_out_coords = output_spatially_sparse_tensor.batch_indexed_coordinates
         out_offsets = output_spatially_sparse_tensor.offsets
-    elif generative and all(s == 1 for s in stride):
-        assert not transposed, "Transposed and generative convolution is not supported yet"
-        batch_indexed_out_coords, out_offsets = expand_coords(
+    elif generative:
+        (
+            batch_indexed_out_coords,
+            out_offsets,
             batch_indexed_in_coords,
+        ) = _apply_generative_policy(
+            input_sparse_tensor,
             kernel_size=kernel_size,
             kernel_dilation=kernel_dilation,
+            stride=stride,
+            stride_mode=stride_mode,
+            transposed=transposed,
         )
     elif any(s != 1 for s in stride):
         batch_indexed_out_coords, out_offsets = stride_coords(
             batch_indexed_in_coords,
             stride,
         )
-        # if generative, we need to expand the coordinates in addition
-        if generative and stride_mode == STRIDED_CONV_MODE.STRIDE_ONLY:
-            batch_indexed_out_coords, out_offsets = expand_coords(
-                batch_indexed_out_coords,
-                kernel_size=kernel_size,
-                kernel_dilation=kernel_dilation,
-            )
-        elif generative and stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE:
-            batch_indexed_expanded_coords, expanded_offsets = expand_coords(
-                batch_indexed_out_coords,
-                kernel_size=kernel_size,
-                kernel_dilation=kernel_dilation,
-            )
-            # rename
-            batch_indexed_in_coords = batch_indexed_out_coords
-            batch_indexed_out_coords = batch_indexed_expanded_coords
-            out_offsets = expanded_offsets
     elif all(s == 1 for s in stride):
         batch_indexed_out_coords, out_offsets = (
             batch_indexed_in_coords,

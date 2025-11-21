@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List, Tuple, Optional, Union
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 
 import torch
 from torch import Tensor
@@ -11,7 +11,11 @@ from warpconvnet.geometry.base.coords import Coords
 from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, encode
 from warpconvnet.geometry.coords.ops.voxel import voxel_downsample_random_indices
-from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
+from warpconvnet.geometry.coords.ops.batch_index import (
+    batch_indexed_coordinates,
+    batch_index_from_offset,
+)
+from warpconvnet.geometry.coords.ops.expand import expand_coords
 from warpconvnet.geometry.utils.list_to_batch import list_to_cat_tensor
 from warpconvnet.utils.ntuple import ntuple
 
@@ -85,6 +89,101 @@ class IntCoords(Coords):
             self.batched_tensor, self.offsets, self.voxel_size, self.voxel_origin
         )
         return self.__class__(self.batched_tensor[unique_indices], batch_offsets)
+
+    def prune(
+        self,
+        mask: Union[Bool[Tensor, "N"], torch.Tensor],  # noqa: F821
+    ) -> "IntCoords":
+        """
+        Prune coordinates based on a mask.
+
+        Args:
+            mask: Boolean tensor of shape (N,) indicating which points to keep.
+
+        Returns:
+            New IntCoords instance with pruned coordinates.
+        """
+        assert mask.shape[0] == self.batched_tensor.shape[0], "Mask must match tensor shape"
+
+        mask = mask.to(self.batched_tensor.device)
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+
+        # Get original batch indices
+        batch_indices = batch_index_from_offset(self.offsets).to(self.batched_tensor.device)
+
+        # Filter tensor and batch indices
+        new_tensor = self.batched_tensor[mask]
+        new_batch_indices = batch_indices[mask]
+
+        # Recompute offsets
+        # We must preserve the number of batches (B), even if some become empty.
+        B = self.offsets.shape[0] - 1
+        counts = torch.bincount(new_batch_indices.long(), minlength=B)
+        new_offsets = torch.cat(
+            [
+                torch.zeros(1, device=counts.device, dtype=counts.dtype),
+                counts.cumsum(dim=0),
+            ]
+        ).to(device="cpu", dtype=self.offsets.dtype)
+
+        if hasattr(self, "_hashmap"):
+            self._hashmap = None
+
+        return self.__class__(
+            new_tensor,
+            new_offsets,
+            voxel_size=self.voxel_size,
+            voxel_origin=self.voxel_origin,
+            tensor_stride=self.tensor_stride,
+            device=self.batched_tensor.device,
+        )
+
+    def expand(
+        self,
+        kernel_size: Union[int, Tuple[int, ...]],
+        dilation: Union[int, Tuple[int, ...]] = 1,
+    ) -> "IntCoords":
+        """
+        Expand coordinates by kernel size.
+
+        Args:
+            kernel_size: Size of the kernel.
+            dilation: Dilation of the kernel.
+
+        Returns:
+            New IntCoords instance with expanded coordinates.
+
+        Notes:
+            - Maintains the existing tensor stride metadata; expansion does not scale coordinates.
+            - The returned coordinates are batch-sorted to align with downstream kernel map generation.
+        """
+        # Prepare inputs for expand_coords
+        ndim = self.num_spatial_dims
+        _kernel_size = ntuple(kernel_size, ndim=ndim)
+        _dilation = ntuple(dilation, ndim=ndim)
+
+        batch_indexed_coords = batch_indexed_coordinates(self.batched_tensor, self.offsets)
+
+        # Call expand_coords
+        out_coords, out_offsets = expand_coords(
+            batch_indexed_coords,
+            _kernel_size,
+            _dilation,
+        )
+
+        # Remove batch index from coords (first column)
+        new_batched_tensor = out_coords[:, 1:]
+        out_offsets_cpu = out_offsets.to(device="cpu", dtype=self.offsets.dtype)
+
+        return self.__class__(
+            new_batched_tensor,
+            out_offsets_cpu,
+            voxel_size=self.voxel_size,
+            voxel_origin=self.voxel_origin,
+            tensor_stride=self.tensor_stride,
+            device=self.batched_tensor.device,
+        )
 
     @property
     def hashmap(self) -> TorchHashTable:
