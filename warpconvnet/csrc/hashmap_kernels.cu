@@ -129,6 +129,78 @@ __device__ inline bool vec_equal(const int* a, const int* b, int dim) {
   return true;
 }
 
+enum ExpandStatus : int {
+  kExpandStatusSuccess = 0,
+  kExpandStatusVectorOverflow = 1,
+  kExpandStatusTableFull = 2,
+};
+
+__device__ inline void set_expand_status(int* status_ptr, ExpandStatus new_status) {
+  if (status_ptr == nullptr) {
+    return;
+  }
+  atomicCAS(status_ptr, kExpandStatusSuccess, static_cast<int>(new_status));
+}
+
+template <typename HashFuncT>
+__device__ inline void insert_candidate_if_absent(int* table_kvs,
+                                                  int* vector_keys,
+                                                  const int* candidate_key,
+                                                  int key_dim,
+                                                  int table_capacity,
+                                                  int vector_capacity,
+                                                  int* num_entries_ptr,
+                                                  int* status_ptr) {
+  const int initial_slot = HashFuncT::hash(candidate_key, key_dim, table_capacity);
+  int slot = initial_slot;
+  int attempts = 0;
+
+  while (attempts < table_capacity) {
+    int* slot_address = &table_kvs[slot * 2];
+    int prev = atomicCAS(slot_address, -1, slot);
+
+    if (prev == -1) {
+      // Reserve the slot and append the candidate to vector_keys.
+      int new_index = atomicAdd(num_entries_ptr, 1);
+      if (new_index >= vector_capacity) {
+        // Roll back reservation and flag overflow.
+        atomicExch(slot_address, -1);
+        table_kvs[slot * 2 + 1] = -1;
+        set_expand_status(status_ptr, kExpandStatusVectorOverflow);
+        return;
+      }
+
+      int* dst = &vector_keys[new_index * key_dim];
+      for (int d = 0; d < key_dim; ++d) {
+        dst[d] = candidate_key[d];
+      }
+
+      __threadfence();
+      table_kvs[slot * 2 + 1] = new_index;
+      return;
+    }
+
+    int vector_index = table_kvs[slot * 2 + 1];
+    if (vector_index < 0) {
+      // Another thread is writing to this slot. Retry without advancing.
+      continue;
+    }
+
+    const int* existing_key = &vector_keys[vector_index * key_dim];
+    if (vec_equal(existing_key, candidate_key, key_dim)) {
+      return;
+    }
+
+    slot = (slot + 1) % table_capacity;
+    if (slot == initial_slot) {
+      break;
+    }
+    attempts++;
+  }
+
+  set_expand_status(status_ptr, kExpandStatusTableFull);
+}
+
 // --- Device Function for Hash Table Search ---
 template <typename HashFuncT>
 __device__ inline int search_hash_table(
@@ -155,13 +227,15 @@ __device__ inline int search_hash_table(
     // Slot is potentially occupied. Read the index stored in the value part.
     int vector_index = table_kvs[slot * 2 + 1];
 
-    // Check for invalid index (e.g., if insertion failed or slot marker is stale)
-    if (vector_index != -1) {
-      const int* candidate_key = &vector_keys[vector_index * key_dim];
-      if (vec_equal(candidate_key, query_key, key_dim)) {
-        // Keys match!
-        return vector_index;
-      }
+    // Negative indices indicate the slot is being populated. Retry the same slot.
+    if (vector_index < 0) {
+      continue;
+    }
+
+    const int* candidate_key = &vector_keys[vector_index * key_dim];
+    if (vec_equal(candidate_key, query_key, key_dim)) {
+      // Keys match!
+      return vector_index;
     }
     // If keys don't match or index was invalid, continue probing.
     slot = (slot + 1) % table_capacity;
@@ -252,6 +326,45 @@ __global__ void search_kernel_templated(const int* __restrict__ table_kvs,
       search_hash_table<HashFuncT>(table_kvs, vector_keys, query_key, key_dim, table_capacity);
 }
 
+template <typename HashFuncT>
+__global__ void expand_insert_kernel_templated(int* table_kvs,
+                                               int* vector_keys,
+                                               const int* __restrict__ base_coords,
+                                               const int* __restrict__ offsets,
+                                               int num_base_coords,
+                                               int num_offsets,
+                                               int key_dim,
+                                               int table_capacity,
+                                               int vector_capacity,
+                                               int* num_entries_ptr,
+                                               int* status_ptr) {
+  extern __shared__ int shared_candidates[];
+  long long global_idx = blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
+  long long total = static_cast<long long>(num_base_coords) * static_cast<long long>(num_offsets);
+  if (global_idx >= total) {
+    return;
+  }
+
+  int offset_idx = static_cast<int>(global_idx / num_base_coords);
+  int base_idx = static_cast<int>(global_idx % num_base_coords);
+
+  int* candidate = &shared_candidates[threadIdx.x * key_dim];
+  const int* base_ptr = &base_coords[base_idx * key_dim];
+  const int* offset_ptr = &offsets[offset_idx * key_dim];
+  for (int d = 0; d < key_dim; ++d) {
+    candidate[d] = base_ptr[d] + offset_ptr[d];
+  }
+
+  insert_candidate_if_absent<HashFuncT>(table_kvs,
+                                        vector_keys,
+                                        candidate,
+                                        key_dim,
+                                        table_capacity,
+                                        vector_capacity,
+                                        num_entries_ptr,
+                                        status_ptr);
+}
+
 // --- Extern "C" Wrappers for CuPy ---
 
 // Insert Wrappers
@@ -298,4 +411,76 @@ extern "C" __global__ void search_kernel_murmur(const int* table_kvs,
                                                 int table_capacity) {
   search_kernel_templated<MurmurHash>(
       table_kvs, vector_keys, search_keys, results, num_search_keys, key_dim, table_capacity);
+}
+
+extern "C" __global__ void expand_insert_kernel_fnv1a(int* table_kvs,
+                                                      int* vector_keys,
+                                                      const int* base_coords,
+                                                      const int* offsets,
+                                                      int num_base_coords,
+                                                      int num_offsets,
+                                                      int key_dim,
+                                                      int table_capacity,
+                                                      int vector_capacity,
+                                                      int* num_entries_ptr,
+                                                      int* status_ptr) {
+  expand_insert_kernel_templated<FNV1AHash>(table_kvs,
+                                            vector_keys,
+                                            base_coords,
+                                            offsets,
+                                            num_base_coords,
+                                            num_offsets,
+                                            key_dim,
+                                            table_capacity,
+                                            vector_capacity,
+                                            num_entries_ptr,
+                                            status_ptr);
+}
+
+extern "C" __global__ void expand_insert_kernel_city(int* table_kvs,
+                                                     int* vector_keys,
+                                                     const int* base_coords,
+                                                     const int* offsets,
+                                                     int num_base_coords,
+                                                     int num_offsets,
+                                                     int key_dim,
+                                                     int table_capacity,
+                                                     int vector_capacity,
+                                                     int* num_entries_ptr,
+                                                     int* status_ptr) {
+  expand_insert_kernel_templated<CityHash>(table_kvs,
+                                           vector_keys,
+                                           base_coords,
+                                           offsets,
+                                           num_base_coords,
+                                           num_offsets,
+                                           key_dim,
+                                           table_capacity,
+                                           vector_capacity,
+                                           num_entries_ptr,
+                                           status_ptr);
+}
+
+extern "C" __global__ void expand_insert_kernel_murmur(int* table_kvs,
+                                                       int* vector_keys,
+                                                       const int* base_coords,
+                                                       const int* offsets,
+                                                       int num_base_coords,
+                                                       int num_offsets,
+                                                       int key_dim,
+                                                       int table_capacity,
+                                                       int vector_capacity,
+                                                       int* num_entries_ptr,
+                                                       int* status_ptr) {
+  expand_insert_kernel_templated<MurmurHash>(table_kvs,
+                                             vector_keys,
+                                             base_coords,
+                                             offsets,
+                                             num_base_coords,
+                                             num_offsets,
+                                             key_dim,
+                                             table_capacity,
+                                             vector_capacity,
+                                             num_entries_ptr,
+                                             status_ptr);
 }
