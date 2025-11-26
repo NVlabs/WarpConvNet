@@ -18,9 +18,9 @@ uv pip install -r docs/requirements.txt
 
 # Build the documentation
 echo "🏗️  Building documentation with ReadTheDocs theme..."
-mkdocs build -f mkdocs-readthedocs.yml
+mkdocs build
 
 echo "✅ Documentation built successfully!"
 echo "📁 Output directory: site/"
-echo "🌐 To serve locally: mkdocs serve -f mkdocs-readthedocs.yml"
-echo "🚀 To deploy: push to main branch (GitHub Actions will handle deployment)" 
+echo "🌐 To serve locally: mkdocs serve"
+echo "🚀 To deploy: push to main branch (GitHub Actions will handle deployment)"

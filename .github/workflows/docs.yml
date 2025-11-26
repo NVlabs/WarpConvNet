@@ -29,16 +29,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install mkdocs
-          pip install mkdocs-rtd-dropdown
-          pip install mkdocstrings
-          pip install mkdocstrings-python
-          pip install pymdown-extensions
-          pip install torch
-          pip install warpconvnet==0.3.4
+          python -m pip install --upgrade pip
+          pip install -r docs/requirements.txt
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
       - name: Build documentation
-        run: mkdocs build -f docs/mkdocs-readthedocs.yml
+        run: mkdocs build
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -58,4 +55,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4 
+        uses: actions/deploy-pages@v4
