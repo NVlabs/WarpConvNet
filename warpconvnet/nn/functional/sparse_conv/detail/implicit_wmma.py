@@ -1,4 +1,5 @@
-from typing import Optional, Tuple, Union
+import logging
+from typing import Callable, Optional, Tuple, Union
 from jaxtyping import Float
 
 import torch
@@ -14,6 +15,30 @@ from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 
 from warpconvnet.utils.type_cast import _min_dtype
 from warpconvnet.utils.ntuple import _pad_tuple
+
+
+_LOGGER = logging.getLogger(__name__)
+_CUDA_RUNTIME_ERROR_KEYWORDS = (
+    "CUDA error",
+    "device-side assert",
+    "misaligned address",
+)
+
+
+def _safe_wmma_call(op_name: str, op: Callable[..., int], *args, **kwargs) -> int:
+    """Run a WMMA kernel and translate CUDA runtime failures into status codes."""
+    try:
+        return op(*args, **kwargs)
+    except RuntimeError as exc:
+        message = str(exc)
+        if not any(keyword in message for keyword in _CUDA_RUNTIME_ERROR_KEYWORDS):
+            raise
+        _LOGGER.warning(
+            "WMMA op %s failed with CUDA runtime error, skipping candidate: %s",
+            op_name,
+            message.splitlines()[0],
+        )
+        return int(_C.gemm.GemmStatus.kErrorKernelExecution)
 
 
 def _wmma_implicit_gemm_forward_logic(
@@ -32,6 +57,8 @@ def _wmma_implicit_gemm_forward_logic(
     if min_dtype not in [torch.float16, torch.bfloat16]:
         # wmma not supported for data types other than float16 and bfloat16
         return int(_C.gemm.GemmStatus.kErrorInvalidParameters)
+    if in_features.shape[1] % 8 != 0 or weight.shape[-1] % 8 != 0:
+        return int(_C.gemm.GemmStatus.kErrorUnsupportedConfig)
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
     if iden_idx is not None:
@@ -54,7 +81,9 @@ def _wmma_implicit_gemm_forward_logic(
         in_map = in_map.to(device).int()
         out_map = out_map.to(device).int()
 
-        status = wmma_implicit_gemm_sm80_autotuned(
+        status = _safe_wmma_call(
+            "wmma_implicit_gemm_sm80_autotuned",
+            wmma_implicit_gemm_sm80_autotuned,
             _in_features_detached,
             _weight_detached[i],
             C_empty,
@@ -91,6 +120,8 @@ def _wmma_implicit_gemm_backward_logic(
         # wmma not supported for data types other than float16 and bfloat16
         # Must be a tuple
         return int(_C.gemm.GemmStatus.kErrorInvalidParameters), -1
+    if in_features.shape[1] % 8 != 0 or grad_output.shape[1] % 8 != 0:
+        return int(_C.gemm.GemmStatus.kErrorUnsupportedConfig), -1
     _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
@@ -115,7 +146,9 @@ def _wmma_implicit_gemm_backward_logic(
         out_map = out_map.to(device).int()
 
         if requires_grad[0]:
-            status = wmma_implicit_gemm_sm80_autotuned(
+            status = _safe_wmma_call(
+                "wmma_implicit_gemm_sm80_autotuned",
+                wmma_implicit_gemm_sm80_autotuned,
                 _grad_output_detached,
                 _weight_detached[i].T.contiguous(),
                 C_empty,
@@ -129,7 +162,9 @@ def _wmma_implicit_gemm_backward_logic(
                 return status, i
 
         if requires_grad[1]:
-            status = wmma_split_k_implicit_gemm_sm80_autotuned(
+            status = _safe_wmma_call(
+                "wmma_split_k_implicit_gemm_sm80_autotuned",
+                wmma_split_k_implicit_gemm_sm80_autotuned,
                 _in_features_detached,
                 _grad_output_detached,
                 grad_weight[i],

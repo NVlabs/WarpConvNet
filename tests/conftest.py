@@ -39,7 +39,7 @@ def setup_small_points():
 @pytest.fixture
 def setup_small_voxels():
     """Setup small test voxels for fast testing."""
-    return _create_voxels_data(B=2, min_N=100, max_N=500, C=4, device="cuda", voxel_size=0.1)
+    return _create_voxels_data(B=2, min_N=100, max_N=500, C=7, device="cuda", voxel_size=0.1)
 
 
 # Medium fixtures for standard tests
@@ -143,3 +143,46 @@ def sample_voxels():
     voxel_size = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
     origin = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
     return Voxels(coords, features, offsets, voxel_size=voxel_size, origin=origin, device="cuda")
+
+
+@pytest.fixture
+def toy_voxels():
+    """Deterministic 2-batch voxels for generative/pruning tests."""
+    device = torch.device("cuda")
+    batch0 = torch.tensor(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+            [2, 2, 2],
+            [3, 1, 3],
+            [4, 3, 0],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    batch1 = torch.tensor(
+        [
+            [4, 4, 4],
+            [5, 4, 4],
+            [4, 5, 4],
+            [4, 4, 5],
+            [6, 2, 0],
+            [3, 6, 1],
+            [7, 1, 3],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    feats0 = torch.arange(batch0.shape[0] * 3, dtype=torch.float32, device=device).reshape(
+        batch0.shape[0], 3
+    )
+    feats1 = torch.arange(batch1.shape[0] * 3, dtype=torch.float32, device=device).reshape(
+        batch1.shape[0], 3
+    )
+    return Voxels(
+        batched_coordinates=[batch0, batch1],
+        batched_features=[feats0, feats1],
+        device=device,
+    )
