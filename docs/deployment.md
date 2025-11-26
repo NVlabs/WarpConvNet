@@ -9,17 +9,20 @@ The documentation is automatically built and deployed using GitHub Actions whene
 ### How it Works
 
 1. **GitHub Actions Workflow**: `.github/workflows/docs.yml`
+
    - Triggers on pushes to main/master branch
    - Installs Python dependencies
    - Builds documentation using MkDocs
    - Deploys to GitHub Pages
 
-2. **Configuration**: `mkdocs-readthedocs.yml`
+2. **Configuration**: `mkdocs.yml`
+
    - Uses ReadTheDocs theme
    - Configures site metadata
    - Sets up navigation structure
 
 3. **Dependencies**: `docs/requirements.txt`
+
    - Lists all required Python packages
    - Ensures consistent builds
 
@@ -32,7 +35,7 @@ If you need to deploy manually:
 uv pip install -r docs/requirements.txt
 
 # Build documentation
-mkdocs build -f mkdocs-readthedocs.yml
+mkdocs build
 
 # The site/ directory contains the built documentation
 ```
@@ -43,7 +46,7 @@ For local development and testing:
 
 ```bash
 # Serve documentation locally
-mkdocs serve -f mkdocs-readthedocs.yml
+mkdocs serve
 
 # This will start a local server at http://127.0.0.1:8000
 ```
@@ -60,16 +63,19 @@ To enable GitHub Pages:
 ## Troubleshooting
 
 ### Build Failures
+
 - Check GitHub Actions logs for error details
 - Ensure all dependencies are listed in `docs/requirements.txt`
 - Verify MkDocs configuration syntax
 
 ### Missing Pages
+
 - Check that all referenced markdown files exist
-- Verify navigation structure in `mkdocs-readthedocs.yml`
+- Verify navigation structure in `mkdocs.yml`
 - Ensure files are committed to the repository
 
 ### Theme Issues
+
 - ReadTheDocs theme is automatically installed by the workflow
-- Check theme configuration in `mkdocs-readthedocs.yml`
-- Verify JavaScript and CSS assets are loading correctly 
+- Check theme configuration in `mkdocs.yml`
+- Verify JavaScript and CSS assets are loading correctly

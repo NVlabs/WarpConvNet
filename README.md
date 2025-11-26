@@ -180,10 +180,10 @@ pytest tests/ --benchmark-only
 uv pip install -r docs/requirements.txt
 
 # Build docs
-mkdocs build -f mkdocs-readthedocs.yml
+mkdocs build
 
 # Serve locally
-mkdocs serve -f mkdocs-readthedocs.yml
+mkdocs serve
 ```
 
 📖 **Documentation**: [https://nvlabs.github.io/WarpConvNet/](https://nvlabs.github.io/WarpConvNet/)
