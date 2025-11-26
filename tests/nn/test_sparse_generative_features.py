@@ -11,6 +11,7 @@ from warpconvnet.geometry.coords.ops.batch_index import (
 )
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, encode
 from warpconvnet.geometry.coords.ops.stride import stride_coords
+from warpconvnet.geometry.types.voxels import Voxels
 
 from warpconvnet.nn.functional.sparse_conv.helper import (
     STRIDED_CONV_MODE,
@@ -46,10 +47,10 @@ def _sorted_batch_indexed(coords: torch.Tensor) -> torch.Tensor:
     return coords[sort_result.perm]
 
 
-def test_generative_matches_intcoords_expand(setup_small_voxels):
+def test_generative_matches_intcoords_expand(toy_voxels):
     """Ensure generative convolution reuses IntCoords.expand semantics."""
     torch.manual_seed(0)
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     C_in, C_out = voxels.num_channels, voxels.num_channels + 5
 
     conv = SpatiallySparseConv(
@@ -73,10 +74,10 @@ def test_generative_matches_intcoords_expand(setup_small_voxels):
     assert torch.equal(out.offsets.cpu(), expected_coords.offsets)
 
 
-def test_generative_stride_only_matches_expand_pipeline(setup_small_voxels):
+def test_generative_stride_only_matches_expand_pipeline(toy_voxels):
     """Generative + stride-only should match striding then IntCoords expansion."""
     torch.manual_seed(0)
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     C_in, C_out = voxels.num_channels, voxels.num_channels + 3
     stride = (2, 2, 2)
 
@@ -108,10 +109,10 @@ def test_generative_stride_only_matches_expand_pipeline(setup_small_voxels):
     assert torch.equal(out.offsets.cpu(), expected_coords.offsets)
 
 
-def test_intcoords_prune_preserves_batch_offsets(setup_small_voxels):
+def test_intcoords_prune_preserves_batch_offsets(toy_voxels):
     """Pruning via IntCoords maintains per-batch counts and metadata."""
     torch.manual_seed(0)
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     coords = voxels.batched_coordinates
 
     mask = torch.zeros(
@@ -135,9 +136,9 @@ def test_intcoords_prune_preserves_batch_offsets(setup_small_voxels):
     assert pruned.tensor_stride == coords.tensor_stride
 
 
-def test_prune_functional_matches_intcoords(setup_small_voxels):
+def test_prune_functional_matches_intcoords(toy_voxels):
     """Functional pruning should mirror IntCoords.prune and mask features."""
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     mask = torch.zeros(voxels.coordinate_tensor.shape[0], dtype=torch.bool, device=voxels.device)
     mask[1::3] = True
 
@@ -151,8 +152,8 @@ def test_prune_functional_matches_intcoords(setup_small_voxels):
     assert torch.equal(functional_pruned.feature_tensor, feats_pruned)
 
 
-def test_prune_functional_rejects_shape_mismatch(setup_small_voxels):
-    voxels = setup_small_voxels
+def test_prune_functional_rejects_shape_mismatch(toy_voxels):
+    voxels = toy_voxels
     mask = torch.ones(
         voxels.coordinate_tensor.shape[0] - 1, dtype=torch.bool, device=voxels.device
     )
@@ -160,8 +161,8 @@ def test_prune_functional_rejects_shape_mismatch(setup_small_voxels):
         prune_spatially_sparse_tensor(voxels, mask)
 
 
-def test_sparse_prune_module(setup_small_voxels):
-    voxels = setup_small_voxels
+def test_sparse_prune_module(toy_voxels):
+    voxels = toy_voxels
     mask = torch.zeros_like(voxels.coordinate_tensor[:, 0], dtype=torch.bool, device=voxels.device)
     mask[::4] = True
 
@@ -183,9 +184,9 @@ def _manual_expand_after_stride(voxels, stride):
     return strided_intcoords.expand(kernel_size=(3, 3, 3), dilation=(1, 1, 1)), strided_coords
 
 
-def test_apply_generative_policy_stride_only_kernel_inputs(setup_small_voxels):
+def test_apply_generative_policy_stride_only_kernel_inputs(toy_voxels):
     """Kernel-map inputs remain original coords for stride-only generative expansion."""
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     stride = (2, 2, 2)
     (
         out_coords,
@@ -213,9 +214,9 @@ def test_apply_generative_policy_stride_only_kernel_inputs(setup_small_voxels):
     )
 
 
-def test_apply_generative_policy_reduce_stride_kernel_inputs(setup_small_voxels):
+def test_apply_generative_policy_reduce_stride_kernel_inputs(toy_voxels):
     """Kernel-map inputs switch to strided coords under reduce-and-stride generative mode."""
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     stride = (2, 2, 2)
     manual_expanded, strided_coords = _manual_expand_after_stride(voxels, stride)
     (
@@ -246,9 +247,9 @@ def test_apply_generative_policy_reduce_stride_kernel_inputs(setup_small_voxels)
     "stride_mode",
     [STRIDED_CONV_MODE.STRIDE_ONLY, STRIDED_CONV_MODE.REDUCE_AND_STRIDE],
 )
-def test_generate_output_coords_matches_helper(setup_small_voxels, stride_mode):
+def test_generate_output_coords_matches_helper(toy_voxels, stride_mode):
     """generate_output_coords_and_kernel_map should mirror helper outputs exactly."""
-    voxels = setup_small_voxels
+    voxels = toy_voxels
     stride = (2, 2, 2)
     (
         helper_coords,
@@ -283,15 +284,28 @@ def test_generate_output_coords_matches_helper(setup_small_voxels, stride_mode):
     )
 
 
-def test_generate_output_coords_transposed_generative_unsupported(setup_small_voxels):
-    """Transposed generative convolution should still raise."""
-    voxels = setup_small_voxels
-    with pytest.raises(AssertionError):
-        generate_output_coords_and_kernel_map(
-            input_sparse_tensor=voxels,
-            kernel_size=(3, 3, 3),
-            kernel_dilation=(1, 1, 1),
-            stride=(1, 1, 1),
-            generative=True,
-            transposed=True,
-        )
+def test_generate_output_coords_transposed_generative(toy_voxels):
+    """Transposed generative convolution should expand coordinates like non-transposed generative."""
+    voxels = toy_voxels
+    batch_indexed_out_coords, out_offsets, kernel_map = generate_output_coords_and_kernel_map(
+        input_sparse_tensor=voxels,
+        kernel_size=(3, 3, 3),
+        kernel_dilation=(1, 1, 1),
+        stride=(1, 1, 1),
+        generative=True,
+        transposed=True,
+    )
+
+    # The output coordinates should match IntCoords.expand semantics
+    expected_coords = voxels.batched_coordinates.expand(kernel_size=(3, 3, 3), dilation=(1, 1, 1))
+    actual_sorted = _sorted_coords_by_morton(batch_indexed_out_coords[:, 1:], out_offsets)
+    expected_sorted = _sorted_coords_by_morton(
+        expected_coords.batched_tensor,
+        expected_coords.offsets,
+    )
+    assert torch.equal(actual_sorted, expected_sorted)
+    assert torch.equal(out_offsets, expected_coords.offsets)
+
+    # Kernel map should have valid structure
+    assert kernel_map is not None
+    assert len(kernel_map) > 0
