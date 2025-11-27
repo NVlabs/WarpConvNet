@@ -15,6 +15,7 @@ plugins:
       handlers:
         python:
           import_strategy: load
+          load_by_path: true
           paths: [.]
           options:
             show_source: true
