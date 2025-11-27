@@ -33,6 +33,7 @@ jobs:
           pip install --upgrade -r docs/requirements.txt
           pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cpu
           echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
+          echo "WARPCONVNET_SKIP_EXTENSION=1" >> $GITHUB_ENV
 
       - name: Show doc tool versions
         run: |

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 from warpconvnet.utils.cupy_alloc import set_cupy_allocator
 
@@ -13,10 +15,15 @@ from warpconvnet.constants import (
     WARPCONVNET_BWD_ALGO_MODE,
 )
 
-# Import C extension
-try:
-    from . import _C
-except ImportError:
-    raise ImportError(
-        "Failed to import C extension. Please compile the extension by running `python setup.py build_ext --inplace`"
-    )
+_SKIP_EXTENSION = os.environ.get("WARPCONVNET_SKIP_EXTENSION", "0") == "1"
+
+if not _SKIP_EXTENSION:
+    try:
+        from . import _C  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "Failed to import the compiled WarpConvNet extension. Build it via "
+            "`python setup.py build_ext --inplace` or install the pre-built wheel."
+        ) from exc
+else:
+    _C = None  # type: ignore[assignment]
