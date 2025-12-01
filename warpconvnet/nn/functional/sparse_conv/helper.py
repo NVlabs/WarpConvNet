@@ -115,7 +115,7 @@ def _apply_generative_policy(
         return (
             expanded_coords.batch_indexed_coordinates,
             expanded_coords.offsets,
-            batch_indexed_in_coords,
+            scaled_batch_indexed_coords,
         )
 
     # Non-transposed with stride > 1: stride first, then expand
