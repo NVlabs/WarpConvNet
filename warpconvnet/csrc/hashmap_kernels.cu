@@ -120,7 +120,8 @@ struct MurmurHash {
 // --- Vector Comparison ---
 // a, b: pointers to the start of the vectors
 // dim: dimension of the vectors
-__device__ inline bool vec_equal(const int* a, const int* b, int dim) {
+template <typename T>
+__device__ inline bool vec_equal(const T* a, const int* b, int dim) {
   for (int i = 0; i < dim; ++i) {
     if (a[i] != b[i]) {
       return false;
@@ -142,6 +143,53 @@ __device__ inline void set_expand_status(int* status_ptr, ExpandStatus new_statu
   atomicCAS(status_ptr, kExpandStatusSuccess, static_cast<int>(new_status));
 }
 
+// --- Helper for finding or claiming a slot ---
+template <typename HashFuncT>
+__device__ inline int claim_slot_or_find(int* table_kvs,
+                                         const int* vector_keys,
+                                         const int* key,
+                                         int key_dim,
+                                         int capacity,
+                                         bool* found_existing) {
+  int slot = HashFuncT::hash(key, key_dim, capacity);
+  int initial_slot = slot;
+  int attempts = 0;
+  *found_existing = false;
+
+  while (attempts < capacity) {
+    int* slot_address = &table_kvs[slot * 2];
+    int prev = atomicCAS(slot_address, -1, slot);
+
+    if (prev == -1) {
+      return slot;  // Successfully claimed
+    }
+
+    // Slot occupied (or reserved by another thread just now)
+    // Use volatile to ensure we read the latest value from memory
+    volatile int* slot_value_ptr = &table_kvs[slot * 2 + 1];
+    int vector_index = *slot_value_ptr;
+
+    if (vector_index < 0) {
+      // Another thread is writing to this slot. Retry without advancing.
+      continue;
+    }
+
+    const volatile int* existing_key = &vector_keys[vector_index * key_dim];
+    if (vec_equal(existing_key, key, key_dim)) {
+      *found_existing = true;
+      return -1;  // Key found
+    }
+
+    // Collision with different key
+    slot = (slot + 1) % capacity;
+    if (slot == initial_slot) {
+      break;
+    }
+    attempts++;
+  }
+  return -1;  // Table full or not found (and couldn't claim)
+}
+
 template <typename HashFuncT>
 __device__ inline void insert_candidate_if_absent(int* table_kvs,
                                                   int* vector_keys,
@@ -151,54 +199,37 @@ __device__ inline void insert_candidate_if_absent(int* table_kvs,
                                                   int vector_capacity,
                                                   int* num_entries_ptr,
                                                   int* status_ptr) {
-  const int initial_slot = HashFuncT::hash(candidate_key, key_dim, table_capacity);
-  int slot = initial_slot;
-  int attempts = 0;
+  bool found = false;
+  int slot = claim_slot_or_find<HashFuncT>(
+      table_kvs, vector_keys, candidate_key, key_dim, table_capacity, &found);
 
-  while (attempts < table_capacity) {
-    int* slot_address = &table_kvs[slot * 2];
-    int prev = atomicCAS(slot_address, -1, slot);
-
-    if (prev == -1) {
-      // Reserve the slot and append the candidate to vector_keys.
-      int new_index = atomicAdd(num_entries_ptr, 1);
-      if (new_index >= vector_capacity) {
-        // Roll back reservation and flag overflow.
-        atomicExch(slot_address, -1);
-        table_kvs[slot * 2 + 1] = -1;
-        set_expand_status(status_ptr, kExpandStatusVectorOverflow);
-        return;
-      }
-
-      int* dst = &vector_keys[new_index * key_dim];
-      for (int d = 0; d < key_dim; ++d) {
-        dst[d] = candidate_key[d];
-      }
-
-      __threadfence();
-      table_kvs[slot * 2 + 1] = new_index;
-      return;
-    }
-
-    int vector_index = table_kvs[slot * 2 + 1];
-    if (vector_index < 0) {
-      // Another thread is writing to this slot. Retry without advancing.
-      continue;
-    }
-
-    const int* existing_key = &vector_keys[vector_index * key_dim];
-    if (vec_equal(existing_key, candidate_key, key_dim)) {
-      return;
-    }
-
-    slot = (slot + 1) % table_capacity;
-    if (slot == initial_slot) {
-      break;
-    }
-    attempts++;
+  if (found) {
+    return;  // Already present
   }
 
-  set_expand_status(status_ptr, kExpandStatusTableFull);
+  if (slot == -1) {
+    // Table full
+    set_expand_status(status_ptr, kExpandStatusTableFull);
+    return;
+  }
+
+  // Slot reserved, now allocate index
+  int new_index = atomicAdd(num_entries_ptr, 1);
+  if (new_index >= vector_capacity) {
+    // Roll back reservation and flag overflow.
+    atomicExch(&table_kvs[slot * 2], -1);
+    table_kvs[slot * 2 + 1] = -1;
+    set_expand_status(status_ptr, kExpandStatusVectorOverflow);
+    return;
+  }
+
+  int* dst = &vector_keys[new_index * key_dim];
+  for (int d = 0; d < key_dim; ++d) {
+    dst[d] = candidate_key[d];
+  }
+
+  __threadfence();
+  table_kvs[slot * 2 + 1] = new_index;
 }
 
 // --- Device Function for Hash Table Search ---
@@ -271,40 +302,20 @@ __global__ void insert_kernel_templated(
   }
 
   const int* key_to_insert = &vector_keys[idx * key_dim];
-  // Use the templated hash function directly
-  int slot = HashFuncT::hash(key_to_insert, key_dim, table_capacity);
-  int initial_slot = slot;
-  int attempts = 0;
+  bool found = false;
+  int slot = claim_slot_or_find<HashFuncT>(
+      table_kvs, vector_keys, key_to_insert, key_dim, table_capacity, &found);
 
-  while (attempts < table_capacity) {
-    int* slot_address = &table_kvs[slot * 2];
-    // Store the *original index* (idx) in the compare field, not the slot.
-    // This prevents overwriting if two different keys hash to the same slot initially.
-    // We are essentially using the first element of the pair to *reserve* the slot
-    // via atomicCAS, and the second to store the value (original index).
-    // We store the actual index idx+1 temporarily to distinguish from initial -1.
-    // Let's refine this: Store 'slot' in compare field as originally, seems simpler.
-    int prev = atomicCAS(slot_address, -1, slot);  // Try to claim the slot marker
-
-    if (prev == -1) {
-      // Slot claimed successfully, now store the actual value index
-      table_kvs[slot * 2 + 1] = idx;
-      // Optional: store the actual hash value in table_kvs[slot*2 + 0] = slot;
-      // Already done by atomicCAS if successful.
-      return;
-    }
-
-    // Collision or slot already claimed
-    slot = (slot + 1) % table_capacity;
-
-    if (slot == initial_slot) {
-      // Table is full or couldn't find an empty slot after full circle
-      // Consider adding a mechanism to signal failure if needed.
-      return;
-    }
-    attempts++;
+  if (found) {
+    return;  // Already present (deduplication)
   }
-  // Exceeded attempts (should only happen if table is pathologically full)
+
+  if (slot != -1) {
+    // Claimed successfully, store the index
+    table_kvs[slot * 2 + 1] = idx;
+  }
+  // If slot == -1 and !found, table is full (fail silently as per original logic, or could add
+  // error handling)
 }
 
 // --- Templated Search Kernel ---
