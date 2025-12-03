@@ -10,6 +10,7 @@ from warpconvnet.geometry.coords.ops.batch_index import (
     offsets_from_batch_index,
 )
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING, encode
+from warpconvnet.geometry.coords.ops.expand import expand_coords
 from warpconvnet.geometry.coords.ops.stride import stride_coords
 from warpconvnet.geometry.types.voxels import Voxels
 
@@ -309,3 +310,131 @@ def test_generate_output_coords_transposed_generative(toy_voxels):
     # Kernel map should have valid structure
     assert kernel_map is not None
     assert len(kernel_map) > 0
+
+
+def test_large_scale_expand_uniqueness():
+    """Ensure expand_coords does not produce duplicates on large input."""
+    torch.manual_seed(0)
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    device = torch.device("cuda")
+
+    # Generate large random coordinates
+    N = 1000000
+    coords_range = 60
+
+    num_batches = 4
+    coords_list = []
+    for i in range(num_batches):
+        # Generate random coordinates
+        c = torch.randint(
+            -coords_range, coords_range, (N // num_batches, 3), device=device, dtype=torch.int32
+        )
+        b = torch.full((N // num_batches, 1), i, device=device, dtype=torch.int32)
+        coords_list.append(torch.cat([b, c], dim=1))
+
+    batch_indexed_coords = torch.cat(coords_list, dim=0)
+    # Ensure input uniqueness per batch
+    batch_indexed_coords = torch.unique(batch_indexed_coords, dim=0)
+
+    kernel_size = (3, 3, 3)
+    dilation = (1, 1, 1)
+
+    out_coords, out_offsets = expand_coords(
+        batch_indexed_coords, kernel_size=kernel_size, kernel_dilation=dilation
+    )
+
+    # Check for duplicates
+    unique_out, counts = torch.unique(out_coords, dim=0, return_counts=True)
+    if unique_out.shape[0] != out_coords.shape[0]:
+        num_duplicates = out_coords.shape[0] - unique_out.shape[0]
+        duplicate_mask = counts > 1
+        duplicate_examples = unique_out[duplicate_mask]
+        # Find frequencies of duplicates
+        max_dups = counts.max().item()
+        pytest.fail(
+            f"Found {num_duplicates} duplicate coordinates in expanded output. "
+            f"Total: {out_coords.shape[0]}, Unique: {unique_out.shape[0]}. "
+            f"Max duplicates for a single coord: {max_dups}. "
+            f"Example duplicates: {duplicate_examples[:5]}"
+        )
+
+
+def test_large_scale_transposed_generative_duplicates():
+    """
+    Reproduce duplicate coordinates issue with SpatiallySparseConv
+    configured as transposed=True, generative=True, stride=(2,2,2).
+    """
+    torch.manual_seed(0)
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    device = torch.device("cuda")
+
+    # Generate large random coordinates
+    # N needs to be large enough to cause hash collisions or stress the table resizing
+    N = 1000000
+    coords_range = 50  # Very dense
+
+    num_batches = 1  # Single batch to focus on collisions within one set
+    coords_list = []
+    for i in range(num_batches):
+        c = torch.randint(
+            -coords_range, coords_range, (N // num_batches, 3), device=device, dtype=torch.int32
+        )
+        # Ensure uniqueness within batch for valid input
+        c = torch.unique(c, dim=0)
+        b = torch.full((c.shape[0], 1), i, device=device, dtype=torch.int32)
+        coords_list.append(torch.cat([b, c], dim=1))
+
+    batch_indexed_coords = torch.cat(coords_list, dim=0)
+
+    # Construct Voxels object
+    # We need features for the forward pass, even though we only care about coords
+    features = torch.randn(batch_indexed_coords.shape[0], 16, device=device)
+
+    # Re-split by batch for Voxels constructor
+    coords_per_batch = []
+    feats_per_batch = []
+    for i in range(num_batches):
+        mask = batch_indexed_coords[:, 0] == i
+        coords_per_batch.append(batch_indexed_coords[mask, 1:])
+        feats_per_batch.append(features[mask])
+
+    voxels = Voxels(
+        batched_coordinates=coords_per_batch, batched_features=feats_per_batch, device=device
+    )
+
+    # Configure the problematic layer
+    in_channels = 16
+    out_channels = 16
+    kernel_size = (3, 3, 3)
+    stride = (2, 2, 2)
+
+    conv = SpatiallySparseConv(
+        in_channels,
+        out_channels,
+        kernel_size=kernel_size,
+        stride=stride,
+        generative=True,
+        transposed=True,
+    ).to(device)
+
+    # Run forward pass
+    out_voxels = conv(voxels)
+
+    # Check for duplicates in output coordinates
+    out_coords = out_voxels.batch_indexed_coordinates
+    unique_out, counts = torch.unique(out_coords, dim=0, return_counts=True)
+
+    if unique_out.shape[0] != out_coords.shape[0]:
+        num_duplicates = out_coords.shape[0] - unique_out.shape[0]
+        max_dups = counts.max().item()
+        duplicate_examples = unique_out[counts > 1][:5]
+
+        pytest.fail(
+            f"Found {num_duplicates} duplicate coordinates in output.\n"
+            f"Total output coords: {out_coords.shape[0]}\n"
+            f"Unique output coords: {unique_out.shape[0]}\n"
+            f"Max duplicates for a single coord: {max_dups}\n"
+            f"Examples: {duplicate_examples}"
+        )
