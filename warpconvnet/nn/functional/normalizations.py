@@ -21,6 +21,90 @@ from torch_scatter import segment_csr
 import warpconvnet._C as _C
 
 
+class SegmentedRangeNormFunction(Function):
+    """
+    Custom autograd function for segmented range normalization.
+
+    This function implements both forward and backward passes for the range normalization:
+    (x_i - min_val) / (max_val - min_val + eps).
+    """
+
+    @staticmethod
+    def forward(ctx, features, min_val, max_val, row_offsets, eps):
+        diff = max_val - min_val + eps
+
+        if features.is_cuda:
+            # Ensure offsets are on device and int32 for CUDA kernel
+            d_offsets = row_offsets.to(features.device).int()
+
+            numerator = torch.empty_like(features)
+            _C.utils.segmented_arithmetic(features, min_val, numerator, d_offsets, "sub")
+
+            out = torch.empty_like(features)
+            _C.utils.segmented_arithmetic(numerator, diff, out, d_offsets, "div")
+        else:
+            # CPU fallback using broadcasting
+            num_per_row = row_offsets.diff()
+            gather_indices = torch.repeat_interleave(
+                torch.arange(len(num_per_row), device=features.device), num_per_row
+            )
+            min_expanded = min_val[gather_indices]
+            max_expanded = max_val[gather_indices]
+            out = (features - min_expanded) / (max_expanded - min_expanded + eps)
+
+        # Save tensors for backward
+        ctx.save_for_backward(out, diff, row_offsets)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        out, diff, row_offsets = ctx.saved_tensors
+
+        grad_features = None
+        grad_min = None
+        grad_max = None
+
+        if grad_out.is_cuda:
+            d_offsets = row_offsets.to(grad_out.device).int()
+
+            # grad_features = grad_out / diff
+            grad_features = torch.empty_like(grad_out)
+            _C.utils.segmented_arithmetic(grad_out, diff, grad_features, d_offsets, "div")
+
+            # term for max gradient: -grad_out * out / diff
+            term_max = grad_out * out
+            term_max_div = torch.empty_like(term_max)
+            _C.utils.segmented_arithmetic(term_max, diff, term_max_div, d_offsets, "div")
+
+            # grad_max = sum(-term_max_div)
+            grad_max = segment_csr(-term_max_div, row_offsets, reduce="sum")
+
+            # grad_min = sum(term_max_div - grad_features)
+            # Derived from: (grad_out * out - grad_out) / diff
+            grad_min = segment_csr(term_max_div - grad_features, row_offsets, reduce="sum")
+
+        else:
+            # CPU fallback
+            num_per_row = row_offsets.diff()
+            gather_indices = torch.repeat_interleave(
+                torch.arange(len(num_per_row), device=grad_out.device), num_per_row
+            )
+            diff_expanded = diff[gather_indices]
+
+            # grad_features = grad_out / diff
+            grad_features = grad_out / diff_expanded
+
+            # grad_max = sum(-grad_out * out / diff)
+            grad_max_elem = -grad_out * out / diff_expanded
+            grad_max = segment_csr(grad_max_elem, row_offsets, reduce="sum")
+
+            # grad_min = sum(-grad_max_elem - grad_features)
+            grad_min_elem = -grad_max_elem - grad_features
+            grad_min = segment_csr(grad_min_elem, row_offsets, reduce="sum")
+
+        return grad_features, grad_min, grad_max, None, None
+
+
 class SegmentedLayerNormFunction(Function):
     """
     Custom autograd function for segmented layer normalization (core normalization only).
@@ -159,3 +243,38 @@ def segmented_layer_norm(
         normalized = torch.add(beta.unsqueeze(0), normalized)
 
     return normalized
+
+
+def segmented_range_norm(
+    features: Float[Tensor, "N F"],  # noqa
+    row_offsets: Int[Tensor, "M+1"],  # noqa
+    eps: float = 1e-6,
+) -> Float[Tensor, "N F"]:  # noqa
+    """Normalizes the range of each segment into [0, 1].
+
+    For each segment k, computes:
+        min_k = min(features[start_k:end_k])
+        max_k = max(features[start_k:end_k])
+        out = (features - min_k) / (max_k - min_k + eps)
+
+    Parameters
+    ----------
+    features : Tensor
+        Input features of shape (N, F)
+    row_offsets : Tensor
+        Row splits for segments, shape (M+1)
+    eps : float
+        Small value to avoid division by zero.
+
+    Returns
+    -------
+    Tensor
+        Normalized features of shape (N, F)
+    """
+    # Ensure splits are Long for torch_scatter
+    row_offsets = row_offsets.long()
+
+    min_val = segment_csr(features, row_offsets, reduce="min")
+    max_val = segment_csr(features, row_offsets, reduce="max")
+
+    return SegmentedRangeNormFunction.apply(features, min_val, max_val, row_offsets, eps)

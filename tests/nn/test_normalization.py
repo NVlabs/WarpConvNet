@@ -108,3 +108,110 @@ def test_segmented_layer_norm(setup_voxels):
     # Verify output properties
     assert normed_voxels.batch_size == voxels.batch_size
     assert normed_voxels.num_channels == voxels.num_channels
+
+
+def test_segmented_range_norm():
+    """Test segmented_range_norm."""
+    from warpconvnet.nn.functional.normalizations import segmented_range_norm
+
+    # Setup
+    features = torch.tensor(
+        [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [5.0, 50.0], [5.0, 50.0], [10.0, 0.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    # 3 segments: rows 0-2 (size 3), rows 3-4 (size 2), row 5 (size 1)
+    splits = torch.tensor([0, 3, 5, 6], dtype=torch.int32)
+
+    # Expected:
+    # Seg 0: min=[1, 10], max=[3, 30], range=[2, 20]
+    #   Row 0: (1-1)/2=0, (10-10)/20=0
+    #   Row 1: (2-1)/2=0.5, (20-10)/20=0.5
+    #   Row 2: (3-1)/2=1, (30-10)/20=1
+
+    # Seg 1: min=[5, 50], max=[5, 50], range=[0, 0]
+    #   numerator = 5-5=0. denominator = eps. result = 0.
+
+    # Seg 2: min=[10, 0], max=[10, 0], range=[0, 0]
+    #   Row 5: 0.
+
+    out = segmented_range_norm(features, splits, eps=1e-5)
+
+    expected = torch.tensor(
+        [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+    )
+
+    assert torch.allclose(out, expected, atol=1e-5)
+
+    # Test backward
+    loss = out.sum()
+    loss.backward()
+    assert features.grad is not None
+
+
+def test_segmented_range_norm_cuda():
+    """Test segmented_range_norm on CUDA."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from warpconvnet.nn.functional.normalizations import segmented_range_norm
+
+    features = torch.rand(100, 16, device="cuda", requires_grad=True)
+    splits = torch.tensor([0, 50, 100], device="cuda", dtype=torch.int32)
+
+    out = segmented_range_norm(features, splits)
+    assert out.shape == features.shape
+    # Values should be roughly in [0, 1], but eps might affect it slightly if range is small
+    # If range is huge, eps is negligible.
+
+    # Check bounds
+    assert (out >= 0).all()
+    # If range is 0, output is 0.
+    # If range > 0, output is (x-min)/(range+eps) < (x-min)/range <= 1
+    assert (out <= 1.0).all()
+
+    loss = out.sum()
+    loss.backward()
+    assert features.grad is not None
+
+
+def test_segmented_range_norm_gradcheck():
+    """Test gradients for segmented_range_norm."""
+    from torch.autograd import gradcheck
+    from warpconvnet.nn.functional.normalizations import segmented_range_norm
+
+    # Use double precision for gradcheck
+    dtype = torch.float64
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Create inputs
+    # Use small range to ensure gradients are not too small
+    features = torch.randn(10, 4, dtype=dtype, device=device, requires_grad=True)
+    # Segments: [0, 3, 6, 10] -> sizes 3, 3, 4
+    splits = torch.tensor([0, 3, 6, 10], dtype=torch.int32, device=device)
+
+    # Functional wrapper for gradcheck
+    def func(f):
+        return segmented_range_norm(f, splits, eps=1e-6)
+
+    assert gradcheck(func, (features,), eps=1e-6, atol=1e-4)
+
+
+def test_segmented_range_norm_gradcheck_small_segments():
+    """Test gradients for segmented_range_norm with small segments."""
+    from torch.autograd import gradcheck
+    from warpconvnet.nn.functional.normalizations import segmented_range_norm
+
+    # Test with single-element segments where min=max
+    dtype = torch.float64
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # 5 elements, each in its own segment
+    features = torch.randn(5, 2, dtype=dtype, device=device, requires_grad=True)
+    splits = torch.arange(6, dtype=torch.int32, device=device)
+
+    def func(f):
+        return segmented_range_norm(f, splits, eps=1e-6)
+
+    assert gradcheck(func, (features,), eps=1e-6, atol=1e-4)
