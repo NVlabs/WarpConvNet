@@ -157,12 +157,12 @@ class ToUnique:
 
     def __init__(
         self,
-        unique_method: Literal["torch", "ravel", "morton"] = "torch",
+        unique_method: Literal["torch", "ravel", "morton"] | None = "torch",
         return_to_unique_indices: bool = False,
     ):
         # Ravel can be used only when the raveled coordinates is less than 2**31
-        self.unique_method = unique_method
-        self.return_to_unique_indices = return_to_unique_indices or unique_method == "ravel"
+        self.unique_method = unique_method or "torch"
+        self.return_to_unique_indices = return_to_unique_indices or self.unique_method == "ravel"
 
     def to_unique(self, x: Int[Tensor, "N C"], dim: int = 0) -> Int[Tensor, "M C"]:
         if self.unique_method == "ravel":
@@ -171,9 +171,16 @@ class ToUnique:
             shape = shifted_x.max(dim=dim).values + 1
             unique_input = ravel_multi_index(shifted_x, spatial_shape=shape)
         elif self.unique_method.startswith("morton"):
-            assert self.unique_method in STR2POINT_ORDERING, f"Given unique method '{self.unique_method}' - must be one of " + str(STR2POINT_ORDERING.keys())
+            assert (
+                self.unique_method in STR2POINT_ORDERING
+            ), f"Given unique method '{self.unique_method}' - must be one of " + str(
+                STR2POINT_ORDERING.keys()
+            )
             unique_input = encode(
-                x, order=STR2POINT_ORDERING[self.unique_method], return_perm=False, return_inverse=False
+                x,
+                order=STR2POINT_ORDERING[self.unique_method],
+                return_perm=False,
+                return_inverse=False,
             )
         else:
             unique_input = x
