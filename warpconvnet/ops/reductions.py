@@ -26,16 +26,16 @@ REDUCTION_TYPES_STR = Literal["min", "max", "mean", "sum", "mul", "var", "std", 
 
 def _var(
     features: Float[Tensor, "N F"],
-    neighbor_row_splits: Int[Tensor, "M"],  # noqa
+    row_offsets: Int[Tensor, "M"],  # noqa
 ) -> Tuple[Float[Tensor, "M F"], Float[Tensor, "M F"]]:  # noqa
-    out_mean = segment_csr(features, neighbor_row_splits, reduce="mean")
-    out_var = segment_csr(features**2, neighbor_row_splits, reduce="mean") - out_mean**2
+    out_mean = segment_csr(features, row_offsets, reduce="mean")
+    out_var = segment_csr(features**2, row_offsets, reduce="mean") - out_mean**2
     return out_var, out_mean
 
 
 def row_reduction(
     features: Float[Tensor, "N F"],  # noqa
-    neighbor_row_splits: Int[Tensor, "M+1"],  # noqa
+    row_offsets: Int[Tensor, "M+1"],  # noqa
     reduction: REDUCTIONS,
     eps: float = 1e-6,
 ) -> Float[Tensor, "M F"]:  # noqa
@@ -43,8 +43,8 @@ def row_reduction(
         reduction = REDUCTIONS(reduction)
 
     assert (
-        len(features) == neighbor_row_splits[-1].item()
-    ), f"Features length {len(features)} must match the last row split {neighbor_row_splits[-1].item()}"
+        len(features) == row_offsets[-1].item()
+    ), f"Features length {len(features)} must match the last row split {row_offsets[-1].item()}"
 
     if reduction in [
         REDUCTIONS.MIN,
@@ -53,17 +53,17 @@ def row_reduction(
         REDUCTIONS.SUM,
         REDUCTIONS.MUL,
     ]:
-        out_feature = segment_csr(features, neighbor_row_splits, reduce=str(reduction.value))
+        out_feature = segment_csr(features, row_offsets, reduce=str(reduction.value))
     elif reduction == REDUCTIONS.VAR:
-        out_feature = _var(features, neighbor_row_splits)[0]
+        out_feature = _var(features, row_offsets)[0]
     elif reduction == REDUCTIONS.STD:
-        out_feature = torch.sqrt(_var(features, neighbor_row_splits)[0] + eps)
+        out_feature = torch.sqrt(_var(features, row_offsets)[0] + eps)
     elif reduction == REDUCTIONS.RANDOM:
-        num_per_row = neighbor_row_splits.diff()
+        num_per_row = row_offsets.diff()
         rand_idx = (
             (torch.rand(len(num_per_row), device=num_per_row.device) * num_per_row).floor().long()
         )
-        sample_idx = rand_idx + neighbor_row_splits[:-1]
+        sample_idx = rand_idx + row_offsets[:-1]
         out_feature = features[sample_idx.to(features.device)]
     else:
         raise ValueError(f"Invalid reduction: {reduction}")

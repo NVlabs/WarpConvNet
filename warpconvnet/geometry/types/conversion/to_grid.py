@@ -6,7 +6,6 @@ from jaxtyping import Float, Int
 
 import torch
 from torch import Tensor
-from torch_scatter import segment_csr
 
 import warpconvnet._C as _C
 from warpconvnet.utils.ravel import ravel_multi_index
@@ -162,8 +161,8 @@ def _process_radius_search_results(
     ), f"Expected RealSearchResult, got {type(search_results)}"
     reduction_type = REDUCTIONS(reduction)
 
-    for grid_idx, start_idx in enumerate(search_results.neighbor_row_splits[:-1]):
-        end_idx = search_results.neighbor_row_splits[grid_idx + 1]
+    for grid_idx, start_idx in enumerate(search_results.row_offsets[:-1]):
+        end_idx = search_results.row_offsets[grid_idx + 1]
 
         # Skip if no neighbors found
         if start_idx == end_idx:
