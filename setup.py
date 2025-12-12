@@ -130,6 +130,8 @@ ext_modules = [
             "warpconvnet/csrc/segmented_arithmetic.cu",
             "warpconvnet/csrc/implicit_gemm.cu",
             "warpconvnet/csrc/implicit_gemm_split_k.cu",
+            "warpconvnet/csrc/bindings/sampling_bindings.cpp",
+            "warpconvnet/csrc/farthest_point_sampling.cu",
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
