@@ -213,15 +213,21 @@ __device__ inline void insert_candidate_if_absent(int* table_kvs,
     return;
   }
 
-  // Slot reserved, now allocate index
-  int new_index = atomicAdd(num_entries_ptr, 1);
-  if (new_index >= vector_capacity) {
-    // Roll back reservation and flag overflow.
-    atomicExch(&table_kvs[slot * 2], -1);
-    table_kvs[slot * 2 + 1] = -1;
-    set_expand_status(status_ptr, kExpandStatusVectorOverflow);
-    return;
-  }
+  // Slot reserved, now safely allocate index
+  int old_count, new_count;
+  do {
+    old_count = *num_entries_ptr;
+    if (old_count >= vector_capacity) {
+      // Vector full, roll back slot reservation
+      atomicExch(&table_kvs[slot * 2], -1);
+      table_kvs[slot * 2 + 1] = -1;
+      set_expand_status(status_ptr, kExpandStatusVectorOverflow);
+      return;
+    }
+    new_count = old_count + 1;
+  } while (atomicCAS(num_entries_ptr, old_count, new_count) != old_count);
+
+  int new_index = old_count;
 
   int* dst = &vector_keys[new_index * key_dim];
   for (int d = 0; d < key_dim; ++d) {
