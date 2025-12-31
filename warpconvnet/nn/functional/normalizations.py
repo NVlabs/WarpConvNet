@@ -271,8 +271,8 @@ def segmented_range_norm(
     Tensor
         Normalized features of shape (N, F)
     """
-    # Ensure splits are Long for torch_scatter
-    row_offsets = row_offsets.long()
+    # Ensure splits are int64 on the same device as features for torch_scatter
+    row_offsets = row_offsets.to(dtype=torch.int64, device=features.device)
 
     min_val = segment_csr(features, row_offsets, reduce="min")
     max_val = segment_csr(features, row_offsets, reduce="max")

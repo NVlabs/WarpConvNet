@@ -21,6 +21,7 @@ def ravel_multi_index(
     """
     # assert multi index is integer dtype
     assert multi_index.dtype in [torch.int16, torch.int32, torch.int64]
+    multi_index = multi_index.long()
     assert multi_index.shape[-1] == len(spatial_shape)
     # Convert dims to a list of tuples
     if isinstance(spatial_shape, torch.Tensor):
