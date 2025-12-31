@@ -367,14 +367,17 @@ class PatchAttention(BaseSpatialModule):
         """
         patch_size = patch_size or self.patch_size
         counts = torch.diff(offsets)
-        num_patches_per_batch = counts // patch_size
+        
+        # Calculate number of patches per batch using ceil division
+        num_patches_per_batch = (counts + patch_size - 1) // patch_size
 
         # Fast path: if no patches, return original offsets
         if num_patches_per_batch.sum() == 0:
             return offsets
 
-        # Calculate how many elements each batch contributes (1 start + num_patches)
-        elements_per_batch = 1 + num_patches_per_batch
+        # Calculate how many elements each batch contributes (num_patches)
+        # We generate the start indices for each patch. The final end point is added later.
+        elements_per_batch = num_patches_per_batch
 
         # Create indices for which batch each element belongs to
         batch_indices = torch.repeat_interleave(
@@ -384,7 +387,7 @@ class PatchAttention(BaseSpatialModule):
         # Create indices for position within each batch's sequence (0, 1, 2, ...)
         within_batch_indices = torch.cat(
             [
-                torch.arange(n + 1, device=offsets.device, dtype=offsets.dtype)
+                torch.arange(n, device=offsets.device, dtype=offsets.dtype)
                 for n in num_patches_per_batch
             ]
         )
@@ -424,7 +427,7 @@ class PatchAttention(BaseSpatialModule):
         if qkv.dtype not in [torch.float16, torch.bfloat16]:
             qkv = qkv.to(torch.float16)
 
-        attn_offsets = self._offset_to_attn_offset(x.offsets, K).to(qkv.device)
+        attn_offsets = self._offset_to_attn_offset(x.offsets, K).to(device=qkv.device, dtype=torch.int32)
         # Warning: When the loss is NaN, this module will fail during backward with
         # index out of bounds error.
         # e.g. /pytorch/aten/src/ATen/native/cuda/ScatterGatherKernel.cu:144: operator(): block: [192,0,0], thread: [32,0,0] Assertion `idx_dim >= 0 && idx_dim < index_size && "
