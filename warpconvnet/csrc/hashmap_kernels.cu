@@ -150,42 +150,99 @@ __device__ inline int claim_slot_or_find(int* table_kvs,
                                          const int* key,
                                          int key_dim,
                                          int capacity,
-                                         bool* found_existing) {
+                                         bool* found_existing,
+                                         int value_to_insert = -1) {
   int slot = HashFuncT::hash(key, key_dim, capacity);
   int initial_slot = slot;
   int attempts = 0;
   *found_existing = false;
 
   while (attempts < capacity) {
-    int* slot_address = &table_kvs[slot * 2];
-    int prev = atomicCAS(slot_address, -1, slot);
+    if (value_to_insert != -1) {
+      // Use 64-bit atomicCAS to claim and set value atomically.
+      // This prevents the race condition where a slot is claimed but value is not yet written,
+      // which causes other threads in the same warp to deadlock while waiting.
+      unsigned long long* slot_addr_64 = (unsigned long long*)&table_kvs[slot * 2];
+      unsigned long long old_val_64 = *slot_addr_64;
 
-    if (prev == -1) {
-      return slot;  // Successfully claimed
-    }
+      // Extract the first int (slot marker) from the 64-bit value.
+      // Assuming Little Endian (standard for NVIDIA GPUs).
+      int slot_marker = (int)(old_val_64 & 0xFFFFFFFF);
 
-    // Slot occupied (or reserved by another thread just now)
-    // Use volatile to ensure we read the latest value from memory
-    volatile int* slot_value_ptr = &table_kvs[slot * 2 + 1];
-    int vector_index = *slot_value_ptr;
+      if (slot_marker == -1) {
+        // Attempt to claim
+        unsigned long long new_val_64 =
+            ((unsigned long long)value_to_insert << 32) | (unsigned int)slot;
+        unsigned long long prev_64 = atomicCAS(slot_addr_64, old_val_64, new_val_64);
 
-    if (vector_index < 0) {
-      // Another thread is writing to this slot. Retry without advancing.
+        if (prev_64 == old_val_64) {
+          return slot;  // Successfully claimed and written
+        }
+        // CAS failed, reload value
+        old_val_64 = prev_64;
+        slot_marker = (int)(old_val_64 & 0xFFFFFFFF);
+      }
+
+      // If we are here, the slot is occupied (or we failed CAS and it is now occupied)
+      if (slot_marker != -1) {
+        int vector_index = (int)(old_val_64 >> 32);
+        if (vector_index < 0) {
+          // This should not happen if all threads use 64-bit CAS, but if mixed with 32-bit CAS
+          // (expand kernel), we might still hit this. Retry without advancing.
+          continue;
+        }
+
+        const volatile int* existing_key = &vector_keys[vector_index * key_dim];
+        if (vec_equal(existing_key, key, key_dim)) {
+          *found_existing = true;
+          return -1;  // Key found
+        }
+
+        // Collision
+        slot = (slot + 1) % capacity;
+        if (slot == initial_slot) {
+          break;
+        }
+        attempts++;
+        continue;
+      }
+
+      // If slot_marker is -1 here (CAS failed but value is still -1?), retry loop.
       continue;
-    }
 
-    const volatile int* existing_key = &vector_keys[vector_index * key_dim];
-    if (vec_equal(existing_key, key, key_dim)) {
-      *found_existing = true;
-      return -1;  // Key found
-    }
+    } else {
+      // Original 32-bit logic for when value is not known yet (expand kernel)
 
-    // Collision with different key
-    slot = (slot + 1) % capacity;
-    if (slot == initial_slot) {
-      break;
+      int* slot_address = &table_kvs[slot * 2];
+      int prev = atomicCAS(slot_address, -1, slot);
+
+      if (prev == -1) {
+        return slot;  // Successfully claimed
+      }
+
+      // Slot occupied (or reserved by another thread just now)
+      // Use volatile to ensure we read the latest value from memory
+      volatile int* slot_value_ptr = &table_kvs[slot * 2 + 1];
+      int vector_index = *slot_value_ptr;
+
+      if (vector_index < 0) {
+        // Another thread is writing to this slot. Retry without advancing.
+        continue;
+      }
+
+      const volatile int* existing_key = &vector_keys[vector_index * key_dim];
+      if (vec_equal(existing_key, key, key_dim)) {
+        *found_existing = true;
+        return -1;  // Key found
+      }
+
+      // Collision with different key
+      slot = (slot + 1) % capacity;
+      if (slot == initial_slot) {
+        break;
+      }
+      attempts++;
     }
-    attempts++;
   }
   return -1;  // Table full or not found (and couldn't claim)
 }
@@ -310,16 +367,14 @@ __global__ void insert_kernel_templated(
   const int* key_to_insert = &vector_keys[idx * key_dim];
   bool found = false;
   int slot = claim_slot_or_find<HashFuncT>(
-      table_kvs, vector_keys, key_to_insert, key_dim, table_capacity, &found);
+      table_kvs, vector_keys, key_to_insert, key_dim, table_capacity, &found, idx);
 
   if (found) {
     return;  // Already present (deduplication)
   }
 
-  if (slot != -1) {
-    // Claimed successfully, store the index
-    table_kvs[slot * 2 + 1] = idx;
-  }
+  // If slot != -1, value was already written by claim_slot_or_find
+
   // If slot == -1 and !found, table is full (fail silently as per original logic, or could add
   // error handling)
 }
