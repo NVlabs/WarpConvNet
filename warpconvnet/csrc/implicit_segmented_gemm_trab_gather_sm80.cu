@@ -100,6 +100,7 @@ __global__ void segmented_trab_gather_wmma(
   static_assert(IsInputSupported<InT>::value, "InT must be half or nv_bfloat16");
   static_assert(IsOutputSupported<OutT>::value, "OutT must be float, half, or nv_bfloat16");
 
+#if __CUDA_ARCH__ >= 800
   if (blockDim.x != 32) return;  // one warp per block
 
   constexpr int TILE_M = 16, TILE_N = 16, TILE_K = 16;  // M=C_in, N=C_out, K=segment rows
@@ -270,6 +271,7 @@ __global__ void segmented_trab_gather_wmma(
     }
     __syncthreads();
   }
+#endif
 }
 
 // -------------------- Host launcher --------------------

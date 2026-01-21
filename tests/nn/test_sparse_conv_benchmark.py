@@ -13,7 +13,6 @@ from warpconvnet.nn.functional.sparse_conv import (
     SPARSE_CONV_FWD_ALGO_MODE,
     SPARSE_CONV_BWD_ALGO_MODE,
     STRIDED_CONV_MODE,
-    SpatiallySparseConvBatchedExplicitGEMMFunction,
     SpatiallySparseConvExplicitGEMMFunction,
     SpatiallySparseConvImplicitGEMMFunction,
     UnifiedSpatiallySparseConvFunction,

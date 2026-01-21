@@ -61,6 +61,10 @@ Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies. 
 ```bash
 # Install PyTorch first (specify your CUDA version)
 export CUDA=cu128  # For CUDA 12.8
+## A100 is 80, V100 is 70
+export CUDA_ARCHITECTURES=89;80;
+export TORCH_CUDA_ARCH_LIST="8.9 8.0"
+
 pip install torch torchvision --index-url https://download.pytorch.org/whl/${CUDA}
 
 # Install core dependencies
@@ -80,7 +84,7 @@ cd WarpConvNet
 # Option 1
 python setup.py build_ext --inplace
 # Option 2
-pip install -e . --no-deps
+pip install -e . --no-deps --no-build-isolation --force-reinstall
 ```
 
 Available optional dependency groups:

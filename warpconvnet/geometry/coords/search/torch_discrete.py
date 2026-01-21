@@ -461,7 +461,7 @@ def generate_kernel_map(
             identity_map_index=identity_map_index,
         )
     else:
-        raise ValueError(f"Invalid method: {method}. Choose 'query', 'offset', or 'size'.")
+        raise ValueError(f"Invalid method: {method}. Choose 'offset', or 'size'.")
 
 
 def _int_sequence_hash(arr: Sequence[int]) -> int:  # noqa: F821

@@ -23,6 +23,8 @@
 #include <cub/cub.cuh>
 #include <type_traits>
 
+#include "include/gemm_error_codes.h"
+
 using namespace nvcuda;
 
 // -------------------- Stream helper --------------------
@@ -115,6 +117,7 @@ __global__ void wmma_splitk_stage1(
     int chunk_size) {                 // size of this chunk (K-splits)
   static_assert(IsInputSupported<InT>::value, "InT must be half or nv_bfloat16");
 
+#if __CUDA_ARCH__ >= 800
   if (blockDim.x != 32) return;  // one warp per block
 
   constexpr int TILE_M = 16, TILE_N = 16, TILE_K = 16;
@@ -241,6 +244,7 @@ __global__ void wmma_splitk_stage1(
       }
     }
   }
+#endif
 }
 
 // -------------------- Stage 2: CUB reduction across splits (float partials -> ElementC)

@@ -52,6 +52,9 @@ def _wmma_implicit_gemm_forward_logic(
     ), "WMMA implicit GEMM ops are not available. Please build warpconvnet with WMMA support."
 
     device = in_features.device
+    if torch.cuda.get_device_capability(device)[0] < 8:
+        raise RuntimeError("WMMA implicit GEMM requires Compute Capability >= 8.0")
+
     iden_idx = kernel_map.identity_map_index
     min_dtype = _min_dtype(in_features.dtype, weight.dtype)
     if min_dtype not in [torch.float16, torch.bfloat16]:
@@ -114,6 +117,9 @@ def _wmma_implicit_gemm_backward_logic(
 
     if device is None:
         device = in_features.device
+
+    if torch.cuda.get_device_capability(device)[0] < 8:
+        raise RuntimeError("WMMA implicit GEMM requires Compute Capability >= 8.0")
 
     min_dtype = _min_dtype(in_features.dtype, weight.dtype, grad_output.dtype)
     if min_dtype not in [torch.float16, torch.bfloat16]:
