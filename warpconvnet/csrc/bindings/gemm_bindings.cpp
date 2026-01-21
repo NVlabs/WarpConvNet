@@ -1,7 +1,6 @@
 // Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 // SPDX-License-Identifier: Apache-2.0
 
-#include <cstddef>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -12,6 +11,7 @@
 #include <torch/extension.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <sstream>
 
 #include "../include/gemm_error_codes.h"
@@ -911,6 +911,17 @@ int wmma_split_k_implicit_gemm_sm80(torch::Tensor a,
                                     torch::Tensor indices_a,
                                     torch::Tensor indices_b,
                                     int split_k_factor) {
+  int device;
+  if (cudaGetDevice(&device) != cudaSuccess) {
+    return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+  }
+  cudaDeviceProp prop;
+  if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+    return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+  }
+  if (prop.major < 8) {
+    return (int)warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig;
+  }
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2, "a, b, and c must be 2D");
   TORCH_CHECK(indices_a.dim() == 1 && indices_b.dim() == 1, "indices_a and indices_b must be 1D");
   TORCH_CHECK(indices_a.scalar_type() == torch::kInt32 && indices_b.scalar_type() == torch::kInt32,
@@ -1000,6 +1011,17 @@ int wmma_implicit_gemm_sm80(torch::Tensor tensor_a,
                             torch::Tensor indices_d,
                             float alpha,
                             float beta) {
+  int device;
+  if (cudaGetDevice(&device) != cudaSuccess) {
+    return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+  }
+  cudaDeviceProp prop;
+  if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+    return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+  }
+  if (prop.major < 8) {
+    return (int)warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig;
+  }
   TORCH_CHECK(tensor_a.dim() == 2 && tensor_b.dim() == 2 && tensor_d.dim() == 2,
               "tensor_a, tensor_b, and tensor_d must be 2D");
   if (beta != 0.0f) {
@@ -1225,6 +1247,18 @@ void register_gemm(py::module_ &m) {
          torch::Tensor seg_offsets,
          float alpha,
          float beta) {
+        int device;
+        if (cudaGetDevice(&device) != cudaSuccess) {
+          return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+        }
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+          return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+        }
+        if (prop.major < 8) {
+          return (int)warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig;
+        }
+
         TORCH_CHECK(tensor_a.dim() == 2, "tensor_a must be 2D [M,K]");
         TORCH_CHECK(tensor_b_multi.dim() == 3, "tensor_b_multi must be 3D [E,K,N]");
         if (beta != 0.0f) {
@@ -1413,6 +1447,18 @@ void register_gemm(py::module_ &m) {
          torch::Tensor seg_offsets,  // [S+1] int32
          float alpha,
          float beta) {
+        int device;
+        if (cudaGetDevice(&device) != cudaSuccess) {
+          return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+        }
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+          return (int)warpconvnet::gemm::GemmStatus::kErrorKernelInitialization;
+        }
+        if (prop.major < 8) {
+          return (int)warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig;
+        }
+
         TORCH_CHECK(tensor_x.dim() == 2, "tensor_x must be 2D [N_rows, C_in]");
         TORCH_CHECK(tensor_dy.dim() == 2, "tensor_dy must be 2D [M_rows, C_out]");
         TORCH_CHECK(tensor_dw.dim() == 3, "tensor_dw must be 3D [S, C_in, C_out]");

@@ -304,6 +304,7 @@ __global__ void implicit_gemm_wmma(
   static_assert(IsInputSupported<InT>::value, "InT must be half or nv_bfloat16");
   static_assert(IsOutputSupported<OutT>::value, "OutT must be float, half, or nv_bfloat16");
 
+#if __CUDA_ARCH__ >= 800
   // Require one warp per block
   if (blockDim.x != 32) return;
 
@@ -525,6 +526,7 @@ __global__ void implicit_gemm_wmma(
       }
     }
   }
+#endif
 }
 
 // -------------------- Launch helpers --------------------

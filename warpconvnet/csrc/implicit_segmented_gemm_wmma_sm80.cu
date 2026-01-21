@@ -134,6 +134,7 @@ __global__ void segmented_implicit_gemm_wmma(
   static_assert(IsInputSupported<InT>::value, "InT must be half or nv_bfloat16");
   static_assert(IsOutputSupported<OutT>::value, "OutT must be float, half, or nv_bfloat16");
 
+#if __CUDA_ARCH__ >= 800
   if (blockDim.x != 32) return;  // one warp per block
 
   constexpr int TILE_M = 16, TILE_N = 16, TILE_K = 16;
@@ -345,6 +346,7 @@ __global__ void segmented_implicit_gemm_wmma(
     t += gridDim.y;
     __syncwarp();
   }
+#endif
 }
 
 template <typename InT, typename OutT, bool UseAtomic>
