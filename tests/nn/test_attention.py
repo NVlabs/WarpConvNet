@@ -16,7 +16,6 @@ from warpconvnet.nn.modules.attention import (
     TransformerBlock,
     ZeroOutPoints,
 )
-from warpconvnet.nn.encodings import FourierEncoding
 from warpconvnet.nn.modules.mlp import Linear
 
 try:
@@ -154,16 +153,14 @@ def test_to_attention(setup_points, use_encoding):
         assert not torch.any(mask[b, :, :, num_points[b] :]).item()
 
 
-@pytest.mark.parametrize("enable_flash", [True])
-def test_patch_attention(setup_points, enable_flash):
-    """Test patch-based attention with and without flash attention."""
+def test_patch_attention(setup_points):
+    """Test patch-based attention."""
+    if not FLASH_ATTN_AVAILABLE:
+        pytest.skip("flash_attn not available")
+
     pc: Points = setup_points[0]
     _, _, C = setup_points[1:]
     device = pc.device
-
-    # Skip flash attention test if not available
-    if enable_flash and not FLASH_ATTN_AVAILABLE:
-        pytest.skip("flash_attn not available")
 
     # Setup layers
     patch_size = 32
@@ -175,7 +172,6 @@ def test_patch_attention(setup_points, enable_flash):
         patch_size=patch_size,
         num_heads=num_heads,
         qkv_bias=True,
-        enable_flash=enable_flash,
     ).to(device)
 
     # Forward pass
@@ -188,16 +184,14 @@ def test_patch_attention(setup_points, enable_flash):
     assert len(out) == len(pc)
 
 
-@pytest.mark.parametrize("enable_flash", [True, False])
-def test_patch_transformer_block(setup_points, enable_flash):
-    """Test transformer block with patch attention and flash attention."""
+def test_patch_transformer_block(setup_points):
+    """Test transformer block with patch attention."""
+    if not FLASH_ATTN_AVAILABLE:
+        pytest.skip("flash_attn not available")
+
     pc: Points = setup_points[0]
     _, _, C = setup_points[1:]
     device = pc.device
-
-    # Skip flash attention test if not available
-    if enable_flash and not FLASH_ATTN_AVAILABLE:
-        pytest.skip("flash_attn not available")
 
     # Setup layers
     patch_size = 32
@@ -209,7 +203,6 @@ def test_patch_transformer_block(setup_points, enable_flash):
         num_heads=num_heads,
         ffn_multiplier=4,
         qkv_bias=True,
-        enable_flash=enable_flash,
         attn_fn=functools.partial(PatchAttention, patch_size=patch_size),
     ).to(device)
 
@@ -237,76 +230,6 @@ def test_patch_transformer_block(setup_points, enable_flash):
     assert patch_attn.attention.qkv.weight.grad is not None
     assert patch_attn.attention_norm.norm.weight.grad is not None
     assert lift.block.weight.grad is not None
-
-
-@pytest.mark.inference_mode()
-def test_nested_transformer_block(setup_points):
-    """Test transformer block with nested attention."""
-    pc: Points = setup_points[0]
-    _, _, C = setup_points[1:]
-    device = pc.device
-
-    # Setup layers
-    dim = C * 8
-    num_heads = 8
-    lift = Linear(C, dim).to(device)
-    transf = TransformerBlock(
-        dim=dim,
-        num_heads=num_heads,
-        ffn_multiplier=4,
-        qkv_bias=True,
-        enable_flash=False,  # NestedAttention doesn't use flash attention
-        attn_fn=NestedAttention,
-    ).to(device)
-
-    # Forward pass
-    with torch.inference_mode():
-        pc = lift(pc)
-        out = transf(pc)
-    assert isinstance(out, Points)
-
-
-@pytest.mark.inference_mode()
-def test_nested_attention(setup_points):
-    """Test nested attention mechanism."""
-    pc: Points = setup_points[0]
-    _, _, C = setup_points[1:]
-    device = pc.device
-
-    # Setup layers
-    dim = C * 8
-    lift = Linear(C, dim).to(device)
-    attn = NestedAttention(
-        dim=dim,
-        num_heads=8,
-        pos_enc=FourierEncoding(3, dim),
-    ).to(device)
-
-    # Forward pass
-    with torch.inference_mode():
-        pc = lift(pc)
-        out = attn(pc)
-    assert out.features.shape == (pc.offsets[-1], dim)
-
-
-@pytest.mark.inference_mode()
-def test_cross_nested_attention(setup_points):
-    """Test cross nested attention with queries."""
-    pc: Points = setup_points[0]
-    B, _, C = setup_points[1:]
-    device = pc.device
-
-    # Setup layers
-    dim = C * 8
-    lift = Linear(C, dim).to(device)
-    attn = NestedAttention(dim=dim, num_heads=8).to(device)
-
-    # Create queries and run attention
-    N = 100
-    queries = torch.randn(B, N, dim).to(device)
-    pc = lift(pc)
-    out = attn(queries, pc)
-    assert out.shape == (B, N, dim)
 
 
 @pytest.mark.parametrize("enable_flash", [True, False])

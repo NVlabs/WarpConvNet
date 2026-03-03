@@ -6,12 +6,11 @@ import math
 import os
 from typing import Union, Optional, Tuple
 
-import cupy as cp
 import numpy as np
 import torch
 from torch import Tensor
 
-from warpconvnet.utils.cuda_utils import load_kernel
+import warpconvnet._C as _C
 
 _EXPAND_STATUS_SUCCESS = 0
 _EXPAND_STATUS_VECTOR_OVERFLOW = 1
@@ -38,8 +37,8 @@ class HashMethod(enum.Enum):
 
 class TorchHashTable:
     """
-    A hash table implementation using CuPy RawKernels for vector key storage and lookup,
-    operating on pytorch Tensors. Uses templated CUDA kernels.
+    A hash table implementation using CUDA kernels via the _C extension for
+    vector key storage and lookup, operating on pytorch Tensors.
     """
 
     _capacity: int
@@ -50,11 +49,6 @@ class TorchHashTable:
     _device: torch.device = None
     _num_entries: int = 0
     _vector_capacity: int = 0
-
-    _prepare_kernel: cp.RawKernel
-    _insert_kernel: cp.RawKernel  # Will hold the specific insert kernel (e.g., _fnv1a)
-    _search_kernel: cp.RawKernel  # Will hold the specific search kernel (e.g., _fnv1a)
-    _expand_kernel: cp.RawKernel
 
     def __init__(
         self,
@@ -80,16 +74,6 @@ class TorchHashTable:
         self._device = torch.device(device)
         self._num_entries = 0
         self._vector_capacity = 0
-
-        # Load CUDA kernels using cupy RawKernel loader
-        # cuda_utils.py automatically handles the csrc path for just filename
-        self._prepare_kernel = load_kernel("prepare_key_value_pairs_kernel", "hashmap_kernels.cu")
-
-        # Load the specific insert/search kernels based on the chosen hash method
-        suffix = hash_method.kernel_suffix()
-        self._insert_kernel = load_kernel(f"insert_kernel_{suffix}", "hashmap_kernels.cu")
-        self._search_kernel = load_kernel(f"search_kernel_{suffix}", "hashmap_kernels.cu")
-        self._expand_kernel = load_kernel(f"expand_insert_kernel_{suffix}", "hashmap_kernels.cu")
 
     @property
     def capacity(self) -> int:
@@ -142,7 +126,6 @@ class TorchHashTable:
 
         if vec_keys.dtype != torch.int32:
             if vec_keys.dtype == torch.int64:
-                # print(f"Warning: Input vec_keys dtype is {vec_keys.dtype}, casting to torch.int32.")
                 vec_keys = vec_keys.to(dtype=torch.int32)
             else:
                 raise TypeError(
@@ -174,30 +157,19 @@ class TorchHashTable:
         self._num_entries = num_keys
 
         # --- Launch Prepare Kernel ---
-        grid_size_prep = math.ceil(self._capacity / threads_per_block)
-        self._prepare_kernel(
-            (grid_size_prep,),
-            (threads_per_block,),
-            (self._table_kvs.data_ptr(), self._capacity),  # Pass data pointer
-        )
-        torch.cuda.synchronize(self.device)  # Synchronize on the correct device
+        _C.coords.hashmap_prepare(self._table_kvs, self._capacity)
+        torch.cuda.synchronize(self.device)
 
-        # --- Launch Insert Kernel (Templated Version) ---
-        grid_size_ins = math.ceil(num_keys / threads_per_block)
-        self._insert_kernel(
-            (grid_size_ins,),
-            (threads_per_block,),
-            (
-                self._table_kvs.data_ptr(),  # ptr table_kvs
-                self._vector_keys.data_ptr(),  # ptr vector_keys
-                num_keys,  # int num_keys
-                self._key_dim,  # int key_dim
-                self._capacity,
-            ),  # int table_capacity
+        # --- Launch Insert Kernel ---
+        _C.coords.hashmap_insert(
+            self._table_kvs,
+            self._vector_keys,
+            num_keys,
+            self._key_dim,
+            self._capacity,
+            self._hash_method_enum.value,
         )
-
-        # TODO(cchoy): Use dlpack to skip explicit synchronization
-        torch.cuda.synchronize(self.device)  # Synchronize
+        torch.cuda.synchronize(self.device)
 
     @classmethod
     def from_keys(
@@ -235,7 +207,6 @@ class TorchHashTable:
 
         if vec_keys.dtype != torch.int32:
             if vec_keys.dtype == torch.int64:
-                # print(f"Warning: Input vec_keys dtype is {vec_keys.dtype}, casting to torch.int32 for from_keys.")
                 vec_keys = vec_keys.to(dtype=torch.int32)
             else:
                 raise TypeError(
@@ -304,7 +275,6 @@ class TorchHashTable:
 
         if search_keys.dtype != torch.int32:
             if search_keys.dtype == torch.int64:
-                # print(f"Warning: Input search_keys dtype is {search_keys.dtype}, casting to torch.int32.")
                 search_keys = search_keys.to(dtype=torch.int32)
             else:
                 raise TypeError(
@@ -315,23 +285,18 @@ class TorchHashTable:
         # Allocate results tensor on the correct device
         results = torch.empty(num_search_keys, dtype=torch.int32, device=table_device)
 
-        # --- Launch Search Kernel (Templated Version) ---
-        grid_size_search = math.ceil(num_search_keys / threads_per_block)
-
-        self._search_kernel(
-            (grid_size_search,),
-            (threads_per_block,),
-            (
-                self._table_kvs.data_ptr(),  # ptr table_kvs
-                self._vector_keys.data_ptr(),  # ptr vector_keys
-                search_keys.data_ptr(),  # ptr search_keys
-                results.data_ptr(),  # ptr results
-                num_search_keys,  # int num_search_keys
-                self._key_dim,  # int key_dim
-                self._capacity,
-            ),  # int table_capacity
+        # --- Launch Search Kernel ---
+        _C.coords.hashmap_search(
+            self._table_kvs,
+            self._vector_keys,
+            search_keys,
+            results,
+            num_search_keys,
+            self._key_dim,
+            self._capacity,
+            self._hash_method_enum.value,
         )
-        torch.cuda.synchronize(table_device)  # Synchronize
+        torch.cuda.synchronize(table_device)
 
         return results
 
@@ -384,26 +349,19 @@ class TorchHashTable:
         )
         status_tensor = torch.zeros(1, dtype=torch.int32, device=target_device)
 
-        grid_size = (total_candidates + threads_per_block - 1) // threads_per_block
-        shared_mem = threads_per_block * self._key_dim * 4
-
-        self._expand_kernel(
-            (grid_size,),
-            (threads_per_block,),
-            (
-                self._table_kvs.data_ptr(),
-                self._vector_keys.data_ptr(),
-                base_coords.data_ptr(),
-                offsets.data_ptr(),
-                num_base,
-                num_offsets,
-                self._key_dim,
-                self._capacity,
-                self._vector_capacity,
-                num_entries_tensor.data_ptr(),
-                status_tensor.data_ptr(),
-            ),
-            shared_mem=shared_mem,
+        _C.coords.hashmap_expand(
+            self._table_kvs,
+            self._vector_keys,
+            base_coords,
+            offsets,
+            num_base,
+            num_offsets,
+            self._key_dim,
+            self._capacity,
+            self._vector_capacity,
+            num_entries_tensor,
+            status_tensor,
+            self._hash_method_enum.value,
         )
         torch.cuda.synchronize(target_device)
 
@@ -506,7 +464,6 @@ class TorchHashTable:
         """
         Loads data from a dict and re-initializes the hash table state.
         Assumes data arrays are numpy arrays. Tensors are created on the specified device.
-        Requires re-compilation of kernels implicitly via __init__.
         """
         required_keys = {
             "capacity",

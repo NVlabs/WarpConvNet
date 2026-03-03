@@ -101,7 +101,6 @@ VALID_ALGOS = [
     "explicit_gemm",
     "implicit_gemm",
     "cutlass_implicit_gemm",
-    "wmma_implicit_gemm",
     "auto",
 ]
 

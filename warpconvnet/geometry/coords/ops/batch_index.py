@@ -5,18 +5,13 @@ from typing import Literal, Optional
 from jaxtyping import Float, Int
 
 import numpy as np
-import cupy as cp
 import math
 import os
 
 import torch
 from torch import Tensor
 
-from warpconvnet.utils.cuda_utils import load_kernel
-
-
-# cuda_utils.py automatically handles the csrc path for just filename
-_bsearch_kernel = load_kernel(kernel_file="find_first_gt_bsearch.cu", kernel_name="find_first_gt_bsearch")
+import warpconvnet._C as _C
 
 
 @torch.inference_mode()
@@ -78,33 +73,17 @@ def batch_index_from_indices(
     if M_len == 1:  # Only one offset value, e.g. offsets=[limit]. All indices < limit are batch 0.
         return torch.zeros(N_indices, dtype=torch.int32, device=_dev)
 
-    indices_cp = cp.from_dlpack(indices)
-    offsets_cp = cp.from_dlpack(offsets)
-    batch_index_buffer_cp = cp.empty(N_indices, dtype=cp.int32)
+    batch_index_buffer = torch.empty(N_indices, dtype=torch.int32, device=_dev)
 
-    blocks = math.ceil(N_indices / threads)
-    shared_mem_bytes = M_len * offsets_cp.dtype.itemsize
-
-    # Kernel: find_first_gt_bsearch(const int *srcM, int M, const int *srcN, int N, int *out)
-    # srcM: offsets_cp.data.ptr
-    # M: M_len (length of offsets array)
-    # srcN: indices_cp.data.ptr
-    # N: N_indices (number of elements in indices tensor)
-    # out: batch_index_buffer_cp.data.ptr
-    _bsearch_kernel(
-        (blocks,),
-        (threads,),
-        (
-            offsets_cp,
-            M_len,
-            indices_cp,
-            N_indices,
-            batch_index_buffer_cp,
-        ),
-        shared_mem=shared_mem_bytes,
+    _C.coords.find_first_gt_bsearch(
+        offsets,
+        M_len,
+        indices,
+        N_indices,
+        batch_index_buffer,
     )
 
-    return torch.from_dlpack(batch_index_buffer_cp).to(_dev)
+    return batch_index_buffer
 
 
 @torch.inference_mode()

@@ -4,9 +4,6 @@
 import os
 
 import torch
-from warpconvnet.utils.cupy_alloc import set_cupy_allocator
-
-set_cupy_allocator()
 
 # Import constants to set the default values
 from warpconvnet.constants import (

@@ -108,7 +108,7 @@ class TestFactorGridTransform:
         transform_fn = lambda x: F.relu(x)  # noqa: E731
 
         # Apply transform
-        result = factor_grid_transform(simple_factor_grid, transform_fn, in_place=False)
+        result = factor_grid_transform(simple_factor_grid, transform_fn)
 
         # Check that result is a FactorGrid
         assert isinstance(result, FactorGrid)
@@ -119,45 +119,20 @@ class TestFactorGridTransform:
             features = grid.grid_features.batched_tensor
             assert torch.all(features >= 0), f"Grid {i} has negative values after ReLU"
 
-    def test_transform_in_place(self, simple_factor_grid):
-        """Test in-place transform operation."""
+    def test_transform_produces_new_grids(self, simple_factor_grid):
+        """Test that transform produces new grids (not in-place)."""
         original_grids = [
             grid.grid_features.batched_tensor.clone() for grid in simple_factor_grid
         ]
 
-        # Apply transform in-place
-        transform_fn = lambda x: x * 2.0  # noqa: E731
-        result = factor_grid_transform(simple_factor_grid, transform_fn, in_place=True)
-
-        # Check that features were modified
-        for i, (original, result_grid) in enumerate(zip(original_grids, result)):
-            result_features = result_grid.grid_features.batched_tensor
-            expected = original * 2.0
-            assert torch.allclose(
-                result_features, expected, atol=1e-6
-            ), f"Grid {i} transform failed"
-
-    def test_transform_not_in_place(self, simple_factor_grid):
-        """Test not-in-place transform operation."""
-        original_grids = [
-            grid.grid_features.batched_tensor.clone() for grid in simple_factor_grid
-        ]
-
-        # Apply transform not in-place
+        # Apply transform
         transform_fn = lambda x: x * 3.0  # noqa: E731
-        result = factor_grid_transform(simple_factor_grid, transform_fn, in_place=False)
+        result = factor_grid_transform(simple_factor_grid, transform_fn)
 
-        # Check that original wasn't modified and result is correct
-        for i, (original, original_grid, result_grid) in enumerate(
-            zip(original_grids, simple_factor_grid, result)
+        # Check result is correct
+        for i, (original, result_grid) in enumerate(
+            zip(original_grids, result)
         ):
-            # Original should be unchanged
-            current_original = original_grid.grid_features.batched_tensor
-            assert torch.allclose(
-                current_original, original, atol=1e-6
-            ), f"Grid {i} was modified in-place"
-
-            # Result should be transformed
             result_features = result_grid.grid_features.batched_tensor
             expected = original * 3.0
             assert torch.allclose(
@@ -291,7 +266,7 @@ class TestFactorGridIntraCommunication:
             grid.grid_features.batched_tensor.random_()
 
         # Apply intra-communication
-        result = factor_grid_intra_communication(factor_grid, communication_type)
+        result = factor_grid_intra_communication(factor_grid, [communication_type])
 
         # Check result structure
         assert isinstance(result, FactorGrid)
@@ -311,7 +286,7 @@ class TestFactorGridIntraCommunication:
         """Test intra-communication with single grid should return unchanged."""
         single_grid = FactorGrid([simple_factor_grid.grids[0]])
 
-        result = factor_grid_intra_communication(single_grid, "sum")
+        result = factor_grid_intra_communication(single_grid, ["sum"])
 
         # Should return the same FactorGrid
         assert len(result) == 1
@@ -322,7 +297,7 @@ class TestFactorGridIntraCommunication:
     def test_intra_communication_invalid_type(self, simple_factor_grid):
         """Test invalid communication type should raise error."""
         with pytest.raises(ValueError, match="Unknown communication type"):
-            factor_grid_intra_communication(simple_factor_grid, "invalid")
+            factor_grid_intra_communication(simple_factor_grid, ["invalid"])
 
 
 class TestFactorGridIntraCommunications:
@@ -351,7 +326,7 @@ class TestFactorGridIntraCommunications:
     def test_multiple_communications_too_many(self, simple_factor_grid):
         """Test multiple communications with more than 2 types should fail."""
         with pytest.raises(
-            NotImplementedError, match="More than 2 communication types"
+            ValueError, match="Unsupported number of communication types"
         ):
             factor_grid_intra_communication(simple_factor_grid, ["sum", "mul", "div"])
 
@@ -378,12 +353,12 @@ class TestFactorGridFunctionalIntegration:
         """Test combining transform and concatenation."""
         # Transform first FactorGrid
         transformed1 = factor_grid_transform(
-            simple_factor_grid, lambda x: F.relu(x), in_place=False
+            simple_factor_grid, lambda x: F.relu(x)
         )
 
         # Transform second FactorGrid differently
         transformed2 = factor_grid_transform(
-            simple_factor_grid, lambda x: torch.sigmoid(x), in_place=False
+            simple_factor_grid, lambda x: torch.sigmoid(x)
         )
 
         # Concatenate results
@@ -399,7 +374,7 @@ class TestFactorGridFunctionalIntegration:
     def test_communication_then_pool(self, simple_factor_grid):
         """Test combining communication and pooling."""
         # Apply intra-communication
-        communicated = factor_grid_intra_communication(simple_factor_grid, "sum")
+        communicated = factor_grid_intra_communication(simple_factor_grid, ["sum"])
 
         # Pool the results
         pooled = factor_grid_pool(communicated, pooling_type="mean")
@@ -417,16 +392,9 @@ class TestFactorGridFunctionalErrorCases:
     """Test error handling in functional operations."""
 
     def test_empty_factor_grid(self):
-        """Test operations with empty FactorGrid."""
-        empty_grid = FactorGrid([])
-
-        # Transform should work with empty grid
-        result = factor_grid_transform(empty_grid, lambda x: x * 2, in_place=False)
-        assert len(result) == 0
-
-        # Pool should work with empty grid
-        pooled = factor_grid_pool(empty_grid, "mean")
-        assert pooled.numel() == 0  # Should return empty tensor
+        """Test that creating an empty FactorGrid raises an error."""
+        with pytest.raises(AssertionError, match="At least one geometry must be provided"):
+            FactorGrid([])
 
     def test_mismatched_bounds(self):
         """Test communication with mismatched grid bounds."""
