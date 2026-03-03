@@ -197,7 +197,7 @@ void register_coords(py::module_ &m) {
              py::arg("num_offsets"),
              py::arg("capacity"),
              py::arg("hash_method"),
-             py::arg("threads_x") = 128,
+             py::arg("threads_x") = 64,
              py::arg("threads_y") = 8);
   coords.def("map_found_indices_to_maps",
              &coords_map_found_indices_to_maps,
@@ -219,7 +219,7 @@ void register_coords(py::module_ &m) {
              py::arg("capacity"),
              py::arg("num_kernels"),
              py::arg("hash_method"),
-             py::arg("threads_x") = 128,
+             py::arg("threads_x") = 64,
              py::arg("threads_y") = 8);
 
   // --- Fused count/scatter kernel map operations ---
@@ -234,7 +234,7 @@ void register_coords(py::module_ &m) {
              py::arg("capacity"),
              py::arg("num_kernels"),
              py::arg("hash_method"),
-             py::arg("threads_x") = 128,
+             py::arg("threads_x") = 64,
              py::arg("threads_y") = 8);
   coords.def("kernel_map_size_4d_scatter",
              &coords_kernel_map_size_4d_scatter,
@@ -250,7 +250,7 @@ void register_coords(py::module_ &m) {
              py::arg("capacity"),
              py::arg("num_kernels"),
              py::arg("hash_method"),
-             py::arg("threads_x") = 128,
+             py::arg("threads_x") = 64,
              py::arg("threads_y") = 8);
 
   // --- Postprocess operations (search-once pipeline) ---
