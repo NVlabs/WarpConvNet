@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 from pytest_benchmark.fixture import BenchmarkFixture
 
 from warpconvnet.geometry.coords.search.search_results import RealSearchResult
@@ -18,7 +17,6 @@ from warpconvnet.geometry.types.points import Points
 @pytest.fixture
 def setup_points():
     """Setup test points with random coordinates and features."""
-    wp.init()
     device = torch.device("cuda:0")
     B, min_N, max_N, C = 3, 100000, 1000000, 7
     Ns = torch.randint(min_N, max_N, (B,))

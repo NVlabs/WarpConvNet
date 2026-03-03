@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.utils.argsort import argsort
 from warpconvnet.utils.unique import ToUnique, unique_torch
@@ -12,7 +11,6 @@ from warpconvnet.utils.unique import ToUnique, unique_torch
 @pytest.fixture
 def setup_data():
     """Setup test data."""
-    wp.init()
     torch.manual_seed(0)
     return None
 

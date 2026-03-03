@@ -5,7 +5,6 @@ import unittest
 
 import torch
 import torch.distributed as dist
-import warp as wp
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -78,5 +77,4 @@ if __name__ == "__main__":
     torchrun --nproc_per_node=2 warp/convnet/tests/test_fsdp.py
     """
     dist.init_process_group(backend="nccl")
-    wp.init()
     unittest.main()

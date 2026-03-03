@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.features.grid import GridFeatures, GridMemoryFormat
 
@@ -11,7 +10,6 @@ from warpconvnet.geometry.features.grid import GridFeatures, GridMemoryFormat
 @pytest.fixture
 def setup_device():
     """Setup test device."""
-    wp.init()
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 

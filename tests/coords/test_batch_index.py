@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.geometry.coords.ops.batch_index import (
@@ -17,7 +16,6 @@ from warpconvnet.geometry.coords.ops.batch_index import (
 @pytest.fixture
 def setup_points():
     """Setup test points with random coordinates."""
-    wp.init()
     torch.manual_seed(0)
 
     B, min_N, max_N, C = 3, 100000, 1000000, 7

@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Literal, Optional, Union, TYPE_CHECKING
+from typing import Optional, Union, TYPE_CHECKING
 from jaxtyping import Float, Int
 
 import torch
 from torch import Tensor
 
-from ..batch_copy import copy_batch_torch, copy_batch_warp
+from ..batch_copy import copy_batch_torch
 
 if TYPE_CHECKING:
     from ..cat import CatFeatures
@@ -18,25 +18,13 @@ if TYPE_CHECKING:
 def cat_to_pad_tensor(
     in_features: Float[Tensor, "N F"],  # noqa: F821
     row_splits: Int[Tensor, "B+1"],  # noqa: F821
-    backend: Literal["torch", "warp"] = "torch",
-    num_copy_per_thread: Optional[int] = 256,  # constant
     pad_multiple: Optional[int] = None,
 ) -> Float[Tensor, "B M F"]:
     """
     Convert a concatenated 2D tensor to a batched 3D tensor.
-
-    Torch is much faster in general.
     """
-    assert backend in ["torch", "warp"], f"Invalid backend: {backend}. Must be 'torch' or 'warp'."
     assert in_features.ndim == 2
-    if backend == "torch":
-        out_features = copy_batch_torch(in_features, row_splits, pad_multiple)
-    elif backend == "warp":
-        out_features = copy_batch_warp(in_features, row_splits, num_copy_per_thread, pad_multiple)
-    else:
-        raise ValueError(f"Invalid backend: {backend}")
-
-    return out_features
+    return copy_batch_torch(in_features, row_splits, pad_multiple)
 
 
 def cat_to_pad(cat_features: "CatFeatures", pad_multiple: Optional[int] = None) -> "PadFeatures":
@@ -51,7 +39,6 @@ def cat_to_pad(cat_features: "CatFeatures", pad_multiple: Optional[int] = None) 
     batched_tensor = cat_to_pad_tensor(
         cat_features.batched_tensor,
         cat_features.offsets,
-        backend="torch",
         pad_multiple=pad_multiple,
     )
     return PadFeatures(batched_tensor, cat_features.offsets, pad_multiple)

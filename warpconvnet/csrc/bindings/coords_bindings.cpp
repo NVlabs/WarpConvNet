@@ -43,6 +43,21 @@ void coords_find_first_gt_bsearch(torch::Tensor offsets_tensor, int M,
 void coords_coord_to_code(torch::Tensor grid_coord, torch::Tensor coord_offset,
                            torch::Tensor min_coord, torch::Tensor window_size,
                            int N, torch::Tensor codes);
+void coords_radius_search_count(torch::Tensor points, torch::Tensor queries,
+                                 torch::Tensor sorted_indices, torch::Tensor cell_starts,
+                                 torch::Tensor cell_counts, torch::Tensor table_kvs,
+                                 torch::Tensor vector_keys, torch::Tensor result_count,
+                                 int N, int M, int num_cells,
+                                 float radius, float cell_size,
+                                 int table_capacity, int hash_method);
+void coords_radius_search_write(torch::Tensor points, torch::Tensor queries,
+                                 torch::Tensor sorted_indices, torch::Tensor cell_starts,
+                                 torch::Tensor cell_counts, torch::Tensor table_kvs,
+                                 torch::Tensor vector_keys, torch::Tensor result_offsets,
+                                 torch::Tensor result_indices, torch::Tensor result_distances,
+                                 int N, int M, int num_cells,
+                                 float radius, float cell_size,
+                                 int table_capacity, int hash_method);
 
 namespace warpconvnet {
 namespace bindings {
@@ -109,6 +124,25 @@ void register_coords(py::module_ &m) {
              py::arg("grid_coord"), py::arg("coord_offset"),
              py::arg("min_coord"), py::arg("window_size"),
              py::arg("N"), py::arg("codes"));
+
+  // --- Radius search ---
+  coords.def("radius_search_count", &coords_radius_search_count,
+             py::arg("points"), py::arg("queries"),
+             py::arg("sorted_indices"), py::arg("cell_starts"),
+             py::arg("cell_counts"), py::arg("table_kvs"),
+             py::arg("vector_keys"), py::arg("result_count"),
+             py::arg("N"), py::arg("M"), py::arg("num_cells"),
+             py::arg("radius"), py::arg("cell_size"),
+             py::arg("table_capacity"), py::arg("hash_method"));
+  coords.def("radius_search_write", &coords_radius_search_write,
+             py::arg("points"), py::arg("queries"),
+             py::arg("sorted_indices"), py::arg("cell_starts"),
+             py::arg("cell_counts"), py::arg("table_kvs"),
+             py::arg("vector_keys"), py::arg("result_offsets"),
+             py::arg("result_indices"), py::arg("result_distances"),
+             py::arg("N"), py::arg("M"), py::arg("num_cells"),
+             py::arg("radius"), py::arg("cell_size"),
+             py::arg("table_capacity"), py::arg("hash_method"));
 }
 
 }  // namespace bindings

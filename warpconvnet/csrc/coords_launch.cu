@@ -89,6 +89,51 @@ extern "C" __global__ void assign_order_discrete_20bit_kernel_4points(
 extern "C" __global__ void find_first_gt_bsearch(
     const int* srcM, int M, const int* srcN, int N, int* out);
 
+// --- radius_search_kernels.cu ---
+extern "C" __global__ void radius_search_count_kernel_fnv1a(
+    const float* points, const float* queries,
+    const int* sorted_indices, const int* cell_starts, const int* cell_counts,
+    const int* table_kvs, const int* vector_keys,
+    int* result_count,
+    int N, int M, int num_cells,
+    float radius, float cell_size, int table_capacity);
+extern "C" __global__ void radius_search_count_kernel_city(
+    const float* points, const float* queries,
+    const int* sorted_indices, const int* cell_starts, const int* cell_counts,
+    const int* table_kvs, const int* vector_keys,
+    int* result_count,
+    int N, int M, int num_cells,
+    float radius, float cell_size, int table_capacity);
+extern "C" __global__ void radius_search_count_kernel_murmur(
+    const float* points, const float* queries,
+    const int* sorted_indices, const int* cell_starts, const int* cell_counts,
+    const int* table_kvs, const int* vector_keys,
+    int* result_count,
+    int N, int M, int num_cells,
+    float radius, float cell_size, int table_capacity);
+
+extern "C" __global__ void radius_search_write_kernel_fnv1a(
+    const float* points, const float* queries,
+    const int* sorted_indices, const int* cell_starts, const int* cell_counts,
+    const int* table_kvs, const int* vector_keys,
+    const int* result_offsets, int* result_indices, float* result_distances,
+    int N, int M, int num_cells,
+    float radius, float cell_size, int table_capacity);
+extern "C" __global__ void radius_search_write_kernel_city(
+    const float* points, const float* queries,
+    const int* sorted_indices, const int* cell_starts, const int* cell_counts,
+    const int* table_kvs, const int* vector_keys,
+    const int* result_offsets, int* result_indices, float* result_distances,
+    int N, int M, int num_cells,
+    float radius, float cell_size, int table_capacity);
+extern "C" __global__ void radius_search_write_kernel_murmur(
+    const float* points, const float* queries,
+    const int* sorted_indices, const int* cell_starts, const int* cell_counts,
+    const int* table_kvs, const int* vector_keys,
+    const int* result_offsets, int* result_indices, float* result_distances,
+    int N, int M, int num_cells,
+    float radius, float cell_size, int table_capacity);
+
 // ============================================================================
 // coord_to_code kernel (moved from inline Python string in voxel_encode.py)
 // ============================================================================
@@ -319,4 +364,69 @@ void coords_coord_to_code(torch::Tensor grid_coord, torch::Tensor coord_offset,
         grid_coord.data_ptr<int>(), coord_offset.data_ptr<int>(),
         min_coord.data_ptr<int>(), window_size.data_ptr<int>(),
         N, codes.data_ptr<int64_t>());
+}
+
+void coords_radius_search_count(torch::Tensor points, torch::Tensor queries,
+                                 torch::Tensor sorted_indices, torch::Tensor cell_starts,
+                                 torch::Tensor cell_counts, torch::Tensor table_kvs,
+                                 torch::Tensor vector_keys, torch::Tensor result_count,
+                                 int N, int M, int num_cells,
+                                 float radius, float cell_size,
+                                 int table_capacity, int hash_method) {
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    int threads = 256;
+    int blocks = (M + threads - 1) / threads;
+
+    auto* pts = points.data_ptr<float>();
+    auto* qrs = queries.data_ptr<float>();
+    auto* si = sorted_indices.data_ptr<int>();
+    auto* cs = cell_starts.data_ptr<int>();
+    auto* cc = cell_counts.data_ptr<int>();
+    auto* tbl = table_kvs.data_ptr<int>();
+    auto* vk = vector_keys.data_ptr<int>();
+    auto* rc = result_count.data_ptr<int>();
+
+    switch (hash_method) {
+        case 0: radius_search_count_kernel_fnv1a<<<blocks, threads, 0, stream>>>(
+            pts, qrs, si, cs, cc, tbl, vk, rc, N, M, num_cells, radius, cell_size, table_capacity); break;
+        case 1: radius_search_count_kernel_city<<<blocks, threads, 0, stream>>>(
+            pts, qrs, si, cs, cc, tbl, vk, rc, N, M, num_cells, radius, cell_size, table_capacity); break;
+        case 2: radius_search_count_kernel_murmur<<<blocks, threads, 0, stream>>>(
+            pts, qrs, si, cs, cc, tbl, vk, rc, N, M, num_cells, radius, cell_size, table_capacity); break;
+        default: TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+    }
+}
+
+void coords_radius_search_write(torch::Tensor points, torch::Tensor queries,
+                                 torch::Tensor sorted_indices, torch::Tensor cell_starts,
+                                 torch::Tensor cell_counts, torch::Tensor table_kvs,
+                                 torch::Tensor vector_keys, torch::Tensor result_offsets,
+                                 torch::Tensor result_indices, torch::Tensor result_distances,
+                                 int N, int M, int num_cells,
+                                 float radius, float cell_size,
+                                 int table_capacity, int hash_method) {
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    int threads = 256;
+    int blocks = (M + threads - 1) / threads;
+
+    auto* pts = points.data_ptr<float>();
+    auto* qrs = queries.data_ptr<float>();
+    auto* si = sorted_indices.data_ptr<int>();
+    auto* cs = cell_starts.data_ptr<int>();
+    auto* cc = cell_counts.data_ptr<int>();
+    auto* tbl = table_kvs.data_ptr<int>();
+    auto* vk = vector_keys.data_ptr<int>();
+    auto* ro = result_offsets.data_ptr<int>();
+    auto* ri = result_indices.data_ptr<int>();
+    auto* rd = result_distances.data_ptr<float>();
+
+    switch (hash_method) {
+        case 0: radius_search_write_kernel_fnv1a<<<blocks, threads, 0, stream>>>(
+            pts, qrs, si, cs, cc, tbl, vk, ro, ri, rd, N, M, num_cells, radius, cell_size, table_capacity); break;
+        case 1: radius_search_write_kernel_city<<<blocks, threads, 0, stream>>>(
+            pts, qrs, si, cs, cc, tbl, vk, ro, ri, rd, N, M, num_cells, radius, cell_size, table_capacity); break;
+        case 2: radius_search_write_kernel_murmur<<<blocks, threads, 0, stream>>>(
+            pts, qrs, si, cs, cc, tbl, vk, ro, ri, rd, N, M, num_cells, radius, cell_size, table_capacity); break;
+        default: TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+    }
 }

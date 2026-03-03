@@ -134,6 +134,7 @@ ext_modules = [
             "warpconvnet/csrc/discrete_kernels.cu",
             "warpconvnet/csrc/morton_code.cu",
             "warpconvnet/csrc/find_first_gt_bsearch.cu",
+            "warpconvnet/csrc/radius_search_kernels.cu",
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,

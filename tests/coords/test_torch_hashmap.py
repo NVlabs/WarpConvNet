@@ -4,7 +4,6 @@
 import numpy as np
 import pytest
 import torch
-import warp as wp  # For wp.init in main
 
 from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable, HashMethod
 
@@ -190,7 +189,4 @@ def test_benchmark_torch_search_non_existent_min_of_k(
 
 
 if __name__ == "__main__":
-    wp.init()
-    # You might need to run pytest with specific options for benchmark, e.g.:
-    # pytest tests/coords/test_torch_hashmap.py --benchmark-autosave
     pytest.main([__file__])

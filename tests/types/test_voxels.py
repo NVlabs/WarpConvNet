@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.search.torch_hashmap import HashMethod
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
@@ -16,7 +15,6 @@ from warpconvnet.utils.unique import unique_hashmap, unique_torch
 @pytest.fixture
 def setup_voxels():
     """Setup test voxels with random coordinates and features."""
-    wp.init()
     torch.manual_seed(0)
 
     B, min_N, max_N, C = 3, 100000, 1000000, 7

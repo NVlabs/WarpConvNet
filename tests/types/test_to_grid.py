@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.geometry.types.voxels import Voxels
@@ -15,9 +14,6 @@ from warpconvnet.geometry.types.conversion.to_grid import (
 )
 from warpconvnet.geometry.coords.grid import GridCoords
 from warpconvnet.geometry.features.grid import GridFeatures
-
-
-wp.init()
 
 
 @pytest.fixture
