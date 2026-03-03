@@ -256,31 +256,92 @@ def _kernel_map_from_size(
         # Prepare kernel size tensor
         kernel_size_tensor = torch.tensor(kernel_sizes, dtype=torch.int32, device=target_device)
 
-        # Allocate output tensor
+        if return_type == "indices":
+            # For "indices" return type, use the original search kernel
+            found_in_coord_index = torch.empty(
+                (num_offsets, num_query_coords),
+                dtype=torch.int32,
+                device=target_device,
+            )
+            _C.coords.kernel_map_size_4d(
+                hashtable._table_kvs.contiguous(),
+                hashtable.vector_keys.contiguous(),
+                batched_query_coords.contiguous(),
+                kernel_size_tensor,
+                found_in_coord_index,
+                num_query_coords,
+                hashtable.capacity,
+                num_offsets,
+                hashtable.hash_method.value,
+                threads_per_block_x,
+                threads_per_block_y,
+            )
+            return found_in_coord_index
+
+        # Search-once + fused postprocess path for "offsets" return type.
+        # Single hash table search pass → postprocess count → cumsum → postprocess scatter.
+        # This eliminates the second hash table search pass (the dominant cost).
+        table_kvs = hashtable._table_kvs.contiguous()
+        vector_keys = hashtable.vector_keys.contiguous()
+        query_coords = batched_query_coords.contiguous()
+        capacity = hashtable.capacity
+        hash_method_val = hashtable.hash_method.value
+
+        # Step 1: Single search pass → K×M intermediate
         found_in_coord_index = torch.empty(
             (num_offsets, num_query_coords),
             dtype=torch.int32,
             device=target_device,
         )
-
-        # Launch the kernel
         _C.coords.kernel_map_size_4d(
-            hashtable._table_kvs.contiguous(),
-            hashtable.vector_keys.contiguous(),
-            batched_query_coords.contiguous(),
+            table_kvs,
+            vector_keys,
+            query_coords,
             kernel_size_tensor,
             found_in_coord_index,
             num_query_coords,
-            hashtable.capacity,
+            capacity,
             num_offsets,
-            hashtable.hash_method.value,
+            hash_method_val,
             threads_per_block_x,
             threads_per_block_y,
         )
 
-        return _kernel_map_search_to_result(
+        # Step 2: Fused count on intermediate (sequential scan, no hash access)
+        counts = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
+        _C.coords.postprocess_count(
             found_in_coord_index,
-            return_type=return_type,
+            counts,
+            num_offsets,
+            num_query_coords,
+        )
+
+        # Step 3: Prefix sum + allocate
+        offsets = torch.zeros(num_offsets + 1, dtype=torch.int32, device=target_device)
+        torch.cumsum(counts, dim=0, out=offsets[1:])
+        num_total_maps = offsets[-1].item()
+
+        # Allocate output
+        in_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
+        out_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
+
+        if num_total_maps > 0:
+            # Step 4: Fused scatter on intermediate (sequential scan, no hash access)
+            scatter_counters = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
+            _C.coords.postprocess_scatter(
+                found_in_coord_index,
+                offsets,
+                scatter_counters,
+                in_maps,
+                out_maps,
+                num_offsets,
+                num_query_coords,
+            )
+
+        return IntSearchResult(
+            in_maps,
+            out_maps,
+            offsets,
             identity_map_index=identity_map_index,
         )
 

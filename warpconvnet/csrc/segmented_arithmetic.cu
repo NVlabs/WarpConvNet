@@ -822,8 +822,7 @@ int run_segmented_arithmetic_templated_impl(const void* tensor_b,
     return static_cast<int>(SegmentedArithmeticStatus::kErrorInvalidKernelType);
   }
 
-  // Check for CUDA errors
-  cudaStreamSynchronize(stream);
+  // Non-blocking error check
   cudaError_t cuda_status = cudaGetLastError();
   if (cuda_status != cudaSuccess) {
     return static_cast<int>(SegmentedArithmeticStatus::kErrorKernelExecution);
