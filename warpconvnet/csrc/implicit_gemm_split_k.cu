@@ -251,8 +251,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
 
   if (needs_reduction) {
     size_t partial_size = actual_splits * C_a * C_b * sizeof(ElementC);
-    cudaMalloc(&c_partials, partial_size);
-    cudaMemset(c_partials, 0, partial_size);
+    cudaMallocAsync(&c_partials, partial_size, stream);
+    cudaMemsetAsync(c_partials, 0, partial_size, stream);
   }
 
   // Stage 1: Launch split-K kernels
@@ -377,10 +377,10 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
   // Non-blocking error check
   cudaError_t cuda_status = cudaGetLastError();
 
-  // Cleanup: must synchronize before freeing partials since kernels may still be using them
+  // Stream-ordered free: kernel on `stream` completes before the free executes,
+  // without blocking the CPU.  Requires CUDA 11.2+ (we target 12.9).
   if (c_partials) {
-    cudaStreamSynchronize(stream);
-    cudaFree(c_partials);
+    cudaFreeAsync(c_partials, stream);
   }
 
   if (cuda_status != cudaSuccess) {

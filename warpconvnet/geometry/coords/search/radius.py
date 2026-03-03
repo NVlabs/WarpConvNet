@@ -85,7 +85,8 @@ def _radius_search_cuda(
         table.capacity,
         table.hash_method.value,
     )
-    torch.cuda.synchronize(device)
+    # No sync needed: cumsum runs on the same stream, and .item() below
+    # implicitly synchronizes before copying the value to CPU.
 
     # Build offsets from counts
     neighbor_split = torch.zeros(M + 1, dtype=torch.int32, device=device)
@@ -123,7 +124,9 @@ def _radius_search_cuda(
         table.capacity,
         table.hash_method.value,
     )
-    torch.cuda.synchronize(device)
+    # No sync needed: returned tensors are consumed by PyTorch ops on the
+    # same stream. CUDA stream ordering guarantees the kernel completes
+    # before any downstream operation reads the results.
 
     return result_indices, result_distances, neighbor_split
 
