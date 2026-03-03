@@ -134,7 +134,7 @@ def _kernel_map_from_offsets(
     kernel_offsets: Int[Tensor, "K D_1"],
     identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block_x: int = 128,
+    threads_per_block_x: int = 64,
     threads_per_block_y: int = 8,
 ) -> Int[Tensor, "K N"] | IntSearchResult:
     """
@@ -207,7 +207,7 @@ def _kernel_map_from_size(
     kernel_sizes: Tuple[int, ...],
     identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block_x: int = 128,
+    threads_per_block_x: int = 64,
     threads_per_block_y: int = 8,
     skip_symmetric_kernel_map: bool = False,
 ) -> Int[Tensor, "K N"] | IntSearchResult:
