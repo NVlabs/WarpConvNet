@@ -384,7 +384,8 @@ class TorchHashTable:
             status_tensor,
             self._hash_method_enum.value,
         )
-        torch.cuda.synchronize(target_device)
+        # No explicit sync needed: .item() below implicitly synchronizes the
+        # current stream before copying the value to CPU.
 
         status = int(status_tensor.item())
         if status == _EXPAND_STATUS_VECTOR_OVERFLOW:
