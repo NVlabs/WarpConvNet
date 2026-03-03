@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.geometry.types.voxels import Voxels
@@ -13,7 +12,6 @@ from warpconvnet.nn.functional.global_pool import global_pool
 @pytest.fixture
 def setup_geometries():
     """Setup test points and voxels with random coordinates."""
-    wp.init()
     torch.manual_seed(0)
     device = torch.device("cuda:0")
 

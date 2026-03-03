@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 from typing import Tuple
 from contextlib import nullcontext
 
@@ -41,7 +40,6 @@ def pytest_benchmark_update_json(config, benchmarks, output_json):
 @pytest.fixture
 def setup_voxel_data():
     """Setup fixed coordinate and feature data for benchmarking."""
-    wp.init()
     torch.manual_seed(0)
     device = "cuda:0"
 

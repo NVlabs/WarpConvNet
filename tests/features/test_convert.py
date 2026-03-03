@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 from pytest_benchmark.fixture import BenchmarkFixture
 
 from warpconvnet.geometry.features.ops.convert import cat_to_pad_tensor, cat_to_pad, pad_to_cat
@@ -14,7 +13,6 @@ from warpconvnet.geometry.features.cat import CatFeatures
 @pytest.fixture
 def setup_batch_data():
     """Setup batch data with random features."""
-    wp.init()
     torch.manual_seed(0)
     device = "cuda:0"
     return device
@@ -47,45 +45,7 @@ class TestBatchCopy:
         features = torch.cat([torch.rand((N, num_channels)) for N in Ns], dim=0).to(device)
 
         def run_benchmark():
-            out_features = cat_to_pad_tensor(features, offsets, backend="torch")
-            torch.cuda.synchronize()
-            return out_features
-
-        benchmark.pedantic(
-            run_benchmark,
-            iterations=10,
-            rounds=3,
-            warmup_rounds=1,
-        )
-
-    @pytest.mark.parametrize("num_copy_per_thread", [None, 256])
-    def test_warp_backend(
-        self,
-        benchmark: BenchmarkFixture,
-        setup_batch_data,
-        batch_config,
-        num_channels,
-        num_copy_per_thread,
-    ):
-        """Test warp backend performance."""
-        device = setup_batch_data
-        B, min_N, max_N = batch_config["B"], batch_config["min_N"], batch_config["max_N"]
-
-        # Setup data
-        Ns = torch.randint(min_N, max_N, (B,))
-        offsets = torch.cat(
-            [torch.zeros(1, dtype=torch.int32), torch.cumsum(torch.tensor(Ns), dim=0)],
-            dim=0,
-        ).int()
-        features = torch.cat([torch.rand((N, num_channels)) for N in Ns], dim=0).to(device)
-
-        def run_benchmark():
-            out_features = cat_to_pad_tensor(
-                features,
-                offsets,
-                backend="warp",
-                num_copy_per_thread=num_copy_per_thread,
-            )
+            out_features = cat_to_pad_tensor(features, offsets)
             torch.cuda.synchronize()
             return out_features
 
@@ -110,13 +70,20 @@ def test_cat_to_pad(setup_batch_data):
     features = torch.cat([torch.rand((N, C)) for N in Ns], dim=0).to(device)
 
     # Test torch backend
-    torch_out = cat_to_pad_tensor(features, offsets, backend="torch")
+    torch_out = cat_to_pad_tensor(features, offsets)
 
-    # Test warp backend
-    warp_out = cat_to_pad_tensor(features, offsets, backend="warp")
+    # Verify output shape
+    max_N_actual = Ns.max().item()
+    assert torch_out.shape == (B, max_N_actual, C)
 
-    # Results should match
-    assert torch.allclose(torch_out, warp_out, rtol=1e-5, atol=1e-5)
+    # Verify values for each batch
+    for b in range(B):
+        assert torch.allclose(
+            torch_out[b, : Ns[b]],
+            features[offsets[b] : offsets[b + 1]],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 def test_pad_to_cat(setup_batch_data):

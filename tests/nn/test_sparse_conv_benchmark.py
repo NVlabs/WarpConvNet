@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.ops.stride import stride_coords
 from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable
@@ -29,7 +28,6 @@ from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinate
 @pytest.fixture
 def setup_voxels():
     """Setup test voxels with random coordinates."""
-    wp.init()
     torch.manual_seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -44,7 +42,6 @@ def setup_voxels():
 @pytest.fixture
 def setup_small_voxels():
     """Setup small voxels for gradient checking."""
-    wp.init()
     torch.manual_seed(0)
     device = torch.device("cuda:0")
 

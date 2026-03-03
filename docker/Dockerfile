@@ -16,7 +16,6 @@ RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir \
     "jaxtyping>=0.2"        \
     "torchinfo>=1.8"        \
-    "warp-lang>=1.2"        \
     "webdataset>=0.2"       \
     pre-commit              \
     black                   \

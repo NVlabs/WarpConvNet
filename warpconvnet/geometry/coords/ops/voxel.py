@@ -5,7 +5,6 @@ from typing import List, Literal, Optional, Tuple
 
 import numpy as np
 import torch
-import warp as wp
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 

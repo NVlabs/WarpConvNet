@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.features.cat import CatFeatures
 from warpconvnet.geometry.features.patch import CatPatchFeatures
@@ -11,7 +10,6 @@ from warpconvnet.geometry.features.patch import CatPatchFeatures
 
 @pytest.fixture
 def setup_features():
-    wp.init()
     B, min_N, max_N, C = 3, 1000, 10000, 7
     Ns = torch.randint(min_N, max_N, (B,))
     features = [torch.rand((N, C)) for N in Ns]

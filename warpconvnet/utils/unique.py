@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
 
 import torch
-import warp as wp
 from jaxtyping import Int
 from torch import Tensor
 

@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.ops.expand import expand_coords
 from warpconvnet.geometry.coords.search.torch_discrete import kernel_offsets_from_size
@@ -13,7 +12,6 @@ from warpconvnet.geometry.types.voxels import Voxels
 @pytest.fixture
 def setup_voxels():
     """Setup test voxels with random coordinates."""
-    wp.init()
     torch.manual_seed(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

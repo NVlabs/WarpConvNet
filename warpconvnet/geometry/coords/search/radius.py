@@ -1,177 +1,233 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from jaxtyping import Float, Int
 from typing import Optional, Tuple
 
 import torch
+from jaxtyping import Float, Int
 from torch import Tensor
-import warp as wp
+
+import warpconvnet._C as _C
+
+from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable, HashMethod
 
 
-@wp.kernel
-def _radius_search_count(
-    hashgrid: wp.uint64,
-    points: wp.array(dtype=wp.vec3),
-    queries: wp.array(dtype=wp.vec3),
-    result_count: wp.array(dtype=wp.int32),
-    radius: wp.float32,
-):
-    tid = wp.tid()
-
-    # create grid query around point
-    qp = queries[tid]
-    query = wp.hash_grid_query(hashgrid, qp, radius)
-    index = int(0)
-    result_count_tid = int(0)
-
-    while wp.hash_grid_query_next(query, index):
-        neighbor = points[index]
-
-        # compute distance to neighbor point
-        dist = wp.length(qp - neighbor)
-        if dist <= radius:
-            result_count_tid += 1
-
-    result_count[tid] = result_count_tid
-
-
-@wp.kernel
-def _radius_search_query(
-    hashgrid: wp.uint64,
-    points: wp.array(dtype=wp.vec3),
-    queries: wp.array(dtype=wp.vec3),
-    result_offset: wp.array(dtype=wp.int32),
-    result_point_idx: wp.array(dtype=wp.int32),
-    result_point_dist: wp.array(dtype=wp.float32),
-    radius: wp.float32,
-):
-    tid = wp.tid()
-
-    # create grid query around point
-    qp = queries[tid]
-    query = wp.hash_grid_query(hashgrid, qp, radius)
-    index = int(0)
-    result_count = int(0)
-    offset_tid = result_offset[tid]
-
-    while wp.hash_grid_query_next(query, index):
-        neighbor = points[index]
-
-        # compute distance to neighbor point
-        dist = wp.length(qp - neighbor)
-        if dist <= radius:
-            result_point_idx[offset_tid + result_count] = index
-            result_point_dist[offset_tid + result_count] = dist
-            result_count += 1
-
-
-def _radius_search(
-    points: wp.array(dtype=wp.vec3),
-    queries: wp.array(dtype=wp.vec3),
+@torch.no_grad()
+def _radius_search_cuda(
+    points: Float[Tensor, "N 3"],  # noqa: F821
+    queries: Float[Tensor, "M 3"],  # noqa: F821
     radius: float,
-    grid_dim: Optional[int | Tuple[int, int, int]] = None,
-):
-    if grid_dim is None:
-        grid_dim = 128
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Cell-list radius search using CUDA kernels.
 
-    # convert grid_dim to Tuple if it is int
-    if isinstance(grid_dim, int):
-        grid_dim = (grid_dim, grid_dim, grid_dim)
+    Returns:
+        neighbor_index: [Q] (int32)
+        neighbor_distance: [Q] (float32)
+        neighbor_split: [M + 1] (int32)
+    """
+    N = points.shape[0]
+    M = queries.shape[0]
+    device = points.device
+    cell_size = radius
 
-    str_device = str(points.device)
-    result_count = wp.zeros(shape=len(queries), dtype=wp.int32, device=str_device)
-    grid = wp.HashGrid(
-        dim_x=grid_dim[0],
-        dim_y=grid_dim[1],
-        dim_z=grid_dim[2],
-        device=str_device,
+    # Quantize points to grid cells
+    cell_coords = torch.floor(points / cell_size).int()  # [N, 3]
+
+    # Build cell hash table
+    table = TorchHashTable.from_keys(cell_coords, device=device)
+
+    # Get cell IDs for each point
+    cell_ids = table.search(cell_coords)  # [N] unique cell ID per point
+
+    # Sort points by cell to create cell-list
+    sorted_order = torch.argsort(cell_ids)
+    sorted_cell_ids = cell_ids[sorted_order]
+
+    # Compute per-cell start/count using unique_consecutive
+    unique_ids, counts = torch.unique_consecutive(sorted_cell_ids, return_counts=True)
+    num_cells = table.num_entries
+
+    # Build cell_starts and cell_counts arrays indexed by cell ID
+    cell_starts = torch.zeros(num_cells, dtype=torch.int32, device=device)
+    cell_counts = torch.zeros(num_cells, dtype=torch.int32, device=device)
+
+    # Fill in starts and counts for cells that have points
+    offsets = torch.zeros(len(counts), dtype=torch.int32, device=device)
+    torch.cumsum(counts[:-1].int(), dim=0, out=offsets[1:])
+    cell_starts[unique_ids.long()] = offsets
+    cell_counts[unique_ids.long()] = counts.int()
+
+    # Flatten the table_kvs and vector_keys for kernel access
+    table_kvs_flat = table._table_kvs.reshape(-1).contiguous()
+    vector_keys_flat = table._vector_keys[: table._num_entries].reshape(-1).contiguous()
+
+    # Ensure contiguous float32 for points/queries
+    points_f = points.float().contiguous()
+    queries_f = queries.float().contiguous()
+    sorted_order_i = sorted_order.int().contiguous()
+
+    # Pass 1: count neighbors per query
+    result_count = torch.zeros(M, dtype=torch.int32, device=device)
+    _C.coords.radius_search_count(
+        points_f,
+        queries_f,
+        sorted_order_i,
+        cell_starts,
+        cell_counts,
+        table_kvs_flat,
+        vector_keys_flat,
+        result_count,
+        N,
+        M,
+        num_cells,
+        radius,
+        cell_size,
+        table.capacity,
+        table.hash_method.value,
     )
-    grid.build(points=points, radius=2 * radius)
+    torch.cuda.synchronize(device)
 
-    # For 10M radius search, the result can overflow and fail
-    wp.launch(
-        kernel=_radius_search_count,
-        dim=len(queries),
-        inputs=[grid.id, points, queries, result_count, radius],
-        device=str_device,
+    # Build offsets from counts
+    neighbor_split = torch.zeros(M + 1, dtype=torch.int32, device=device)
+    torch.cumsum(result_count, dim=0, out=neighbor_split[1:])
+    total = int(neighbor_split[-1].item())
+
+    if total == 0:
+        return (
+            torch.zeros(0, dtype=torch.int32, device=device),
+            torch.zeros(0, dtype=torch.float32, device=device),
+            neighbor_split,
+        )
+
+    # Allocate output
+    result_indices = torch.zeros(total, dtype=torch.int32, device=device)
+    result_distances = torch.zeros(total, dtype=torch.float32, device=device)
+
+    # Pass 2: write results
+    _C.coords.radius_search_write(
+        points_f,
+        queries_f,
+        sorted_order_i,
+        cell_starts,
+        cell_counts,
+        table_kvs_flat,
+        vector_keys_flat,
+        neighbor_split,
+        result_indices,
+        result_distances,
+        N,
+        M,
+        num_cells,
+        radius,
+        cell_size,
+        table.capacity,
+        table.hash_method.value,
     )
+    torch.cuda.synchronize(device)
 
-    torch_offset = torch.zeros(len(result_count) + 1, device=str_device, dtype=torch.int32)
-    result_count_torch = wp.to_torch(result_count)
-    torch.cumsum(result_count_torch, dim=0, out=torch_offset[1:])
-    total_count = torch_offset[-1].item()
-    assert (
-        0 <= total_count and total_count < 2**31
-    ), f"Invalid total count: {total_count}. Must be between 0 and 2**31 - 1"
-
-    result_point_idx = wp.zeros(shape=(total_count,), dtype=wp.int32, device=str_device)
-    result_point_dist = wp.zeros(shape=(total_count,), dtype=wp.float32, device=str_device)
-
-    # If total_count is 0, the kernel will not be launched
-    if total_count == 0:
-        return (result_point_idx, result_point_dist, torch_offset)
-
-    wp.launch(
-        kernel=_radius_search_query,
-        dim=len(queries),
-        inputs=[
-            grid.id,
-            points,
-            queries,
-            wp.from_torch(torch_offset),
-            result_point_idx,
-            result_point_dist,
-            radius,
-        ],
-        device=str_device,
-    )
-
-    return (result_point_idx, result_point_dist, torch_offset)
+    return result_indices, result_distances, neighbor_split
 
 
+@torch.no_grad()
+def _radius_search_chunk(
+    points: Float[Tensor, "N 3"],  # noqa: F821
+    queries: Float[Tensor, "M 3"],  # noqa: F821
+    radius: float,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Radius search for a single chunk of queries against all points (CPU fallback)."""
+    # Compute pairwise distances: [M, N]
+    dists = torch.cdist(queries, points)
+
+    # Find neighbors within radius
+    mask = dists <= radius
+
+    # Get indices and distances for each query
+    neighbor_indices = []
+    neighbor_distances = []
+    counts = []
+    for i in range(queries.shape[0]):
+        valid = mask[i]
+        idx = valid.nonzero(as_tuple=True)[0]
+        neighbor_indices.append(idx)
+        neighbor_distances.append(dists[i, idx])
+        counts.append(idx.shape[0])
+
+    counts_tensor = torch.tensor(counts, dtype=torch.int32, device=queries.device)
+    if len(neighbor_indices) > 0 and sum(counts) > 0:
+        all_indices = torch.cat(neighbor_indices)
+        all_distances = torch.cat(neighbor_distances)
+    else:
+        all_indices = torch.zeros(0, dtype=torch.long, device=queries.device)
+        all_distances = torch.zeros(0, dtype=torch.float32, device=queries.device)
+
+    return all_indices, all_distances, counts_tensor
+
+
+@torch.no_grad()
 def radius_search(
     points: Float[Tensor, "N 3"],  # noqa: F821
     queries: Float[Tensor, "M 3"],  # noqa: F821
     radius: float,
     grid_dim: Optional[int | Tuple[int, int, int]] = None,
-) -> Tuple[Float[Tensor, "Q"], Float[Tensor, "Q"], Float[Tensor, "M + 1"]]:  # noqa: F821
+    chunk_size: int = 4096,
+) -> Tuple[Tensor, Tensor, Tensor]:
     """
     Args:
         points: [N, 3]
         queries: [M, 3]
         radius: float
-        grid_dim: Union[int, Tuple[int, int, int]]
-        device: str
+        grid_dim: Unused, kept for API compatibility
+        chunk_size: Number of queries to process at a time for memory efficiency (CPU only)
 
     Returns:
-        neighbor_index: [Q]
-        neighbor_distance: [Q]
-        neighbor_split: [M + 1]
-
-    Warnings:
-        The HashGrid supports a maximum of 4096^3 grid cells. The users must
-        ensure that the points are bounded and 2 * radius * 4096 < max_bound.
+        neighbor_index: [Q] (int32)
+        neighbor_distance: [Q] (float32)
+        neighbor_split: [M + 1] (int32)
     """
-    # Convert from warp to torch
     assert points.is_contiguous(), "points must be contiguous"
     assert queries.is_contiguous(), "queries must be contiguous"
-    points_wp = wp.from_torch(points, dtype=wp.vec3)
-    queries_wp = wp.from_torch(queries, dtype=wp.vec3)
 
-    result_point_idx, result_point_dist, torch_offset = _radius_search(
-        points=points_wp,
-        queries=queries_wp,
-        radius=radius,
-        grid_dim=grid_dim,
-    )
+    if queries.device.type == "cuda":
+        torch.cuda.set_device(queries.device)
 
-    # Convert from warp to torch
-    result_point_idx = wp.to_torch(result_point_idx)
-    result_point_dist = wp.to_torch(result_point_dist)
+    M = queries.shape[0]
+    if M == 0:
+        empty_idx = torch.zeros(0, dtype=torch.int32, device=queries.device)
+        empty_dist = torch.zeros(0, dtype=torch.float32, device=queries.device)
+        empty_split = torch.zeros(1, dtype=torch.int32, device=queries.device)
+        return empty_idx, empty_dist, empty_split
 
-    # Neighbor index, Neighbor Distance, Neighbor Split
-    return result_point_idx, result_point_dist, torch_offset
+    # Use CUDA cell-list kernel for GPU tensors
+    if points.device.type == "cuda":
+        return _radius_search_cuda(points, queries, radius)
+
+    # CPU fallback: chunked brute-force
+    all_indices = []
+    all_distances = []
+    all_counts = []
+
+    for start in range(0, M, chunk_size):
+        end = min(start + chunk_size, M)
+        chunk_queries = queries[start:end]
+        idx, dist, counts = _radius_search_chunk(points, chunk_queries, radius)
+        all_indices.append(idx)
+        all_distances.append(dist)
+        all_counts.append(counts)
+
+    if len(all_indices) > 0:
+        neighbor_index = torch.cat(all_indices)
+        neighbor_distance = torch.cat(all_distances)
+        neighbor_counts = torch.cat(all_counts)
+    else:
+        neighbor_index = torch.zeros(0, dtype=torch.long, device=queries.device)
+        neighbor_distance = torch.zeros(0, dtype=torch.float32, device=queries.device)
+        neighbor_counts = torch.zeros(0, dtype=torch.int32, device=queries.device)
+
+    # Build split (offsets) from counts
+    neighbor_split = torch.zeros(M + 1, dtype=torch.int32, device=queries.device)
+    torch.cumsum(neighbor_counts, dim=0, out=neighbor_split[1:])
+
+    return neighbor_index.int(), neighbor_distance, neighbor_split
 
 
 def batched_radius_search(
@@ -189,14 +245,13 @@ def batched_radius_search(
         query_positions: [M, 3]
         query_offsets: [B + 1]
         radius: float
-        grid_dim: Union[int, Tuple[int, int, int]]
+        grid_dim: Unused, kept for API compatibility
 
     Returns:
         neighbor_index: [Q]
         neighbor_distance: [Q]
         neighbor_split: [B + 1]
     """
-    # It only supports GPU for now
     assert isinstance(ref_positions, torch.Tensor) and isinstance(
         query_positions, torch.Tensor
     ), "Only torch.Tensor is supported for batched radius search"
@@ -216,7 +271,6 @@ def batched_radius_search(
     neighbor_distance_list = []
     neighbor_split_list = []
     split_offset = 0
-    # TODO(cchoy): optional parallelization for small point clouds
     for b in range(B):
         neighbor_index, neighbor_distance, neighbor_split = radius_search(
             points=ref_positions[ref_offsets[b] : ref_offsets[b + 1]],

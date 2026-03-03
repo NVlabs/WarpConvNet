@@ -4,7 +4,6 @@
 import dataclasses
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig, RealSearchMode
@@ -14,7 +13,6 @@ from warpconvnet.geometry.types.points import Points
 @pytest.fixture
 def setup_points():
     """Setup test points with random coordinates and features."""
-    wp.init()
     device = "cuda:0"
     B, min_N, max_N, C = 3, 1000, 10000, 7
     Ns = torch.randint(min_N, max_N, (B,))

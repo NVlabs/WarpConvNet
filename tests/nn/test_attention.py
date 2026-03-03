@@ -4,7 +4,6 @@
 import functools
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
 from warpconvnet.geometry.types.points import Points
@@ -29,7 +28,6 @@ except ImportError:
 @pytest.fixture
 def setup_points():
     """Setup test points with random coordinates."""
-    wp.init()
     torch.manual_seed(0)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 

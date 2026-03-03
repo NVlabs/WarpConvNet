@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import warp as wp
 
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.geometry.coords.ops.stride import stride_coords

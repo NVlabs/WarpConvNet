@@ -6,7 +6,6 @@ from jaxtyping import Int
 
 import numpy as np
 import torch
-import warp as wp
 from torch import Tensor
 
 from warpconvnet.geometry.coords.ops.batch_index import offsets_from_batch_index

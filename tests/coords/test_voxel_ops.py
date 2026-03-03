@@ -4,7 +4,6 @@
 import unittest
 
 import torch
-import warp as wp
 
 from warpconvnet.geometry.coords.real import RealCoords
 from warpconvnet.geometry.coords.search.knn import knn_search
@@ -18,7 +17,6 @@ from warpconvnet.geometry.types.voxels import Voxels
 class TestVoxelOps(unittest.TestCase):
     def setUp(self) -> None:
         # Set random seed
-        wp.init()
         torch.manual_seed(0)
 
         self.B, min_N, max_N, self.C = 3, 100000, 1000000, 7
