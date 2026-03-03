@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -33,9 +34,6 @@ struct HalfAddOp {
     }
   }
 };
-
-// Get current CUDA stream (simplified version)
-__host__ __forceinline__ cudaStream_t getCurrentCUDAStream() { return cudaStreamDefault; }
 
 // Define error codes for split-K implicit GEMM operations
 enum class SplitKGemmStatus {
@@ -240,8 +238,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
     return static_cast<int>(SplitKGemmStatus::kErrorInvalidDimensions);
   }
 
-  // Get CUDA stream
-  cudaStream_t stream = getCurrentCUDAStream();
+  // Get the current PyTorch CUDA stream
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Calculate optimal split factor
   const int chunk_size = (K + split_k_factor - 1) / split_k_factor;
@@ -376,12 +374,12 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
     }
   }
 
-  // Synchronize and check for errors
-  cudaStreamSynchronize(stream);
+  // Non-blocking error check
   cudaError_t cuda_status = cudaGetLastError();
 
-  // Cleanup
+  // Cleanup: must synchronize before freeing partials since kernels may still be using them
   if (c_partials) {
+    cudaStreamSynchronize(stream);
     cudaFree(c_partials);
   }
 

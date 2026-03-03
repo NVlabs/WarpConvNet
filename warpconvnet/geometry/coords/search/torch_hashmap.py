@@ -6,6 +6,21 @@ import math
 import os
 from typing import Union, Optional, Tuple
 
+
+def _next_power_of_2(n: int) -> int:
+    """Round up to the next power of 2. If n is already a power of 2, return n."""
+    if n <= 0:
+        return 1
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    return n + 1
+
+
 import numpy as np
 import torch
 from torch import Tensor
@@ -69,7 +84,9 @@ class TorchHashTable:
             )
         assert capacity > 0
 
-        self._capacity = capacity
+        # CUDA kernels use bitwise AND (& (capacity-1)) for hash slot
+        # computation, so capacity must always be a power of 2.
+        self._capacity = _next_power_of_2(capacity)
         self._hash_method_enum = hash_method
         self._device = torch.device(device)
         self._num_entries = 0
@@ -158,7 +175,8 @@ class TorchHashTable:
 
         # --- Launch Prepare Kernel ---
         _C.coords.hashmap_prepare(self._table_kvs, self._capacity)
-        torch.cuda.synchronize(self.device)
+        # No sync needed: CUDA stream ordering guarantees prepare completes
+        # before insert starts on the same stream.
 
         # --- Launch Insert Kernel ---
         _C.coords.hashmap_insert(
@@ -169,7 +187,8 @@ class TorchHashTable:
             self._capacity,
             self._hash_method_enum.value,
         )
-        torch.cuda.synchronize(self.device)
+        # No sync needed: downstream kernels on the same stream will see
+        # the inserted data. Only sync if CPU needs to read results.
 
     @classmethod
     def from_keys(
@@ -221,6 +240,7 @@ class TorchHashTable:
         vec_keys = vec_keys.contiguous()
 
         num_keys = len(vec_keys)
+        # Constructor enforces power-of-2 for bitwise AND hash slot computation
         chosen_capacity = capacity if capacity is not None else max(16, int(num_keys * 2))
         storage_capacity = vector_capacity if vector_capacity is not None else num_keys
         # Pass the hash_method and device to the constructor
@@ -296,7 +316,8 @@ class TorchHashTable:
             self._capacity,
             self._hash_method_enum.value,
         )
-        torch.cuda.synchronize(table_device)
+        # No sync needed: downstream PyTorch ops on the same stream will
+        # see the results. Only sync if CPU needs to read the tensor.
 
         return results
 

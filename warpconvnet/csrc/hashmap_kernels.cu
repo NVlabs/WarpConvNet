@@ -49,15 +49,13 @@ __device__ inline uint32_t _hash_city_impl(uint32_t hash_val, uint32_t key) {
 
 // key: pointer to the start of the integer array key
 // key_dim: number of integers in the key
-// capacity: size of the hash table
+// capacity: size of the hash table (MUST be power of 2)
 __device__ inline int hash_fnv1a_array(const int* key, int key_dim, int capacity) {
   uint32_t hash_val = 2166136261u;  // FNV offset basis
   for (int i = 0; i < key_dim; ++i) {
     hash_val = _hash_fnv1a_impl(hash_val, (uint32_t)key[i]);
   }
-  // Use signed modulo to match Warp's behavior potentially
-  int signed_hash = (int)hash_val;
-  return ((signed_hash % capacity) + capacity) % capacity;
+  return (int)(hash_val & (uint32_t)(capacity - 1));
 }
 
 __device__ inline int hash_city_array(const int* key, int key_dim, int capacity) {
@@ -65,8 +63,7 @@ __device__ inline int hash_city_array(const int* key, int key_dim, int capacity)
   for (int i = 0; i < key_dim; ++i) {
     hash_val = _hash_city_impl(hash_val, (uint32_t)key[i]);
   }
-  int signed_hash = (int)hash_val;
-  return ((signed_hash % capacity) + capacity) % capacity;
+  return (int)(hash_val & (uint32_t)(capacity - 1));
 }
 
 __device__ inline int hash_murmur_array(const int* key, int key_dim, int capacity) {
@@ -76,11 +73,11 @@ __device__ inline int hash_murmur_array(const int* key, int key_dim, int capacit
   }
   // Finalize (assuming key_dim * 4 bytes)
   h = _hash_murmur_finalize(h, key_dim * 4);
-  int signed_hash = (int)h;
-  return ((signed_hash % capacity) + capacity) % capacity;
+  return (int)(h & (uint32_t)(capacity - 1));
 }
 
 // --- Hash Function Structs/Functors ---
+// NOTE: capacity MUST be a power of 2 for correct behavior.
 
 struct FNV1AHash {
   __device__ inline static int hash(const int* key, int key_dim, int capacity) {
@@ -88,8 +85,7 @@ struct FNV1AHash {
     for (int i = 0; i < key_dim; ++i) {
       hash_val = _hash_fnv1a_impl(hash_val, (uint32_t)key[i]);
     }
-    int signed_hash = (int)hash_val;
-    return ((signed_hash % capacity) + capacity) % capacity;
+    return (int)(hash_val & (uint32_t)(capacity - 1));
   }
 };
 
@@ -99,8 +95,7 @@ struct CityHash {
     for (int i = 0; i < key_dim; ++i) {
       hash_val = _hash_city_impl(hash_val, (uint32_t)key[i]);
     }
-    int signed_hash = (int)hash_val;
-    return ((signed_hash % capacity) + capacity) % capacity;
+    return (int)(hash_val & (uint32_t)(capacity - 1));
   }
 };
 
@@ -110,10 +105,8 @@ struct MurmurHash {
     for (int i = 0; i < key_dim; ++i) {
       h = _hash_murmur_impl(h, (uint32_t)key[i]);
     }
-    // Finalize (assuming key_dim * 4 bytes)
     h = _hash_murmur_finalize(h, key_dim * 4);
-    int signed_hash = (int)h;
-    return ((signed_hash % capacity) + capacity) % capacity;
+    return (int)(h & (uint32_t)(capacity - 1));
   }
 };
 
@@ -128,6 +121,13 @@ __device__ inline bool vec_equal(const T* a, const int* b, int dim) {
     }
   }
   return true;
+}
+
+// Vectorized comparison for 4D keys using 128-bit int4 loads
+__device__ inline bool vec_equal_4d(const int* a, const int* b) {
+  int4 va = *reinterpret_cast<const int4*>(a);
+  int4 vb = *reinterpret_cast<const int4*>(b);
+  return (va.x == vb.x) && (va.y == vb.y) && (va.z == vb.z) && (va.w == vb.w);
 }
 
 enum ExpandStatus : int {
@@ -199,7 +199,7 @@ __device__ inline int claim_slot_or_find(int* table_kvs,
         }
 
         // Collision
-        slot = (slot + 1) % capacity;
+        slot = (slot + 1) & (capacity - 1);
         if (slot == initial_slot) {
           break;
         }
@@ -237,7 +237,7 @@ __device__ inline int claim_slot_or_find(int* table_kvs,
       }
 
       // Collision with different key
-      slot = (slot + 1) % capacity;
+      slot = (slot + 1) & (capacity - 1);
       if (slot == initial_slot) {
         break;
       }
@@ -302,45 +302,43 @@ __device__ inline int search_hash_table(
     const int* __restrict__ vector_keys,  // Pointer to original vector keys
     const int* __restrict__ query_key,    // Pointer to the key being searched
     int key_dim,                          // Dimension of keys
-    int table_capacity) {                 // Capacity of the hash table
+    int table_capacity) {                 // Capacity of the hash table (must be power of 2)
 
-  // Use the templated hash function directly
   int slot = HashFuncT::hash(query_key, key_dim, table_capacity);
+  const int capacity_mask = table_capacity - 1;
   int initial_slot = slot;
   int attempts = 0;
 
   while (attempts < table_capacity) {
-    // Read the slot marker first. If it's -1, the slot is truly empty.
-    int slot_marker = table_kvs[slot * 2 + 0];
+    // Single 64-bit load for both slot marker and vector index.
+    // table_kvs layout: [marker, vector_index] pairs, naturally 8-byte aligned.
+    long long pair = *reinterpret_cast<const long long*>(&table_kvs[slot * 2]);
+    int slot_marker = (int)(pair & 0xFFFFFFFF);
+    int vector_index = (int)(pair >> 32);
 
     if (slot_marker == -1) {
-      // Found an empty slot in the probe sequence, key is not present.
       return -1;
     }
 
-    // Slot is potentially occupied. Read the index stored in the value part.
-    int vector_index = table_kvs[slot * 2 + 1];
-
-    // Negative indices indicate the slot is being populated. Retry the same slot.
-    if (vector_index < 0) {
-      continue;
+    if (vector_index >= 0) {
+      // Use vectorized 128-bit comparison for the common 4D key case
+      bool keys_match;
+      if (key_dim == 4) {
+        keys_match = vec_equal_4d(&vector_keys[vector_index * 4], query_key);
+      } else {
+        keys_match = vec_equal(&vector_keys[vector_index * key_dim], query_key, key_dim);
+      }
+      if (keys_match) {
+        return vector_index;
+      }
     }
 
-    const int* candidate_key = &vector_keys[vector_index * key_dim];
-    if (vec_equal(candidate_key, query_key, key_dim)) {
-      // Keys match!
-      return vector_index;
-    }
-    // If keys don't match or index was invalid, continue probing.
-    slot = (slot + 1) % table_capacity;
-
+    slot = (slot + 1) & capacity_mask;
     if (slot == initial_slot) {
-      // Cycled through all slots without finding the key or an empty slot.
       return -1;
     }
     attempts++;
   }
-  // Exceeded attempts (should indicate an issue or extremely full table).
   return -1;
 }
 

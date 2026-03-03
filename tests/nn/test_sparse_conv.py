@@ -139,15 +139,27 @@ def test_generate_kernel_map_with_skip_symmetric_kernel_map(setup_voxels):
         and kernel_map_skip.identity_map_index == 27 // 2
     )
 
-    # Verify kernel map properties
+    # Verify kernel map properties: offsets (counts) must match exactly,
+    # and the sets of (in, out) pairs within each offset group must match
+    # (ordering within groups is non-deterministic due to atomicAdd scatter).
     num_skip_offsets = len(kernel_map_skip.offsets)
     assert torch.all(kernel_map.offsets[:num_skip_offsets] == kernel_map_skip.offsets)
-    assert torch.all(
-        kernel_map.in_maps[: kernel_map.offsets[num_skip_offsets - 1]] == kernel_map_skip.in_maps
-    )
-    assert torch.all(
-        kernel_map.out_maps[: kernel_map.offsets[num_skip_offsets - 1]] == kernel_map_skip.out_maps
-    )
+    for k in range(num_skip_offsets - 1):
+        s_full, e_full = kernel_map.offsets[k].item(), kernel_map.offsets[k + 1].item()
+        s_skip, e_skip = kernel_map_skip.offsets[k].item(), kernel_map_skip.offsets[k + 1].item()
+        assert e_full - s_full == e_skip - s_skip
+        if e_full > s_full:
+            # Compare sorted pairs to handle non-deterministic ordering
+            full_pairs = torch.stack(
+                [kernel_map.in_maps[s_full:e_full], kernel_map.out_maps[s_full:e_full]], dim=1
+            )
+            skip_pairs = torch.stack(
+                [kernel_map_skip.in_maps[s_skip:e_skip], kernel_map_skip.out_maps[s_skip:e_skip]],
+                dim=1,
+            )
+            full_sorted = full_pairs[full_pairs[:, 1].argsort()]
+            skip_sorted = skip_pairs[skip_pairs[:, 1].argsort()]
+            assert torch.all(full_sorted == skip_sorted), f"Mismatch at offset group {k}"
 
 
 def test_sparse_conv(setup_voxels):

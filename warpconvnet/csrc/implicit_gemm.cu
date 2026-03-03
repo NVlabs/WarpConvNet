@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -22,9 +23,6 @@
 #include <type_traits>
 
 #include "include/vectorized_types.h"
-
-// Get current CUDA stream (simplified version)
-__host__ __forceinline__ cudaStream_t getCurrentCUDAStream() { return cudaStreamDefault; }
 
 // Define error codes for implicit GEMM operations
 enum class ImplicitGemmStatus {
@@ -204,8 +202,8 @@ int run_implicit_gemm_templated(const void *tensor_a,
     return static_cast<int>(ImplicitGemmStatus::kErrorInvalidDimensions);
   }
 
-  // Get CUDA stream
-  cudaStream_t stream = getCurrentCUDAStream();
+  // Get the current PyTorch CUDA stream
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Determine if atomic operations are needed
   // When hB < block_size, each thread computes exactly one partial product,
@@ -256,8 +254,9 @@ int run_implicit_gemm_templated(const void *tensor_a,
     return static_cast<int>(ImplicitGemmStatus::kErrorInvalidKernelType);
   }
 
-  // Check for CUDA errors
-  cudaStreamSynchronize(stream);
+  // Non-blocking error check: peek at the last error without synchronizing.
+  // This catches launch configuration errors without blocking the pipeline.
+  // Runtime errors are caught by PyTorch at the next synchronization point.
   cudaError_t cuda_status = cudaGetLastError();
   if (cuda_status != cudaSuccess) {
     return static_cast<int>(ImplicitGemmStatus::kErrorKernelExecution);
