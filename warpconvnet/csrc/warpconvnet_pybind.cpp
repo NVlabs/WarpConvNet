@@ -19,4 +19,5 @@ PYBIND11_MODULE(_C, m) {
   warpconvnet::bindings::register_fma(m);
   warpconvnet::bindings::register_utils(m);
   warpconvnet::bindings::register_sampling(m);
+  warpconvnet::bindings::register_coords(m);
 }

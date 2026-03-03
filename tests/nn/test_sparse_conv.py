@@ -542,8 +542,8 @@ def test_sparse_conv_generative(setup_voxels, generative):
         assert out.coordinate_tensor.shape[0] > voxels.coordinate_tensor.shape[0]
 
 
-def test_sparse_conv_transposed_generative_unsupported(setup_small_voxels):
-    """Transposed + generative should raise until support is implemented."""
+def test_sparse_conv_transposed_generative(setup_small_voxels):
+    """Test transposed + generative sparse convolution."""
     voxels = setup_small_voxels
     conv = SpatiallySparseConv(
         voxels.num_channels,
@@ -554,8 +554,8 @@ def test_sparse_conv_transposed_generative_unsupported(setup_small_voxels):
         generative=True,
     ).to(voxels.device)
 
-    with pytest.raises(AssertionError):
-        conv(voxels)
+    out = conv(voxels)
+    assert out.coordinate_tensor.shape[0] >= voxels.coordinate_tensor.shape[0]
 
 
 def test_sparse_conv_amp(setup_voxels):

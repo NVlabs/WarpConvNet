@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from jaxtyping import Float, Int
 import logging
-import cupy as cp
 import math
 import os
 import itertools
@@ -19,7 +18,6 @@ from torch.autograd import Function
 
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.ntuple import ntuple
-from warpconvnet.utils.cuda_utils import load_kernel
 from warpconvnet.utils.logger import get_logger
 from warpconvnet.utils.benchmark_cache import (
     generic_benchmark_get_namespace,

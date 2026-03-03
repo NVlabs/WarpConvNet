@@ -26,7 +26,7 @@ def setup_geometries():
 
     # Convert to sparse voxels
     voxel_size = 0.01
-    voxels = points.to_sparse(voxel_size)
+    voxels = points.to_voxels(voxel_size)
 
     return points, voxels
 

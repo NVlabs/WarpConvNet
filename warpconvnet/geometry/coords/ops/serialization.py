@@ -6,7 +6,6 @@ from typing import NamedTuple, Optional, Tuple, Union
 
 import torch
 
-import cupy as cp
 import math
 from jaxtyping import Int
 from torch import Tensor
@@ -16,22 +15,8 @@ import warpconvnet._C as _C
 from warpconvnet.utils.logger import get_logger
 from warpconvnet.utils.argsort import argsort
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
-from warpconvnet.utils.cuda_utils import load_kernel
 
 logger = get_logger(__name__)
-
-# cuda_utils.py automatically handles the csrc path for just filename
-_assign_order_16bit_kernel = load_kernel(
-    kernel_file="morton_code.cu", kernel_name="assign_order_discrete_16bit_kernel"
-)
-_assign_order_20bit_kernel_4points = load_kernel(
-    kernel_file="morton_code.cu", kernel_name="assign_order_discrete_20bit_kernel_4points"
-)
-
-# # Hash serialization kernels
-# _xorsum_div_kernel = load_kernel(
-#     kernel_file="hash_serialization.cu", kernel_name="xorsum_div_kernel"
-# )
 
 
 class POINT_ORDERING(Enum):
@@ -47,7 +32,7 @@ class POINT_ORDERING(Enum):
 
 STR2POINT_ORDERING = {
     "random": POINT_ORDERING.RANDOM,
-    "morton": POINT_ORDERING.MORTON_XYZ,        # Default Morton ordering
+    "morton": POINT_ORDERING.MORTON_XYZ,  # Default Morton ordering
     "morton_xyz": POINT_ORDERING.MORTON_XYZ,
     "morton_xzy": POINT_ORDERING.MORTON_XZY,
     "morton_yxz": POINT_ORDERING.MORTON_YXZ,
@@ -237,30 +222,17 @@ def morton_code(
 
     device = coords_normalized.device
     num_points = len(coords_normalized)
-    result_code_cp = cp.empty(num_points, dtype=cp.int64)
+    result_code = torch.empty(num_points, dtype=torch.int64, device=device)
 
     assert coords_normalized.shape[1] in [3, 4], "coords must be [N, 3] or [N, 4]"
 
-    coords_cp = cp.from_dlpack(coords_normalized.contiguous())
-    
+    coords_cont = coords_normalized.contiguous()
+
     if coords_normalized.shape[1] == 3:
         # Single batch path (20-bit)
-        # The kernel loads 4 points per thread, so we need to adjust the number of blocks
-        blocks_per_grid = math.ceil(num_points / (threads_per_block * 4))
-        _assign_order_20bit_kernel_4points(
-            (blocks_per_grid,),
-            (threads_per_block,),
-            (coords_cp, num_points, result_code_cp),
-        )
+        _C.coords.morton_code_20bit(coords_cont, num_points, result_code)
     elif coords_normalized.shape[1] == 4:
         # Batched path (16-bit)
-        blocks_per_grid = math.ceil(num_points / threads_per_block)
-        _assign_order_16bit_kernel(
-            (blocks_per_grid,),
-            (threads_per_block,),
-            (coords_cp, num_points, result_code_cp),
-        )
+        _C.coords.morton_code_16bit(coords_cont, num_points, result_code)
 
-    # Convert result from CuPy array back to PyTorch tensor on the original device
-    result_code = torch.as_tensor(result_code_cp, device=device)
     return result_code

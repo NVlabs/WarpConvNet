@@ -19,7 +19,6 @@ Both implementations feature a **unified benchmarking system** that automaticall
 
 - `EXPLICIT_GEMM`: Traditional matrix multiplication approach
 - `IMPLICIT_GEMM`: Custom CUDA kernels with implicit GEMM operations
-- `WMMA_IMPLICIT_GEMM`: Custom CUDA kernels with WMMA-accelerated implicit GEMM operations
 - `CUTLASS_IMPLICIT_GEMM`: NVIDIA CUTLASS-based high-performance kernels
 - `AUTO`: Automatically benchmark and select the best algorithm
 
@@ -111,13 +110,9 @@ You can set global defaults using environment variables that support both single
 export WARPCONVNET_FWD_ALGO_MODE=implicit_gemm
 export WARPCONVNET_BWD_ALGO_MODE=implicit_gemm
 
-# WMMA single algorithm
-export WARPCONVNET_FWD_ALGO_MODE=wmma_implicit_gemm
-export WARPCONVNET_BWD_ALGO_MODE=wmma_implicit_gemm
-
 # Algorithm list (limits search space)
-export WARPCONVNET_FWD_ALGO_MODE="[implicit_gemm,wmma_implicit_gemm,cutlass_implicit_gemm]"
-export WARPCONVNET_BWD_ALGO_MODE="[implicit_gemm,wmma_implicit_gemm,cutlass_implicit_gemm]"
+export WARPCONVNET_FWD_ALGO_MODE="[implicit_gemm,cutlass_implicit_gemm]"
+export WARPCONVNET_BWD_ALGO_MODE="[implicit_gemm,cutlass_implicit_gemm]"
 
 # AUTO mode (benchmark all algorithms)
 export WARPCONVNET_FWD_ALGO_MODE=auto
@@ -166,10 +161,6 @@ The system automatically optimizes parameters like:
 - `split_k_slices`: 1, 2, 4, 8
 - `accumulator_type`: float32
 
-**WMMA_IMPLICIT_GEMM**:
-
-- No user-tunable parameters (auto-configured internally)
-
 ### Performance Benefits
 
 The unified benchmarking system provides:
@@ -198,8 +189,8 @@ output = spatially_sparse_conv(
     input_voxels,
     weight,
     kernel_size=3,
-    fwd_algo=["implicit_gemm", "wmma_implicit_gemm", "cutlass_implicit_gemm"],  # String list
-    bwd_algo=["implicit_gemm", "wmma_implicit_gemm", "cutlass_implicit_gemm"],
+    fwd_algo=["implicit_gemm", "cutlass_implicit_gemm"],  # String list
+    bwd_algo=["implicit_gemm", "cutlass_implicit_gemm"],
 )
 
 # Mixed enum and string lists
@@ -252,7 +243,6 @@ output = spatially_sparse_conv(
 
 - Some algorithms require specific CUDA versions
 - CUTLASS algorithms need compatible GPU compute capability
-- WMMA requires Tensor Cores and compatible compute capability
 - Check logs for algorithm availability warnings
 - CUTLASS may not work on all GPUs
   - Use `export WARPCONVNET_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm]"; export WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm]"` to force use explicit and implicit gemm.

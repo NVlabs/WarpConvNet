@@ -71,7 +71,7 @@ class PointPoolBase(BaseSpatialModule):
             return_type=self.return_type,
             return_neighbor_search_result=self.return_neighbor_search_result,
             unique_method=self.unique_method,
-            avereage_pooled_coordinates=self.avereage_pooled_coordinates,
+            average_pooled_coordinates=self.avereage_pooled_coordinates,
         )
 
 

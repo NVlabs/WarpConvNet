@@ -90,8 +90,8 @@ def test_morton_code_multi_batch(setup_coordinates):
     """Test morton_code function with multiple batches."""
     coords, batch_indices, offsets, batch_size, device = setup_coordinates
 
-    # Test with offsets (multi-batch)
-    codes = morton_code(coords.float(), batch_offsets=offsets, order=POINT_ORDERING.MORTON_XYZ)
+    # Test with offsets (multi-batch) — use encode() since morton_code() doesn't support batch_offsets
+    codes = encode(coords.float(), batch_offsets=offsets, order=POINT_ORDERING.MORTON_XYZ)
 
     assert codes.shape == (coords.shape[0],), "Codes shape mismatch for multi-batch"
 

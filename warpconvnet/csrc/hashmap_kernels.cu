@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-typedef unsigned int uint32_t;
+#include <cstdint>
 
 // --- Hash Helper Functions ---
 
@@ -357,7 +357,7 @@ extern "C" __global__ void prepare_key_value_pairs_kernel(int* table_kvs, int ca
 
 // --- Templated Insert Kernel ---
 template <typename HashFuncT>
-__global__ void insert_kernel_templated(
+__device__ void insert_kernel_templated(
     int* table_kvs, const int* vector_keys, int num_keys, int key_dim, int table_capacity) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_keys) {
@@ -381,7 +381,7 @@ __global__ void insert_kernel_templated(
 
 // --- Templated Search Kernel ---
 template <typename HashFuncT>
-__global__ void search_kernel_templated(const int* __restrict__ table_kvs,
+__device__ void search_kernel_templated(const int* __restrict__ table_kvs,
                                         const int* __restrict__ vector_keys,
                                         const int* __restrict__ search_keys,
                                         int* __restrict__ results,
@@ -399,7 +399,7 @@ __global__ void search_kernel_templated(const int* __restrict__ table_kvs,
 }
 
 template <typename HashFuncT>
-__global__ void expand_insert_kernel_templated(int* table_kvs,
+__device__ void expand_insert_kernel_templated(int* table_kvs,
                                                int* vector_keys,
                                                const int* __restrict__ base_coords,
                                                const int* __restrict__ offsets,

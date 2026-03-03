@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-typedef signed int int32_t;
-typedef long long int64_t;
+#include <cstdint>
 
 // __device__ int32_t part1by2(int32_t n) {
 //     n = (n ^ (n << 16)) & 0xFF0000FF;
