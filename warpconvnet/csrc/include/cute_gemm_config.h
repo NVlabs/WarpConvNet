@@ -78,6 +78,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 // --- Tile128x64x32 × half_t ---
@@ -102,6 +103,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile128x64x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 // --- Tile64x128x32 × half_t ---
@@ -126,6 +128,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 // --- Tile128x128x32 × half_t ---
@@ -150,6 +153,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 // ============================================================================
@@ -172,6 +176,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile64x64x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 template <>
@@ -190,6 +195,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x64x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 template <>
@@ -208,6 +214,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile64x128x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 template <>
@@ -226,6 +233,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x128x32> {
   static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
 };
 
 }  // namespace cute_gemm
