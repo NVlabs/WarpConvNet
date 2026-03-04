@@ -163,7 +163,7 @@ def _explicit_gemm_forward_grouped(
         output_feature_tensor.scatter_add_(
             0,
             cat_out.unsqueeze(1).expand(-1, C_out),
-            result_flat[flat_idx],
+            result_flat[flat_idx].to(dtype=output_feature_tensor.dtype),
         )
 
     return output_feature_tensor.to(dtype=in_features.dtype)
@@ -244,11 +244,11 @@ def _explicit_gemm_backward_grouped(
         grad_in_features.scatter_add_(
             0,
             cat_in.unsqueeze(1).expand(-1, C_in),
-            grad_in_result_flat[flat_idx],
+            grad_in_result_flat[flat_idx].to(dtype=grad_in_features.dtype),
         )
 
         # Assign grad_weight per offset
-        grad_weight[bucket_offsets] = grad_w_result
+        grad_weight[bucket_offsets] = grad_w_result.to(dtype=grad_weight.dtype)
 
     return (
         grad_in_features.to(dtype=in_features.dtype),

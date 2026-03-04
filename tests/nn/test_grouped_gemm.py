@@ -302,5 +302,203 @@ class TestGroundTruthMatmul:
         torch.testing.assert_close(output, ref, atol=1e-4, rtol=1e-4)
 
 
+class TestAMPAutocast:
+    """Test all grouped backends under torch.amp.autocast (mixed precision).
+
+    Under AMP, torch.bmm autocasts float32 inputs to float16 internally.
+    These tests verify that:
+    1. No dtype mismatch errors occur in `scatter_add_` or index assignment
+    2. Grouped AMP output matches ungrouped AMP output (same precision path)
+    """
+
+    @pytest.mark.parametrize("C_in,C_out", [(32, 32), (64, 64)])
+    def test_explicit_grouped_forward_amp(self, C_in, C_out):
+        torch.manual_seed(42)
+        kernel_map, N = _make_kernel_map(5000)
+        K = len(kernel_map)
+        device = "cuda"
+
+        in_features = torch.randn(N, C_in, device=device)
+        weight = torch.randn(K, C_in, C_out, device=device)
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            ref = _explicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                N,
+            )
+            out = _explicit_gemm_forward_grouped(
+                in_features,
+                weight,
+                kernel_map,
+                N,
+                saturation_m=500,
+            )
+        assert out.dtype == ref.dtype
+        torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("C_in,C_out", [(32, 32), (64, 64)])
+    def test_explicit_grouped_backward_amp(self, C_in, C_out):
+        torch.manual_seed(42)
+        kernel_map, N = _make_kernel_map(5000)
+        K = len(kernel_map)
+        device = "cuda"
+
+        in_features = torch.randn(N, C_in, device=device)
+        weight = torch.randn(K, C_in, C_out, device=device)
+        grad_output = torch.randn(N, C_out, device=device)
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            ref_gi, ref_gw = _explicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+            )
+            gi, gw = _explicit_gemm_backward_grouped(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                saturation_m=500,
+            )
+        assert gi.dtype == ref_gi.dtype
+        assert gw.dtype == ref_gw.dtype
+        torch.testing.assert_close(gi, ref_gi, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(gw, ref_gw, atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("C_in,C_out", [(32, 32), (64, 64)])
+    def test_implicit_grouped_forward_amp(self, C_in, C_out):
+        torch.manual_seed(42)
+        kernel_map, N = _make_kernel_map(5000)
+        K = len(kernel_map)
+        device = "cuda"
+
+        in_features = torch.randn(N, C_in, device=device)
+        weight = torch.randn(K, C_in, C_out, device=device)
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            ref = _implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                N,
+                compute_dtype=None,
+                fwd_block_size=16,
+            )
+            out = _implicit_gemm_forward_grouped(
+                in_features,
+                weight,
+                kernel_map,
+                N,
+                compute_dtype=None,
+                fwd_block_size=16,
+                saturation_m=500,
+            )
+        assert out.dtype == ref.dtype
+        torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("C_in,C_out", [(32, 32), (64, 64)])
+    def test_cutlass_grouped_forward_amp(self, C_in, C_out):
+        """Test CUTLASS grouped forward under AMP (skips if CUTLASS unavailable)."""
+        torch.manual_seed(42)
+        try:
+            from warpconvnet.nn.functional.sparse_conv.detail.cutlass import (
+                _cutlass_implicit_gemm_forward_grouped,
+                _cutlass_implicit_gemm_forward_logic,
+            )
+        except (ImportError, AssertionError):
+            pytest.skip("CUTLASS not available")
+
+        kernel_map, N = _make_kernel_map(5000)
+        K = len(kernel_map)
+        device = "cuda"
+
+        # CUTLASS requires channels aligned to 8
+        C_in_aligned = (C_in + 7) // 8 * 8
+        C_out_aligned = (C_out + 7) // 8 * 8
+        in_features = torch.randn(N, C_in_aligned, device=device)
+        weight = torch.randn(K, C_in_aligned, C_out_aligned, device=device)
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            try:
+                ref = _cutlass_implicit_gemm_forward_logic(
+                    in_features,
+                    weight,
+                    kernel_map,
+                    N,
+                )
+            except (RuntimeError, AssertionError):
+                pytest.skip("CUTLASS forward not supported on this GPU")
+            if isinstance(ref, int):
+                pytest.skip("CUTLASS forward returned error status")
+
+            out = _cutlass_implicit_gemm_forward_grouped(
+                in_features,
+                weight,
+                kernel_map,
+                N,
+                saturation_m=500,
+            )
+        if isinstance(out, int):
+            pytest.skip("CUTLASS grouped forward returned error status")
+
+        assert out.dtype == ref.dtype
+        # Wider tolerance: grouped mixes CUTLASS + bmm, different rounding than all-CUTLASS
+        torch.testing.assert_close(out, ref, atol=0.05, rtol=0.05)
+
+    @pytest.mark.parametrize("C_in,C_out", [(32, 32), (64, 64)])
+    def test_cutlass_grouped_backward_amp(self, C_in, C_out):
+        """Test CUTLASS grouped backward under AMP (skips if CUTLASS unavailable)."""
+        torch.manual_seed(42)
+        try:
+            from warpconvnet.nn.functional.sparse_conv.detail.cutlass import (
+                _cutlass_implicit_gemm_backward_grouped,
+                _cutlass_implicit_gemm_backward_logic,
+            )
+        except (ImportError, AssertionError):
+            pytest.skip("CUTLASS not available")
+
+        kernel_map, N = _make_kernel_map(5000)
+        K = len(kernel_map)
+        device = "cuda"
+
+        C_in_aligned = (C_in + 7) // 8 * 8
+        C_out_aligned = (C_out + 7) // 8 * 8
+        in_features = torch.randn(N, C_in_aligned, device=device)
+        weight = torch.randn(K, C_in_aligned, C_out_aligned, device=device)
+        grad_output = torch.randn(N, C_out_aligned, device=device)
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            try:
+                ref_gi, ref_gw = _cutlass_implicit_gemm_backward_logic(
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
+                )
+            except (RuntimeError, AssertionError):
+                pytest.skip("CUTLASS backward not supported on this GPU")
+            if isinstance(ref_gi, int):
+                pytest.skip("CUTLASS backward returned error status")
+
+            gi, gw = _cutlass_implicit_gemm_backward_grouped(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                saturation_m=500,
+            )
+        if isinstance(gi, int):
+            pytest.skip("CUTLASS grouped backward returned error status")
+
+        assert gi.dtype == ref_gi.dtype
+        assert gw.dtype == ref_gw.dtype
+        # Wider tolerance: grouped mixes CUTLASS + bmm, different rounding than all-CUTLASS
+        torch.testing.assert_close(gi, ref_gi, atol=0.05, rtol=0.05)
+        torch.testing.assert_close(gw, ref_gw, atol=0.05, rtol=0.05)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-x"])
