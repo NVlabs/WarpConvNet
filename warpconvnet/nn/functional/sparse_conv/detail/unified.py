@@ -53,6 +53,9 @@ logger = get_logger(__name__)
 # Separate benchmark parameters for independent operations
 _BENCHMARK_NUM_RUNS = 2
 
+# Track whether auto-tune banner has been shown (once per process)
+_AUTOTUNE_BANNER_SHOWN = False
+
 # Forward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (block size), EXPLICIT
 _BENCHMARK_FORWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
@@ -275,9 +278,6 @@ def _run_forward_benchmarks(
     warmup_iters = max(warmup_iters, 1)
     benchmark_iters = max(benchmark_iters, 1)
 
-    logger.warning(
-        "Using benchmarked forward algo. Until the algorithm finds the best parameters, forward performance will be slow."
-    )
     all_benchmark_results: List[Tuple[str, Dict[str, Any], float]] = []
     timer = CUDATimer()
 
@@ -348,41 +348,56 @@ def _run_forward_benchmarks(
     if dtype_to_check == torch.float64:
         params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
 
-    for algo_mode, params_config in params_to_use:
+    global _AUTOTUNE_BANNER_SHOWN
+    num_candidates = len(params_to_use)
+    N_in = in_features.shape[0]
+    C_in_val = in_features.shape[1]
+    C_out_val = weight.shape[2]
+    if not _AUTOTUNE_BANNER_SHOWN:
+        logger.warning(
+            "WarpConvNet: Auto-tuning sparse convolution algorithms. "
+            "The first few iterations will be slow while optimal kernels are selected. "
+            "Results are cached to ~/.cache/warpconvnet/ for future runs."
+        )
+        _AUTOTUNE_BANNER_SHOWN = True
+    logger.info(
+        f"Auto-tuning forward (N={N_in}, C_in={C_in_val}, C_out={C_out_val}, "
+        f"{num_candidates} candidates)..."
+    )
+
+    for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         # Warmup runs
         status = None
         for _ in range(warmup_iters):
-            logger.debug(f"Warmup {algo_mode} {params_config}")
             status = _execute_single_fwd_pass(algo_mode, params_config)
             if isinstance(status, int) and status != 0:
-                logger.warning(
-                    f"Skipping {algo_mode} because it returned status {status} during warmup."
-                )
-                continue
+                break
 
-        if status is not None and status != 0:
+        if isinstance(status, int) and status != 0:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
         # Benchmark runs
-        current_algo_min_time_ms = float("inf")  # Min time for this specific algorithm config
+        current_algo_min_time_ms = float("inf")
 
-        logger.debug(f"Benchmark {algo_mode} {params_config}")
         for _ in range(benchmark_iters):
             with timer:
                 _execute_single_fwd_pass(algo_mode, params_config)
             current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
 
-        logger.debug(
-            f"Forward benchmark result: {str(algo_mode)} {params_config} {current_algo_min_time_ms:.2f}ms"
-        )
         if current_algo_min_time_ms != float("inf"):
             all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
+            _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
+            logger.debug(
+                f"  [{idx}/{num_candidates}] {algo_mode}"
+                + (f" ({_param_str})" if _param_str else "")
+                + f" — {current_algo_min_time_ms:.2f}ms"
+            )
 
     if not all_benchmark_results:
         logger.warning(
-            "Warning: No forward benchmark was successful or no algorithms to test. Defaulting to EXPLICIT_GEMM."
+            "No forward benchmark succeeded. Falling back to explicit_gemm."
         )
-        # Return a default entry indicating failure or no successful benchmarks
         with timer:
             _execute_single_fwd_pass("explicit_gemm", {})
         all_benchmark_results.append(("explicit_gemm", {}, timer.elapsed_time))
@@ -391,9 +406,11 @@ def _run_forward_benchmarks(
     all_benchmark_results.sort(key=lambda x: x[2])
 
     best_algo, best_params, overall_best_time_ms = all_benchmark_results[0]
-
-    logger.debug(
-        f"Best forward algo: {str(best_algo)} for log N_in={math.ceil(math.log2(in_features.shape[0])) if in_features.shape[0] > 0 else 0}, log N_out={math.ceil(math.log2(num_out_coords)) if num_out_coords > 0 else 0}, C_in={in_features.shape[1]}, C_out={weight.shape[2]}, K_vol={weight.shape[0]} {best_params} {overall_best_time_ms:.2f}ms"
+    _best_param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
+    logger.info(
+        f"Auto-tune forward complete: {best_algo}"
+        + (f" ({_best_param_str})" if _best_param_str else "")
+        + f" — {overall_best_time_ms:.2f}ms"
     )
     return all_benchmark_results  # Return the sorted list of all results
 
@@ -499,21 +516,36 @@ def _run_backward_benchmarks(
     if dtype_to_check == torch.float64:
         params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
 
-    for algo_mode, params_config in params_to_use:
+    global _AUTOTUNE_BANNER_SHOWN
+    num_candidates = len(params_to_use)
+    N_in = in_features.shape[0]
+    C_in_val = in_features.shape[1]
+    C_out_val = weight.shape[2]
+    if not _AUTOTUNE_BANNER_SHOWN:
+        logger.warning(
+            "WarpConvNet: Auto-tuning sparse convolution algorithms. "
+            "The first few iterations will be slow while optimal kernels are selected. "
+            "Results are cached to ~/.cache/warpconvnet/ for future runs."
+        )
+        _AUTOTUNE_BANNER_SHOWN = True
+    logger.info(
+        f"Auto-tuning backward (N={N_in}, C_in={C_in_val}, C_out={C_out_val}, "
+        f"{num_candidates} candidates)..."
+    )
+
+    for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         status = None
         for _ in range(warmup_iters):
             status = _execute_single_bwd_pass(algo_mode, params_config)
             if isinstance(status, int) and status != 0:
-                logger.debug(
-                    f"Error in _run_backward_benchmarks: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(status))}"
-                )
-                continue
+                break
 
-        if status is not None and status != 0:
+        if isinstance(status, int) and status != 0:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
         # Benchmark runs
-        current_algo_min_time_ms = float("inf")  # Min time for this specific algorithm config
+        current_algo_min_time_ms = float("inf")
 
         if benchmark_iters == 0:
             if warmup_iters == 0:
@@ -524,15 +556,18 @@ def _run_backward_benchmarks(
                     _execute_single_bwd_pass(algo_mode, params_config)
                 current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
 
-        logger.debug(
-            f"Backward benchmark result: {str(algo_mode)} {params_config} {current_algo_min_time_ms:.2f}ms"
-        )
         if current_algo_min_time_ms != float("inf"):
             all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
+            _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
+            logger.debug(
+                f"  [{idx}/{num_candidates}] {algo_mode}"
+                + (f" ({_param_str})" if _param_str else "")
+                + f" — {current_algo_min_time_ms:.2f}ms"
+            )
 
     if not all_benchmark_results:
         logger.warning(
-            "Warning: No backward benchmark was successful or no algorithms to test. Defaulting to EXPLICIT_GEMM."
+            "No backward benchmark succeeded. Falling back to explicit_gemm."
         )
         with timer:
             _execute_single_bwd_pass("explicit_gemm", {})
@@ -542,8 +577,11 @@ def _run_backward_benchmarks(
     all_benchmark_results.sort(key=lambda x: x[2])
 
     best_algo, best_params, overall_best_time_ms = all_benchmark_results[0]
-    logger.debug(
-        f"Best backward algo: {str(best_algo)} for log N_in={math.ceil(math.log2(in_features.shape[0])) if in_features.shape[0] > 0 else 0}, log N_out={math.ceil(math.log2(num_out_coords)) if num_out_coords > 0 else 0}, C_in={in_features.shape[1]}, C_out={weight.shape[2]}, K_vol={weight.shape[0]} {best_params} {overall_best_time_ms:.2f}ms"
+    _best_param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
+    logger.info(
+        f"Auto-tune backward complete: {best_algo}"
+        + (f" ({_best_param_str})" if _best_param_str else "")
+        + f" — {overall_best_time_ms:.2f}ms"
     )
     return all_benchmark_results  # Return the sorted list of all results
 
