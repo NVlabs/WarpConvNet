@@ -49,7 +49,12 @@ def _explicit_gemm_forward_logic(
         out_map = out_map.to(device)
         curr_out_features = torch.matmul(comp_in_feats[in_map], comp_weight[i])
         output_feature_tensor[out_map] += curr_out_features.to(device=device)
-    return output_feature_tensor.to(dtype=in_features.dtype)
+    # Only cast back when compute_dtype was explicitly set. When compute_dtype
+    # is None, preserve the dtype produced by the computation (e.g. float16
+    # under AMP autocast) rather than forcing back to in_features.dtype.
+    if compute_dtype is not None:
+        return output_feature_tensor.to(dtype=in_features.dtype)
+    return output_feature_tensor
 
 
 def _explicit_gemm_backward_logic(
@@ -166,7 +171,9 @@ def _explicit_gemm_forward_grouped(
             result_flat[flat_idx].to(dtype=output_feature_tensor.dtype),
         )
 
-    return output_feature_tensor.to(dtype=in_features.dtype)
+    if compute_dtype is not None:
+        return output_feature_tensor.to(dtype=in_features.dtype)
+    return output_feature_tensor
 
 
 def _explicit_gemm_backward_grouped(
