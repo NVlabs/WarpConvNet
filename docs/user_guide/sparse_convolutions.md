@@ -138,6 +138,18 @@ export WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE=auto
 export WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE=auto
 ```
 
+### Auto-Tuning Log Verbosity
+
+```bash
+# Suppress auto-tuning logs (default: true)
+export WARPCONVNET_AUTOTUNE_LOG=false
+
+# Re-enable auto-tuning logs
+export WARPCONVNET_AUTOTUNE_LOG=true
+```
+
+Accepts `true`, `false`, `1`, or `0`. When set to `false` (or `0`), auto-tuning benchmark logs are suppressed. This is useful in production or when running many iterations where the tuning output becomes noisy.
+
 ## Benchmarking and Performance Optimization
 
 ### How Benchmarking Works
