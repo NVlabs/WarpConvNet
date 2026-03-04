@@ -36,12 +36,21 @@ using namespace cute;
 template <class ElementInput, class TileTag>
 struct CuteTileConfig;
 
-// SmemLayoutAtom for FP16/BF16 with K=32 (from CUTLASS DefaultGemm_TensorOpSm80_OperandA):
-// 8 rows × 32 columns with K-contiguous storage and bank-conflict-free swizzle.
-// Swizzle<2,3,3> = 4-way swizzle on bits [3:5] → eliminates bank conflicts for 16-bit elements.
-using SmemLayoutAtomFP16 = decltype(composition(
+// SmemLayoutAtom for operand A: K-contiguous (row-major) with Swizzle<2,3,3>.
+// 8 rows × 32 columns, K is the contiguous (stride-1) dimension.
+// From CUTLASS DefaultGemm_TensorOpSm80_OperandA<half_t, RowMajor>.
+using SmemLayoutAtomA_FP16 = decltype(composition(
     Swizzle<2, 3, 3>{},
     Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
+
+// SmemLayoutAtom for operand B: N-contiguous (column-major) with Swizzle<3,3,3>.
+// 64 rows × 8 columns, N is the contiguous (stride-1) dimension.
+// From CUTLASS DefaultGemm_TensorOpSm80_OperandB<half_t, RowMajor> which maps to
+// OperandA<half_t, ColumnMajor>. Used with SM75_U16x8_LDSM_T (transposing LDSM)
+// that transposes N-contiguous smem data to K-contiguous registers for the MMA.
+using SmemLayoutAtomB_FP16 = decltype(composition(
+    Swizzle<3, 3, 3>{},
+    Layout<Shape<_64, _8>, Stride<_1, _64>>{}));
 
 // ============================================================================
 // half_t specializations — all use 2×2 warps (128 threads)
@@ -57,11 +66,11 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32> {
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
 
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
 
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
 
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
@@ -81,11 +90,11 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile128x64x32> {
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
 
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
 
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
 
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
@@ -105,11 +114,11 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32> {
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
 
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
 
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
 
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
@@ -129,11 +138,11 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32> {
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
 
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
 
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
 
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
@@ -154,10 +163,10 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile64x64x32> {
   using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>,
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
   static constexpr int NumStages = 1;
@@ -172,10 +181,10 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x64x32> {
   using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>,
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
   static constexpr int NumStages = 1;
@@ -190,10 +199,10 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile64x128x32> {
   using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>,
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
   static constexpr int NumStages = 1;
@@ -208,10 +217,10 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x128x32> {
   using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>,
                              Layout<Shape<_2, _2, _1>>,
                              Tile<_32, _32, _16>>;
-  using SmemLayoutAtomA = SmemLayoutAtomFP16;
-  using SmemLayoutAtomB = SmemLayoutAtomA;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
   using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = SmemCopyAtomA;
+  using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
   static constexpr int NumStages = 1;

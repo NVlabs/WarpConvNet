@@ -3,11 +3,12 @@
 //
 // CuTe GEMM kernel with manual gather/scatter.
 // Loads gathered A rows and dense B into shared memory via cooperative
-// element-wise loads, then uses CuTe TiledMMA for tensor core computation.
+// 128-bit vectorized loads, then uses CuTe TiledMMA for tensor core computation.
 //
-// The smem → register copy uses LDSM instructions (SM75_U32x4_LDSM_N)
-// with retile_D() to match the MMA fragment layout (following the canonical
-// pattern from CUTLASS sm80_mma_multistage.hpp).
+// Operand A: K-contiguous smem (Swizzle<2,3,3>) + LDSM_N (non-transposing)
+// Operand B: N-contiguous smem (Swizzle<3,3,3>) + LDSM_T (transposing)
+// The LDSM_T instruction transposes N-contiguous smem data to K-contiguous
+// registers matching the MMA fragment layout.
 
 #pragma once
 
@@ -191,11 +192,14 @@ struct CuteGemmKernel {
     }
   }
 
-  /// Load a dense B tile into smem.
-  /// B is (K, N) row-major: B[k, n] = ptr[k * N + n].
-  /// For TN GEMM, smem B stores (tN, tK) tile: sB(n_local, k_local).
-  /// Iteration order: N outer, K inner — adjacent threads write to
-  /// K-contiguous smem positions (minimal bank conflicts with swizzle).
+  /// Load a dense B tile into smem with vectorized 128-bit loads along N.
+  ///
+  /// B is (K, N) row-major: B[k, n] = ptr[k * N + n]. N is contiguous in gmem.
+  /// Smem B stores (tN, tK) with N-contiguous layout (SmemLayoutAtomB_FP16).
+  /// Swizzle<3,3,3> preserves 8-element contiguity along N, enabling
+  /// 128-bit vectorized stores to smem.
+  /// Iteration order: K outer, N-vec inner — adjacent threads load
+  /// consecutive 128-bit chunks along N (coalesced gmem access).
   template <class SmemTensor>
   __device__ void _load_dense_B_tile(const ElementInput *ptr_B,
                                      SmemTensor smem_tile,
@@ -203,20 +207,35 @@ struct CuteGemmKernel {
                                      int k_start,
                                      int N,
                                      int K_dim) const {
-    constexpr int total = tN * tK;
+    static_assert(tN % kVec == 0, "tN must be a multiple of vector width");
+    constexpr int n_vecs = tN / kVec;
+    constexpr int total_vecs = tK * n_vecs;
 
     CUTLASS_PRAGMA_UNROLL
-    for (int idx = threadIdx.x; idx < total; idx += MaxThreadsPerBlock) {
-      int n_local = idx / tK;
-      int k_local = idx % tK;
+    for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
+      int k_local = idx / n_vecs;
+      int nv = idx % n_vecs;
+      int n_local = nv * kVec;
       int n_global = n_start + n_local;
       int k_global = k_start + k_local;
 
-      ElementInput val{};
-      if (n_global < N && k_global < K_dim) {
-        val = ptr_B[k_global * N + n_global];
+      uint4 vec_data = make_uint4(0, 0, 0, 0);
+      if (k_global < K_dim) {
+        if (n_global + kVec <= N) {
+          // Vectorized 128-bit load (N-contiguous in gmem)
+          vec_data = *reinterpret_cast<const uint4 *>(
+              &ptr_B[k_global * N + n_global]);
+        } else {
+          // Boundary: element-wise fallback
+          auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
+          for (int v = 0; v < kVec; ++v) {
+            if (n_global + v < N)
+              elems[v] = ptr_B[k_global * N + n_global + v];
+          }
+        }
       }
-      smem_tile(n_local, k_local) = val;
+      // Vectorized 128-bit store to smem (N-contiguous after swizzle)
+      *reinterpret_cast<uint4 *>(&smem_tile(n_local, k_local)) = vec_data;
     }
   }
 
