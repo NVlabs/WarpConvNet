@@ -149,6 +149,10 @@ WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE = os.environ.get(
     "WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE"
 )
 
+# Control auto-tuning log verbosity.
+# Set WARPCONVNET_AUTOTUNE_LOG=false (or 0) to suppress auto-tuning logs.
+WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
+
 # --- Types ---
 
 # --- Functions ---

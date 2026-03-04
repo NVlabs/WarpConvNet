@@ -19,11 +19,17 @@ from warpconvnet.constants import (
     WARPCONVNET_BENCHMARK_CACHE_DIR,
     WARPCONVNET_BENCHMARK_CACHE_VERSION,
     WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE,
+    WARPCONVNET_AUTOTUNE_LOG,
 )
 from warpconvnet.utils.logger import get_logger
 from warpconvnet.utils.dist import _get_current_rank, _is_rank_zero
 
 logger = get_logger(__name__, rank_zero_only=False)
+
+if not WARPCONVNET_AUTOTUNE_LOG:
+    import logging
+
+    logger.setLevel(logging.WARNING)
 
 
 # Rank detection is now handled by the dist module
