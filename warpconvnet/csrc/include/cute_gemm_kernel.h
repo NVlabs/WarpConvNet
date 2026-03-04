@@ -3,14 +3,15 @@
 //
 // CuTe GEMM kernel with manual gather/scatter and 2-stage pipelining.
 //
-// Operand A: gathered via indices → manual LDG.128 + STS.128 to K-contiguous
+// Operand A: gathered via indices → cp.async 128-bit gmem→smem along K
+//            (K is contiguous within each gathered row) to K-contiguous
 //            smem (Swizzle<2,3,3>) + LDSM_N (non-transposing)
 // Operand B: dense → cp.async 128-bit gmem→smem (bypasses registers) to
 //            N-contiguous smem (Swizzle<3,3,3>) + LDSM_T (transposing)
 //
 // The mainloop uses 2-stage double-buffering: while tensor cores compute on
 // the current K-tile (stage[curr]), the next K-tile is being loaded into
-// stage[next]. B's cp.async overlaps with MMA compute.
+// stage[next]. Both A and B use cp.async for truly async gmem→smem transfers.
 
 #pragma once
 
@@ -117,8 +118,8 @@ struct CuteGemmKernel {
     }
 
     // ==================== PROLOG: load k_tile=0 into stage[0] ====================
-    _load_gathered_tile(ptr_A, in_map, sA(_, _, 0),
-                        m_start, 0, M, K_dim, true);
+    _load_gathered_tile_cpasync(ptr_A, in_map, sA(_, _, 0),
+                                m_start, 0, M, K_dim);
     _load_dense_B_tile_cpasync(ptr_B, sB(_, _, 0),
                                n_start, 0, N, K_dim);
     cute::cp_async_fence();
@@ -132,9 +133,9 @@ struct CuteGemmKernel {
       int next_stage = k_tile & 1;
       int k_start = k_tile * tK;
 
-      // Issue loads for NEXT k_tile into next_stage
-      _load_gathered_tile(ptr_A, in_map, sA(_, _, next_stage),
-                          m_start, k_start, M, K_dim, true);
+      // Issue loads for NEXT k_tile into next_stage (both A and B are cp.async)
+      _load_gathered_tile_cpasync(ptr_A, in_map, sA(_, _, next_stage),
+                                  m_start, k_start, M, K_dim);
       _load_dense_B_tile_cpasync(ptr_B, sB(_, _, next_stage),
                                  n_start, k_start, N, K_dim);
       cute::cp_async_fence();
@@ -172,21 +173,25 @@ struct CuteGemmKernel {
   // Number of ElementInput values per 128-bit vector load/store
   static constexpr int kVec = 16 / sizeof(ElementInput);  // 8 for fp16/bf16
 
-  /// Load a gathered A tile into smem with vectorized 128-bit loads along K.
+  /// Load a gathered A tile into smem using cp.async (128-bit async gmem→smem).
   ///
   /// A is (M_phys, K_dim) row-major, gathered by gather_map.
-  /// K is contiguous in both gmem (within each row) and smem (after swizzle).
+  /// K is contiguous in both gmem (within each gathered row) and smem.
   /// The Swizzle<2,3,3> layout preserves 8-element contiguity along K,
-  /// so we can do 128-bit vectorized loads from gmem AND stores to smem.
+  /// so cp.async 128-bit transfers are aligned for both gmem source and smem dest.
+  ///
+  /// Each thread resolves the gather index (synchronous LDG for the int32 index),
+  /// then issues cp.async for the 128-bit K-contiguous data (async gmem→smem,
+  /// bypasses registers). Out-of-bounds accesses use zero-fill (src_size=0).
+  /// Caller must issue cp_async_fence() after this function returns.
   template <class SmemTensor>
-  __device__ void _load_gathered_tile(const ElementInput *ptr,
-                                      const int *gather_map,
-                                      SmemTensor smem_tile,
-                                      int m_start,
-                                      int k_start,
-                                      int M_phys,
-                                      int K_dim,
-                                      bool is_gathered) const {
+  __device__ void _load_gathered_tile_cpasync(const ElementInput *ptr,
+                                              const int *gather_map,
+                                              SmemTensor smem_tile,
+                                              int m_start,
+                                              int k_start,
+                                              int M_phys,
+                                              int K_dim) const {
     static_assert(tK % kVec == 0, "tK must be a multiple of vector width");
     constexpr int k_vecs = tK / kVec;
     constexpr int total_vecs = tM * k_vecs;
@@ -199,24 +204,25 @@ struct CuteGemmKernel {
       int m_global = m_start + m_local;
       int k_global = k_start + k_local;
 
-      uint4 vec_data = make_uint4(0, 0, 0, 0);
-      if (m_global < M_phys) {
-        int phys_row = is_gathered ? gather_map[m_global] : m_global;
-        if (k_global + kVec <= K_dim) {
-          // Vectorized 128-bit load (K-contiguous in gmem)
-          vec_data = *reinterpret_cast<const uint4 *>(
-              &ptr[phys_row * K_dim + k_global]);
-        } else {
-          // Boundary: element-wise fallback
-          auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
-          for (int v = 0; v < kVec; ++v) {
-            if (k_global + v < K_dim)
-              elems[v] = ptr[phys_row * K_dim + k_global + v];
-          }
-        }
+      // Smem destination: 16-byte aligned (Swizzle<2,3,3> preserves 8-elem contiguity along K)
+      uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(m_local, k_local));
+
+      bool pred = (m_global < M_phys) && (k_global + kVec <= K_dim);
+
+      if (pred) {
+        // Resolve gather index (synchronous 4-byte LDG for the int32 index)
+        int phys_row = gather_map[m_global];
+        // 128-bit cp.async: gmem → smem, bypasses registers
+        const void *gmem_src = &ptr[phys_row * K_dim + k_global];
+        asm volatile(
+            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
+            :: "r"(smem_addr), "l"(gmem_src), "n"(16));
+      } else {
+        // Zero-fill: src_size=0 writes zeros to smem without reading gmem
+        asm volatile(
+            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n"
+            :: "r"(smem_addr), "l"(ptr), "n"(16), "r"(0));
       }
-      // Vectorized 128-bit store to smem (K-contiguous after swizzle)
-      *reinterpret_cast<uint4 *>(&smem_tile(m_local, k_local)) = vec_data;
     }
   }
 

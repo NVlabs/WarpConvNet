@@ -10,7 +10,7 @@ D[out_map[i], j] = alpha * sum_k(A[in_map[i], k] * B[k, j]) + beta * C[out_map[i
 
 where `in_map` and `out_map` are integer gather/scatter index arrays that select which rows of A to read and which rows of D to write. This operation is the core of explicit-GEMM sparse convolution, where the kernel map (produced by coordinate hashing) determines how input features are gathered for each convolution kernel offset, and how outputs are scattered back to the output feature tensor.
 
-The implementation uses CUTLASS 3.x CuTe abstractions for tensor core operations (TiledMMA, LDSM copy atoms, swizzled shared memory layouts) while handling the irregular gather/scatter pattern through manual element-wise global memory loads.
+The implementation uses CUTLASS 3.x CuTe abstractions for tensor core operations (TiledMMA, LDSM copy atoms, swizzled shared memory layouts) while handling the irregular gather/scatter pattern through manual global memory loads with vectorized 128-bit transfers where possible.
 
 ### Files
 
@@ -32,15 +32,18 @@ The implementation uses CUTLASS 3.x CuTe abstractions for tensor core operations
 ### Data Flow
 
 ```
-Global Memory                  Shared Memory              Registers
-============                  =============              =========
+Global Memory                  Shared Memory                Registers
+============                  =============                =========
 
-A[in_map[i], k] ──LDG.128──>  sA(m_local, k_local)  ──LDSM──>  tCrA(MMA,MMA_M,MMA_K)
-                  along K      (swizzled layout)       retile_D
-                  + STS.128    K-contiguous in
-                               gmem AND smem                             │
-B[k, n]         ──element──>  sB(n_local, k_local)  ──LDSM──>  tCrB(MMA,MMA_N,MMA_K)
-                  wise load    (swizzled layout)       retile_D          │
+A[in_map[i], k] ──cp.async──>  sA(m, k, stage)  ──LDSM_N──>  tCrA(MMA,MMA_M,MMA_K)
+                  128-bit       Swizzle<2,3,3>     retile_D
+                  gmem→smem     K-contiguous
+                  (gather idx
+                   via LDG)                              │
+                                                                         │
+B[k, n]         ──cp.async──>  sB(n, k, stage)  ──LDSM_T──>  tCrB(MMA,MMA_N,MMA_K)
+                  128-bit       Swizzle<3,3,3>     retile_D              │
+                  gmem→smem     N-contiguous       (transpose)           │
                                                                     ┌────▼────┐
                                                                     │ TiledMMA │
                                                                     │ (TC ops) │
@@ -48,42 +51,55 @@ B[k, n]         ──element──>  sB(n_local, k_local)  ──LDSM──>  t
                                                                          │
 D[out_map[i], j] <──element── accum(i)                                   │
                     wise store  = alpha * accum + beta * C[out_map[i], j] ┘
+
+Pipeline: 2-stage double-buffering (load stage[next] while computing stage[curr])
 ```
 
-### Why Manual Loads Instead of CollectiveMma
+### Why Manual Loads for Gathered A
 
-CUTLASS 3.x `CollectiveMma` with `MainloopSm80CpAsyncUnpredicated` uses vectorized 128-bit `cp.async` instructions for gmem-to-smem transfers. These require contiguous, aligned memory access patterns. The gather operation (`A[in_map[i], :]`) introduces indirection that breaks contiguity in the M dimension — each row may come from an arbitrary physical location in A.
+CUTLASS 3.x `CollectiveMma` with `MainloopSm80CpAsyncUnpredicated` uses vectorized 128-bit `cp.async` for gmem-to-smem. The gather operation (`A[in_map[i], :]`) introduces indirection that breaks contiguity in the M dimension — each row may come from an arbitrary physical location in A.
 
-Several approaches were attempted to use CuTe's `ComposedLayout` (via `make_gather_tensor`) to express the gather as a layout property:
+Several approaches were attempted to express gather as a CuTe layout property:
 
-1. **ComposedLayout with cp.async**: The `upcast<N>` specialization for `ComposedLayout` (needed by vectorized copies) requires a `ScaledBasis` stride in the inner layout. After CuTe's internal partitioning operations (`partition_S`, `tile2thrfrg`, `compose`), the `ComposedLayout` gets flattened to a regular `Layout` with dynamic strides, losing the `ScaledBasis` information. The vectorized copy atom then fails with "src failed to vectorize into registers."
+1. **ComposedLayout with cp.async**: The `upcast<N>` specialization for `ComposedLayout` (needed by vectorized copies) requires a `ScaledBasis` stride in the inner layout. After CuTe's `partition_S` / `tile2thrfrg` / `compose`, the `ComposedLayout` gets flattened to a regular `Layout` with dynamic strides, losing `ScaledBasis`. The vectorized copy atom then fails with "src failed to vectorize into registers."
 
-2. **Flat Layout with CustomStride**: Placing `CustomStride<IndexedGather, Stride>` directly in a flat layout causes compilation errors because CuTe's internal operations (`get`, `tile_unzip`, `repeat`, `append`) don't support `CustomStride` as a stride element in tuples.
+2. **Flat Layout with CustomStride**: Placing `CustomStride<IndexedGather, Stride>` in a flat layout causes compilation errors because CuTe's internal operations don't support `CustomStride` as a stride element in tuples.
 
-3. **Manual element-wise loads (current approach)**: Each thread loads individual elements using scalar global memory reads with explicit gather index lookups, then writes them to shared memory using CuTe's swizzled coordinate access. This bypasses all vectorization requirements. The dense B matrix could theoretically use vectorized loads, but its TN-format memory layout (stride N along the K dimension) also prevents contiguous 128-bit loads along K.
+3. **Manual vectorized loads (current approach)**: Each thread computes its gathered source address, then issues vectorized 128-bit LDG.128 along K (which is contiguous within each gathered row) and 128-bit STS.128 to swizzled smem. Dense B uses 128-bit `cp.async` (gmem→smem bypassing registers) with N-contiguous layout and transposing LDSM for smem→register.
 
 ### Kernel Structure
 
 ```
 CuteGemmKernel<TileConfig>::operator()
 │
-├── Setup: shared memory tensors sA(tM,tK), sB(tN,tK)
+├── Setup: 3D smem tensors sA(tM,tK,NumStages), sB(tN,tK,NumStages)
 ├── MMA setup: TiledMma, accum = partition_fragment_C(...)
-├── Register fragments: tCrA = partition_fragment_A(sA), tCrB = partition_fragment_B(sB)
+├── Register fragments: tCrA = partition_fragment_A(sA(_,_,0))
 ├── LDSM copy setup:
-│   ├── smem_tiled_copy_A = make_tiled_copy_A(SmemCopyAtomA, tiled_mma)
-│   ├── tCsA = partition_S(sA)           // smem source partitions
-│   └── tCrA_copy_view = retile_D(tCrA)  // register destination (retiled for LDSM)
+│   ├── smem_tiled_copy_A = make_tiled_copy_A(SmemCopyAtomA, tiled_mma)  // LDSM_N
+│   ├── smem_tiled_copy_B = make_tiled_copy_B(SmemCopyAtomB, tiled_mma)  // LDSM_T
+│   ├── tCsA = partition_S(sA)  // (CPY,CPY_M,CPY_K,NumStages) — 4D
+│   └── tCrA_copy_view = retile_D(tCrA)
 │
-├── MAINLOOP: for each K tile
-│   ├── _load_gathered_tile(A, in_map, sA, ...)   // gmem → smem (element-wise)
-│   ├── _load_dense_B_tile(B, sB, ...)             // gmem → smem (element-wise)
-│   ├── __syncthreads()
-│   ├── for each K block within tile:              // K_BLOCK_MAX = tK / MMA_K
-│   │   ├── copy(smem_tiled_copy_A, tCsA(k), tCrA_copy_view(k))  // LDSM
-│   │   ├── copy(smem_tiled_copy_B, tCsB(k), tCrB_copy_view(k))  // LDSM
-│   │   └── cute::gemm(tiled_mma, tCrA(k), tCrB(k), accum)       // MMA
+├── PROLOG: load k_tile=0 into stage[0]
+│   ├── _load_gathered_tile(A, in_map, sA(_,_,0), ...)   // LDG.128 + STS.128
+│   ├── _load_dense_B_tile_cpasync(B, sB(_,_,0), ...)    // cp.async 128-bit
+│   ├── cp_async_fence() → cp_async_wait<0>()
 │   └── __syncthreads()
+│
+├── MAINLOOP (k_tile = 1..num_k_tiles-1):
+│   ├── Load NEXT into stage[next]:
+│   │   ├── _load_gathered_tile(A, in_map, sA(_,_,next), ...)
+│   │   ├── _load_dense_B_tile_cpasync(B, sB(_,_,next), ...)
+│   │   └── cp_async_fence()
+│   ├── Compute CURRENT from stage[curr]:
+│   │   ├── copy(smem_tiled_copy_A, tCsA(_,_,k,curr), ...)  // LDSM_N
+│   │   ├── copy(smem_tiled_copy_B, tCsB(_,_,k,curr), ...)  // LDSM_T
+│   │   └── cute::gemm(tiled_mma, tCrA(k), tCrB(k), accum)
+│   ├── cp_async_wait<0>()
+│   └── __syncthreads()
+│
+├── EPILOG: compute last k_tile from stage[last]
 │
 └── _epilogue: D[out_map[i], j] = alpha * accum(i,j) + beta * C[out_map[i], j]
 ```
@@ -92,7 +108,7 @@ CuteGemmKernel<TileConfig>::operator()
 
 ## Tile Configurations
 
-All configurations use the same warp layout and copy atoms, matching CUTLASS's `DefaultGemmConfigurationToCutlass3Types` for SM80:
+All configurations use the same warp layout, matching CUTLASS's `DefaultGemmConfigurationToCutlass3Types` for SM80:
 
 | Property | Value |
 |----------|-------|
@@ -100,18 +116,26 @@ All configurations use the same warp layout and copy atoms, matching CUTLASS's `
 | MMA Tile | `Tile<_32, _32, _16>` (32x32 output per step, K=16 per MMA) |
 | MMA Atom (FP16) | `SM80_16x8x16_F32F16F16F32_TN` |
 | MMA Atom (BF16) | `SM80_16x8x16_F32BF16BF16F32_TN` |
-| SmemLayoutAtom | `Swizzle<2,3,3>` composed with `Layout<Shape<_8,_32>, Stride<_32,_1>>` |
-| SmemCopyAtom (A,B) | `Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>` |
+| SmemLayoutAtomA | `Swizzle<2,3,3>` + `(8,32) Stride<32,1>` — K-contiguous |
+| SmemLayoutAtomB | `Swizzle<3,3,3>` + `(64,8) Stride<1,64>` — N-contiguous |
+| SmemCopyAtomA | `Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>` (non-transposing) |
+| SmemCopyAtomB | `Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>` (transposing) |
 | Accumulator | FP32 |
-| Pipeline stages | 1 (single-buffer, no multi-stage) |
+| Pipeline stages | 2 (double-buffered) |
 
 ### SmemLayoutAtom Details
 
-The shared memory layout atom `Swizzle<2,3,3>` with base layout `Shape<_8,_32>, Stride<_32,_1>` defines an 8-row x 32-column tile with:
+**Operand A** — `Swizzle<2,3,3>` with `Shape<_8,_32>, Stride<_32,_1>`:
+- K-contiguous storage (stride-1 in K), 8-row × 32-column atom
+- `Swizzle<B=2, M=3, S=3>` XORs bits `[3:5)` with bits `[6:8)`, eliminating bank conflicts
+- Preserves 8-element contiguity along K, enabling 128-bit vectorized LDG+STS
+- From CUTLASS `DefaultGemm_TensorOpSm80_OperandA<half_t, RowMajor>`
 
-- **K-contiguous storage**: Stride `_1` in the K dimension (columns), stride `_32` in the M/N dimension (rows)
-- **Bank-conflict-free swizzle**: `Swizzle<B=2, M=3, S=3>` XORs bits `[3:5)` of the address with bits `[6:8)`, providing a 4-way swizzle that eliminates bank conflicts when 32 threads in a warp access elements along the M/N dimension (each thread reading from a different row)
-- **Compatibility**: This is the exact atom from CUTLASS's `DefaultGemm_TensorOpSm80_OperandA<half_t, RowMajor, 8, 32>` (K=32 specialization). When `tile_to_shape`'d to `(tM, tK)` or `(tN, tK)`, it tiles the 8-row atom to fill the full M or N dimension.
+**Operand B** — `Swizzle<3,3,3>` with `Shape<_64,_8>, Stride<_1,_64>`:
+- N-contiguous storage (stride-1 in N), 64-row × 8-column atom
+- Matches gmem layout (B is row-major, N is contiguous), enabling 128-bit cp.async
+- Used with `SM75_U16x8_LDSM_T` which transposes N-contiguous smem data to K-contiguous registers for MMA
+- From CUTLASS `DefaultGemm_TensorOpSm80_OperandB<half_t, RowMajor>` (maps to OperandA ColumnMajor)
 
 ### MMA Iteration Counts
 
@@ -166,21 +190,34 @@ CUTE_STATIC_ASSERT_V(size<1>(tCsA) == size<1>(tCrA_copy_view));      // CPY_M
 CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCrA_copy_view));      // CPY_K
 ```
 
-### Element-Wise Gmem Loads
+### Gmem Load Strategies
 
-Both A (gathered) and B (dense) use the same cooperative loading pattern:
+Both operands use 128-bit `cp.async` for async gmem→smem transfers, bypassing registers.
+
+**Operand A (gathered)** — cp.async with manual gather:
+
+Each thread resolves the gather index (synchronous 4-byte int32 LDG), then issues cp.async for the 128-bit K-contiguous data along the gathered row:
 
 ```cpp
-constexpr int total = tM * tK;  // or tN * tK for B
-for (int idx = threadIdx.x; idx < total; idx += MaxThreadsPerBlock) {
-    int row_local = idx / tK;
-    int k_local   = idx % tK;
-    // ... bounds check and load ...
-    smem_tile(row_local, k_local) = val;
-}
+int phys_row = gather_map[m_global];  // sync LDG for index
+const void *gmem_src = &ptr_A[phys_row * K_dim + k_global];
+uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(m_local, k_local));
+asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
+    :: "r"(smem_addr), "l"(gmem_src), "n"(16));
 ```
 
-The `smem_tile(row, col)` coordinate access automatically applies the swizzled SmemLayout, placing data at the correct bank-conflict-free address. Each of the 128 threads loads `ceil(tM*tK / 128)` elements. For a 64x32 tile, that's `2048/128 = 16` elements per thread.
+**Operand B (dense)** — cp.async direct:
+
+B has no indirection — the gmem address is computed directly from tile coordinates:
+
+```cpp
+const void *gmem_src = &ptr_B[k_global * N + n_global];
+uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
+asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
+    :: "r"(smem_addr), "l"(gmem_src), "n"(16));
+```
+
+Both use zero-fill (`src_size=0`) for out-of-bounds accesses. Both are covered by the same `cp_async_fence()`/`cp_async_wait<0>()` group in the pipelined mainloop.
 
 ### Epilogue
 
@@ -243,33 +280,36 @@ Tile enum values:
 
 **Hardware**: NVIDIA RTX 6000 Ada (SM89), CUDA 12.8, PyTorch 2.10.0+cu128
 
-### CuTe 3.x vs CUTLASS 2.x (FP16, min of 50 runs, best tile per config)
+### CuTe 3.x vs CUTLASS 2.x — Current State (Phase 4)
 
-| Config (M x K x N, gather) | Best Tile | CuTe 3.x (ms) | CUTLASS 2.x (ms) | CuTe / 2.x |
-|----------------------------|-----------|----------------|-------------------|-------------|
-| 100K x 32 x 32, g=50K | 128x64x32 | 0.018 | 0.018 | **1.00x** |
-| 100K x 64 x 64, g=50K | 128x64x32 | 0.034 | 0.026 | 1.32x |
-| 100K x 64 x 128, g=50K | 128x128x32 | 0.062 | 0.040 | 1.56x |
-| 50K x 128 x 128, g=25K | 128x64x32 | 0.042 | 0.028 | 1.52x |
-| 200K x 128 x 128, g=100K | 128x128x32 | 0.218 | 0.166 | 1.31x |
-| 100K x 128 x 128, g=5K | 64x64x32 | 0.035 | 0.027 | 1.31x |
+CuTe 3.x / CUTLASS 2.x time ratio (lower is better, <1.0 means CuTe wins):
 
-**Summary**: CuTe 3.x is 1.0-1.6x slower than CUTLASS 2.x. The gap is smallest for small-K configs where the vectorized A load (128-bit LDG+STS along K) eliminates most of the load overhead. The remaining gap comes from B's element-wise gmem loads (B has N-contiguous gmem but K-contiguous smem, requiring a transpose that prevents direct cp.async).
+| Config (M x K x N, gather) | 64x64 | 128x64 | 128x128 |
+|----------------------------|-------|--------|---------|
+| 100K x 32 x 32, g=50K | 0.93x | 0.93x | 1.11x |
+| 100K x 64 x 64, g=50K | 1.13x | 1.15x | 1.32x |
+| 100K x 64 x 128, g=50K | 1.26x | 1.16x | 1.42x |
+| 200K x 128 x 128, g=100K | **0.97x** | **0.93x** | 1.03x |
+| 100K x 128 x 128, g=5K | 1.06x | 1.11x | 1.29x |
 
-### Phase 1 Optimization Impact (Vectorized A Loads)
+**Summary**: CuTe 3.x now **beats CUTLASS 2.x** on the largest compute-heavy config (200K×128×128 at 0.93x with 128×64 tile). Small-K configs (K=32) also show CuTe winning. The remaining gap on medium configs comes from CuTe using 2-stage vs CUTLASS 2.x's 5-stage pipeline, and 128 threads vs 2.x's 256-512 threads for larger tiles.
 
-Comparison of CuTe/2.x ratios before and after vectorized A loads (Tile128x64x32):
+### Optimization History
 
-| Config | Before (scalar A) | After (vec A) | CuTe Speedup |
-|--------|-------------------|---------------|--------------|
-| 100K x 32 x 32, g=50K | 1.07x | **1.00x** | 10% |
-| 100K x 64 x 64, g=50K | 1.44x | **1.32x** | 11% |
-| 100K x 64 x 128, g=50K | 1.56x | **1.53x** | 3% |
-| 50K x 128 x 128, g=25K | 1.57x | **1.52x** | 9% |
-| 200K x 128 x 128, g=100K | 1.22x | 1.25x | ~0% |
-| 100K x 128 x 128, g=5K | 1.43x | **1.38x** | 5% |
+CuTe/2.x ratio progression across optimization phases (best tile per config):
 
-The A vectorization gives 3-11% speedup. The improvement is larger when A loading dominates (smaller K). The A load uses 128-bit `LDG.128` from gmem and 128-bit `STS.128` to smem, possible because K is contiguous in both gmem (within each gathered row) and smem (the `Swizzle<2,3,3>` layout preserves 8-element contiguity along K).
+| Config | Baseline | Ph1 (vec A) | Ph2 (vec B + LDSM_T) | Ph3 (cp.async B + pipeline) | Ph4 (cp.async A) |
+|--------|----------|-------------|----------------------|-----------------------------|-------------------|
+| 100K×32×32, g=50K | 1.07x | 1.00x | 1.00x | 0.94x | **0.93x** |
+| 100K×64×64, g=50K | 1.44x | 1.32x | 1.16x | 1.16x | **1.13x** |
+| 200K×128×128, g=100K | 1.22x | 1.25x | 1.08x | 1.06x | **0.93x** |
+| 100K×64×128, g=50K | 1.56x | 1.53x | 1.20x | 1.20x | **1.16x** |
+
+Key optimizations per phase:
+- **Phase 1**: 128-bit vectorized LDG.128+STS.128 for gathered A along K → 3-11%
+- **Phase 2**: N-contiguous smem B (`Swizzle<3,3,3>`), transposing LDSM_T, vectorized 128-bit B loads → 10-25%
+- **Phase 3**: `cp.async` for B (register bypass), 2-stage double-buffered pipelining → 2-7%
+- **Phase 4**: `cp.async` for gathered A (register bypass, truly async pipeline) → 3-12%
 
 ### BF16 vs FP16 (CuTe 3.x)
 
@@ -287,109 +327,82 @@ BF16 and FP16 have identical performance (same tensor core throughput on Ada).
 | Aspect | CUTLASS 2.x | CuTe 3.x (this impl) |
 |--------|-------------|----------------------|
 | **API** | `GemmUniversal` with `GatherA=true, ScatterD=true` | Manual kernel with raw pointer gather |
-| **Gmem load A** | Vectorized 128-bit `cp.async` with built-in gather | Vectorized 128-bit LDG+STS along K (gathered rows) |
-| **Gmem load B** | Vectorized 128-bit `cp.async` | Element-wise scalar loads (N→K transpose) |
-| **Smem pipeline** | Multi-stage (NumStages=5, overlaps gmem load with compute) | Single-stage (no overlap possible with scalar loads) |
-| **Smem-to-reg** | LDSM via CollectiveMma framework | LDSM via `make_tiled_copy_A/B` + `retile_D` |
-| **MMA compute** | `CollectiveMma` orchestrated pipeline | `cute::gemm(tiled_mma, ...)` per K block |
+| **Gmem load A** | Vectorized 128-bit `cp.async` with built-in gather | 128-bit `cp.async` with manual gather (index LDG + async data transfer) |
+| **Gmem load B** | Vectorized 128-bit `cp.async` | Vectorized 128-bit `cp.async` (N-contiguous) |
+| **Smem layout B** | K-contiguous (OperandA RowMajor) | N-contiguous (Swizzle<3,3,3>) + LDSM_T |
+| **Smem pipeline** | Multi-stage (NumStages=5) | 2-stage double-buffered |
+| **Smem-to-reg A** | LDSM_N via CollectiveMma | LDSM_N via `make_tiled_copy_A` + `retile_D` |
+| **Smem-to-reg B** | LDSM_N (K-contiguous smem) | LDSM_T (N-contiguous smem, transpose on load) |
 | **Thread count** | Varies by tile (128-512) | Fixed 128 for all tiles |
 | **Epilogue** | CUTLASS epilogue with scatter | Manual element-wise scatter |
-| **Tile configs** | Shared with implicit GEMM | Dedicated 8 specializations |
 | **Extensibility** | Locked to GemmUniversal API | Full kernel control for custom gather patterns |
 
-### Why Both Exist
+### Remaining Performance Gap
 
-CUTLASS 2.x is faster today because its `GemmUniversal` with `GatherA/ScatterD` uses the full CUTLASS pipeline (vectorized loads, multi-stage smem buffering, optimized epilogues). The CuTe 3.x kernel provides:
+CuTe 3.x now beats CUTLASS 2.x on large compute-heavy configs (0.93x at 200K×128×128) but is still 1.1-1.3x slower on medium configs. The remaining gap comes from:
 
-1. **Foundation for CuTe ComposedLayout integration**: When CuTe's `upcast` specialization for `ComposedLayout` is fixed upstream (or we contribute a fix), the kernel can switch from manual loads to vectorized `CollectiveMma` with gather expressed as a layout property — matching CUTLASS 2.x performance with simpler, more composable code.
+1. **Fewer pipeline stages**: CUTLASS 2.x uses 5 stages vs our 2. More stages better hide gmem latency but require proportionally more smem.
 
-2. **Platform for custom gather patterns**: The manual kernel structure makes it straightforward to implement non-standard gather/scatter patterns (e.g., TrAB gather, block-sparse gather, multi-head attention patterns) that don't fit the `GatherA/ScatterD` boolean template.
+2. **Thread count**: CUTLASS 2.x uses more threads for larger tiles (256-512), distributing load work more evenly.
 
-3. **Explicit control for future optimizations**: Direct access to the load/compute/store pipeline enables targeted optimizations (vectorized dense B loads, software pipelining, warp specialization) without working around framework constraints.
+3. **Gather index overhead**: Each cp.async for A requires a synchronous 4-byte LDG to resolve `gather_map[m_global]` before the async data transfer. This serial dependency limits the async benefit.
+
+---
+
+## Optimization History
+
+### Phase 1: Vectorized A Loads (DONE — commit `a24abaa4`)
+
+128-bit `LDG.128` + `STS.128` for gathered A along K. Works because K is contiguous in both gmem (within each gathered row) and smem (`Swizzle<2,3,3>` preserves 8-element contiguity along K).
+
+**Result**: 3-11% speedup, parity (1.00x) vs CUTLASS 2.x for small-K configs.
+
+### Phase 2: N-Contiguous B + LDSM_T + Vectorized B Loads (DONE — commit `8e06f09f`)
+
+Switched B smem from K-contiguous (`Swizzle<2,3,3>`) to N-contiguous (`Swizzle<3,3,3>`) to match gmem layout. Added `SM75_U16x8_LDSM_T` (transposing LDSM) for smem→register. Vectorized B loads with 128-bit LDG+STS along N.
+
+**Result**: 10-25% speedup, closing the gap from 1.3-1.5x to 1.06-1.20x.
+
+### Phase 3: cp.async for B + 2-Stage Pipelining (DONE — commit `92f6f986`)
+
+Replaced synchronous LDG+STS for B with `cp.async.ca.shared.global.L2::128B` (128-bit async gmem→smem bypassing registers). Added 2-stage double-buffering with 3D smem layouts `(M/N, K, NumStages)` to overlap next K-tile loads with current K-tile MMA compute.
+
+**Result**: 2-7% speedup on compute-heavy configs. 128×128 tile regresses due to doubled smem reducing occupancy.
+
+See `PHASE3_CPASYNC_PIPELINING_PLAN.md` for detailed implementation notes and synchronization correctness proofs.
+
+### Phase 4: cp.async for Gathered A (DONE — commit pending)
+
+Replaced synchronous LDG.128+STS.128 for gathered A with cp.async. Each thread resolves the gather index (synchronous 4-byte LDG for the int32 index), then issues `cp.async` for the K-contiguous data (async 128-bit gmem→smem, bypasses registers). This makes both A and B fully async, covered by the same `cp_async_fence`/`cp_async_wait` group.
+
+**Key insight**: CuTe's `ComposedLayout` via `make_gather_tensor` cannot be used with vectorized cp.async because `partition_S` / `tile2thrfrg` flattens the `ComposedLayout` to a plain `Layout`, breaking `upcast<N>`. Instead, we bypass CuTe's copy infrastructure entirely — compute gathered addresses manually and issue inline PTX `cp.async`.
+
+**Result**: 3-12% speedup. CuTe 3.x now **beats CUTLASS 2.x** on 200K×128×128 (0.93x with 128×64 tile).
 
 ---
 
 ## Future Work
 
-### Phase 1: Vectorized A Loads (DONE)
+### TrAB Gather
 
-**Status**: Implemented. The gathered A load uses 128-bit `LDG.128` from gmem and 128-bit `STS.128` to smem along the K dimension. This works because K is contiguous in both gmem (within each gathered row) and smem (the `Swizzle<2,3,3>` layout preserves 8-element contiguity along K).
+**Goal**: Implement `D = alpha * A[idx_a].T @ B[idx_b] + beta * C` for weight gradient backward pass.
 
-**Result**: 3-11% speedup for most configurations, with parity (1.00x) vs CUTLASS 2.x achieved for small-K configs.
+Both A and B are gathered, and A is transposed (contraction along the gathered M dimension). This is fundamentally harder because the contraction dimension has scattered memory access. Requires split-K parallelism for performance.
 
-**Key insight**: The `Swizzle<2,3,3>` XOR pattern modifies bits [3:5) via XOR with bits [6:8). Since 8-element K-groups only differ in bits [0:3), and the swizzle only affects bit 3+ while preserving within-group contiguity, vectorized 128-bit stores to swizzled smem are always safe and aligned.
+### Warp-Specialized Kernel
 
-### Phase 2: Vectorized Dense B Loads with Transposing LDSM
+**Goal**: Overlap gmem loads with MMA compute using producer/consumer warp specialization.
 
-**Goal**: Replace element-wise B loads with vectorized cp.async, closing the remaining 1.3-1.5x gap to CUTLASS 2.x.
+- **Producer warps** (1-2): Handle gmem→smem loads (gathered A + dense B)
+- **Consumer warps** (2-3): Handle smem→reg copies and MMA compute
 
-B is (K, N) row-major (N-contiguous in gmem), but smem stores sB(n, k) with K-contiguous layout. This layout mismatch prevents simple vectorized cp.async (which requires source and destination to be contiguous in the same dimension). A direct vectorized N-load to K-contiguous smem causes severe smem bank conflicts (16-32 way conflicts from threads writing to the same K column in different atom rows).
+Requires SM80+ warp-level `arrive`/`wait` barriers and careful smem partitioning.
 
-**Approach**: Change the B smem layout and copy atom to handle the transpose:
+### Autotune Tile Selection
 
-1. **SmemLayoutAtomB**: Switch to N-contiguous layout (`Stride<_1, _tN>`) with appropriate swizzle
-2. **SmemCopyAtomB**: Switch from `SM75_U32x4_LDSM_N` to `SM75_U16x8_LDSM_T` (transposing LDSM) for smem→register copy
-3. **GmemTiledCopyB**: Use `SM80_CP_ASYNC_CACHEALWAYS<uint128_t>` with N-vectorized loads
-4. **Multi-stage pipeline**: cp.async enables 2-3 stage buffering for B, overlapping B loads with compute
+**Goal**: Map `(gather_size, K, N)` to optimal tile config automatically.
 
-This matches the CUTLASS approach for RowMajor B in TN GEMMs (see `cooperative_gemm.cu::CooperativeGemm4` which uses `SM75_U16x8_LDSM_T` for operand B).
-
-**Blockers**: Requires careful validation of the LDSM_T copy with the new SmemLayout, and the A load (vectorized LDG) must remain compatible with single-stage semantics while B uses multi-stage.
-
-### Phase 3: ComposedLayout for Gathered A
-
-**Goal**: Match CUTLASS 2.x performance by enabling vectorized `cp.async` for gathered A.
-
-The gather can be expressed as a CuTe `ComposedLayout`:
-```cpp
-auto A_gathered = make_gather_tensor(
-    make_gmem_ptr(ptr_A), make_shape(M, K),
-    make_stride(K, 1),    // physical (M, K) row-major
-    in_map                 // gather indices
-);
-// A_gathered has ComposedLayout: outer gather * inner identity
-```
-
-The current blocker is that CuTe's `partition_S` / `tile2thrfrg` operations flatten `ComposedLayout` to a regular `Layout` with dynamic strides, which breaks the `upcast<N>` specialization needed by vectorized `cp.async` copy atoms.
-
-**Potential fixes**:
-1. **Upstream CUTLASS fix**: Modify `tile2thrfrg` to preserve `ComposedLayout` through partitioning
-2. **Custom copy atom**: Write a gather-aware copy atom that bypasses `upcast` by computing addresses directly from the gather indices
-3. **Pre-permuted smem load**: Use a thread-level gather + `cp.async` pattern where each thread computes its gathered source address, then issues `cp.async` for the K-contiguous portion of that row
-
-### Phase 4: TrAB Gather
-
-**Goal**: Implement `D = alpha * A[idx_a].T @ B[idx_b] + beta * C` for backward pass.
-
-TrAB (Transpose-A, B-gather) is needed for the weight gradient computation in sparse convolution. Both A and B are gathered, and A is transposed (contraction along the M dimension, not K).
-
-This is fundamentally harder than AD gather because:
-- The contraction dimension is the gathered row dimension
-- Vectorized loads along contraction require reading from scattered rows
-- Split-K parallelism is needed for performance (the contraction dimension can be large)
-
-**Approach**: Build on Phase 3's ComposedLayout infrastructure, or use a dedicated reduction kernel where each thread block accumulates partial results along the gathered contraction dimension, followed by a cross-block reduction.
-
-### Phase 5: Warp-Specialized Kernel
-
-**Goal**: Overlap gmem loads with smem-to-reg copies and compute using warp specialization.
-
-Instead of all warps participating in both load and compute:
-- **Producer warps** (1-2 warps): Handle gmem-to-smem loads (both gathered A and dense B)
-- **Consumer warps** (2-3 warps): Handle smem-to-reg copies and MMA compute
-
-This requires SM80+ warp-level synchronization (`arrive`/`wait` barriers) and careful smem partitioning, but can significantly improve throughput by overlapping the load and compute phases that currently run sequentially.
-
-### Phase 6: Autotune Tile Selection
-
-**Goal**: Automatically select the best tile configuration based on problem dimensions.
-
-Current benchmarks show:
-- `128x64x32` is fastest for most configurations
-- `64x64x32` is competitive for small problems
-- `128x128x32` is often slower due to register pressure with 128 threads
-
-Implement a heuristic or small autotune cache that maps `(gather_size, K, N)` to the optimal tile config, similar to the existing `sparse_conv_cutlass_autotune_cache.py`.
+Current best tiles: `64x64` for small problems and small K, `128x64` for most configs, `128x128` regresses due to smem pressure with 2-stage pipelining.
 
 ---
 
