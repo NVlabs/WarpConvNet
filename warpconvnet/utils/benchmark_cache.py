@@ -148,8 +148,8 @@ class SpatiallySparseConvConfig:
     def __hash__(self):
         return _int_sequence_hash(
             [
-                # self.log_num_in_coords,
-                # self.log_num_out_coords,
+                self.log_num_in_coords,
+                self.log_num_out_coords,
                 self.in_channels,
                 self.out_channels,
                 self.kernel_volume,
@@ -161,9 +161,9 @@ class SpatiallySparseConvConfig:
         if not isinstance(other, SpatiallySparseConvConfig):
             return False
         return (
-            # self.log_num_in_coords == other.log_num_in_coords
-            # and self.log_num_out_coords == other.log_num_out_coords and
-            self.in_channels == other.in_channels
+            self.log_num_in_coords == other.log_num_in_coords
+            and self.log_num_out_coords == other.log_num_out_coords
+            and self.in_channels == other.in_channels
             and self.out_channels == other.out_channels
             and self.kernel_volume == other.kernel_volume
             and self.in_dtype == other.in_dtype
@@ -201,30 +201,9 @@ class GenericBenchmarkCache(Generic[K, V]):
         self.cache_file = self.cache_dir / "benchmark_cache_generic.pkl"
         self.lock = threading.Lock()
 
-        # Only log essential cache initialization info
         current_rank = _get_current_rank()
-        if self.cache_file.exists():
-            total_entries = 0
-            try:
-                with open(self.cache_file, "rb") as f:
-                    cache_data = pickle.load(f)
-                    if isinstance(cache_data, dict) and "namespaces" in cache_data:
-                        namespaces = cache_data["namespaces"]
-                        total_entries = sum(len(ns_dict) for ns_dict in namespaces.values())
-                logger.info(
-                    f"[Rank {current_rank}] Loaded benchmark cache: {total_entries} entries from {self.cache_file}"
-                )
-            except Exception:
-                logger.info(
-                    f"[Rank {current_rank}] Found cache file but failed to read: {self.cache_file}"
-                )
-        else:
-            logger.info(
-                f"[Rank {current_rank}] No existing cache found, will create: {self.cache_file}"
-            )
 
         # In-memory accumulated results to be flushed by background saver
-        # Preload existing cache to reduce risk of overwriting cross-process writes
         self._results: Dict[str, Dict[K, V]] = {}
         # Optional namespace -> validator function(value) that raises on invalid
         self._validators: Dict[str, Callable[[V], None]] = {}
@@ -242,16 +221,21 @@ class GenericBenchmarkCache(Generic[K, V]):
         # Ensure cache directory exists
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Preload from disk
+        # Preload from disk (single load, also used for init logging)
         try:
             self._results = self.load_cache()
             total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
-            logger.debug(
-                f"[Rank {current_rank}] Loaded cache: {len(self._results)} namespaces, {total_entries} total entries"
+            logger.info(
+                f"[Rank {current_rank}] Loaded benchmark cache: "
+                f"{len(self._results)} namespaces, {total_entries} entries from {self.cache_file}"
             )
         except Exception as e:
-            logger.debug(f"[Rank {current_rank}] Failed to load cache: {e}")
+            logger.info(f"[Rank {current_rank}] Failed to load cache: {e}")
             self._results = {}
+        if not self._results and not self.cache_file.exists():
+            logger.info(
+                f"[Rank {current_rank}] No existing cache found, will create: {self.cache_file}"
+            )
 
         # Start background save thread only for rank 0
         if _is_rank_zero():
