@@ -75,7 +75,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32> {
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
 
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -99,7 +99,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile128x64x32> {
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
 
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -123,7 +123,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32> {
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
 
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -147,7 +147,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32> {
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
 
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -169,7 +169,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile64x64x32> {
   using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -187,7 +187,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x64x32> {
   using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -205,7 +205,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile64x128x32> {
   using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
@@ -223,7 +223,7 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x128x32> {
   using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
   using GmemTiledCopyB = void;
-  static constexpr int NumStages = 1;
+  static constexpr int NumStages = 2;
   static constexpr int AlignmentA = 4;
   static constexpr int AlignmentB = 4;
 };
