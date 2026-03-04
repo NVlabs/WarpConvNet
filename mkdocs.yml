@@ -51,6 +51,7 @@ nav:
       - Geometry Tutorial: user_guide/geometry_tutorial.md
       - Network Tutorial: user_guide/network_tutorial.md
       - Sparse Convolutions: user_guide/sparse_convolutions.md
+      - Adaptive GEMM Grouping: user_guide/adaptive_gemm_grouping.md
       - Inspect Benchmark Cache: user_guide/inspect_benchmark_cache.md
       - Point Convolutions: user_guide/point_convolutions.md
       - Normalizations: user_guide/normalizations.md

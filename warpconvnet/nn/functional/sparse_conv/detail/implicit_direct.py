@@ -14,6 +14,10 @@ from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.type_cast import _min_dtype
 from warpconvnet.utils.ntuple import _pad_tuple
 
+from warpconvnet.nn.functional.sparse_conv.detail.grouping import (
+    prepare_grouped_kernel_map,
+)
+
 
 def _implicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
@@ -148,6 +152,228 @@ def _implicit_gemm_backward_logic(
             split_k_factor=split_k_factor,
             block_size=split_k_threads_per_block,
         )
+
+    return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(dtype=weight.dtype)
+
+
+def _implicit_gemm_forward_grouped(
+    in_features: Float[Tensor, "N C_in"],
+    weight: Float[Tensor, "K C_in C_out"],
+    kernel_map: IntSearchResult,
+    num_out_coords: int,
+    compute_dtype: Optional[torch.dtype],
+    fwd_block_size: int,
+    grouping_threshold: float = 0.1,
+    saturation_m: int = 5000,
+) -> Float[Tensor, "M C_out"]:
+    """Forward pass using implicit GEMM with adaptive offset grouping.
+
+    Large offsets are processed individually. Small offsets are grouped into
+    buckets and processed with a single kernel launch per bucket using
+    concatenated maps and a weight index array.
+    """
+    device = in_features.device
+    feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
+    min_dtype = _min_dtype(feature_dtype, weight.dtype)
+
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
+
+    N_in, C_in = _in_features_detached.shape
+    K, _, C_out = _weight_detached.shape
+    iden_idx = kernel_map.identity_map_index
+
+    if iden_idx is not None:
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
+            dtype=min_dtype
+        )
+    else:
+        output_feature_tensor = torch.zeros(
+            (num_out_coords, C_out), dtype=min_dtype, device=device
+        )
+
+    if num_out_coords == 0 or K == 0 or C_in == 0 or C_out == 0 or N_in == 0:
+        return output_feature_tensor.to(dtype=in_features.dtype)
+
+    grouped = prepare_grouped_kernel_map(
+        kernel_map,
+        grouping_threshold=grouping_threshold,
+        saturation_m=saturation_m,
+    )
+
+    # Process large offsets individually
+    for k_idx in grouped.large_offset_indices:
+        in_map_k, out_map_k = kernel_map[k_idx]
+        if in_map_k.shape[0] == 0:
+            continue
+        _C.gemm.implicit_gemm(
+            _in_features_detached,
+            _weight_detached[k_idx],
+            output_feature_tensor,
+            in_map_k,
+            out_map_k,
+            "basic",
+            fwd_block_size,
+        )
+
+    # Process small offset buckets
+    has_grouped_kernel = hasattr(_C.gemm, "implicit_gemm_grouped")
+    for bucket_offsets, cat_in, cat_out, w_idx in zip(
+        grouped.buckets,
+        grouped.bucket_cat_in_maps,
+        grouped.bucket_cat_out_maps,
+        grouped.bucket_weight_indices,
+    ):
+        if cat_in.shape[0] == 0:
+            continue
+
+        if has_grouped_kernel:
+            # Use fused grouped kernel: single launch for entire bucket
+            bucket_weight = _weight_detached[bucket_offsets].contiguous()
+            _C.gemm.implicit_gemm_grouped(
+                _in_features_detached,
+                bucket_weight,
+                output_feature_tensor,
+                cat_in,
+                cat_out,
+                w_idx,
+                "basic",
+                fwd_block_size,
+            )
+        else:
+            # Fallback: per-offset launches (still benefits from grouping prep)
+            for k_idx in bucket_offsets:
+                in_map_k, out_map_k = kernel_map[k_idx]
+                if in_map_k.shape[0] == 0:
+                    continue
+                _C.gemm.implicit_gemm(
+                    _in_features_detached,
+                    _weight_detached[k_idx],
+                    output_feature_tensor,
+                    in_map_k,
+                    out_map_k,
+                    "basic",
+                    fwd_block_size,
+                )
+
+    return output_feature_tensor.to(dtype=in_features.dtype)
+
+
+def _implicit_gemm_backward_grouped(
+    grad_output: Float[Tensor, "M C_out"],
+    in_features: Float[Tensor, "N C_in"],
+    weight: Float[Tensor, "K C_in C_out"],
+    kernel_map: IntSearchResult,
+    num_out_coords: int,
+    gemm_block_size: int,
+    split_k_threads_per_block: int,
+    split_k_factor: int,
+    compute_dtype: Optional[torch.dtype],
+    grouping_threshold: float = 0.1,
+    saturation_m: int = 5000,
+) -> Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]]:
+    """Backward pass using implicit GEMM with adaptive offset grouping."""
+    feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
+    min_dtype = _min_dtype(feature_dtype, weight.dtype)
+    device = in_features.device
+
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
+    _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
+
+    N_in, C_in = _in_features_detached.shape
+    K, _, C_out = _weight_detached.shape
+    iden_idx = kernel_map.identity_map_index
+
+    grad_weight_tensor = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
+    if iden_idx is not None:
+        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
+        grad_weight_tensor[iden_idx] = torch.matmul(
+            _in_features_detached.T, _grad_output_detached
+        ).to(dtype=min_dtype)
+    else:
+        grad_in_features = torch.zeros((N_in, C_in), dtype=min_dtype, device=device)
+
+    if num_out_coords == 0 or K == 0 or C_in == 0 or C_out == 0 or N_in == 0:
+        return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(
+            dtype=weight.dtype
+        )
+
+    grouped = prepare_grouped_kernel_map(
+        kernel_map,
+        grouping_threshold=grouping_threshold,
+        saturation_m=saturation_m,
+    )
+
+    has_grouped_kernel = hasattr(_C.gemm, "implicit_gemm_grouped")
+
+    def _process_offset_backward(k_idx):
+        in_map_k, out_map_k = kernel_map[k_idx]
+        if in_map_k.shape[0] == 0:
+            return
+        _C.gemm.implicit_gemm(
+            _grad_output_detached,
+            _weight_detached[k_idx].T,
+            grad_in_features,
+            out_map_k,
+            in_map_k,
+            "basic",
+            gemm_block_size,
+        )
+        _C.gemm.split_k_implicit_gemm(
+            _in_features_detached,
+            _grad_output_detached,
+            grad_weight_tensor[k_idx],
+            in_map_k,
+            out_map_k,
+            split_k_factor=split_k_factor,
+            block_size=split_k_threads_per_block,
+        )
+
+    # Large offsets: individual
+    for k_idx in grouped.large_offset_indices:
+        _process_offset_backward(k_idx)
+
+    # Small offset buckets
+    for bucket_offsets, cat_in, cat_out, w_idx in zip(
+        grouped.buckets,
+        grouped.bucket_cat_in_maps,
+        grouped.bucket_cat_out_maps,
+        grouped.bucket_weight_indices,
+    ):
+        if cat_in.shape[0] == 0:
+            continue
+
+        if has_grouped_kernel:
+            # Grouped kernel for grad_in
+            bucket_weight_T = _weight_detached[bucket_offsets].transpose(-1, -2).contiguous()
+            _C.gemm.implicit_gemm_grouped(
+                _grad_output_detached,
+                bucket_weight_T,
+                grad_in_features,
+                cat_out,
+                cat_in,
+                w_idx,
+                "basic",
+                gemm_block_size,
+            )
+            # Weight gradient: per-offset split_k (no grouped variant)
+            for k_idx in bucket_offsets:
+                in_map_k, out_map_k = kernel_map[k_idx]
+                if in_map_k.shape[0] == 0:
+                    continue
+                _C.gemm.split_k_implicit_gemm(
+                    _in_features_detached,
+                    _grad_output_detached,
+                    grad_weight_tensor[k_idx],
+                    in_map_k,
+                    out_map_k,
+                    split_k_factor=split_k_factor,
+                    block_size=split_k_threads_per_block,
+                )
+        else:
+            for k_idx in bucket_offsets:
+                _process_offset_backward(k_idx)
 
     return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(dtype=weight.dtype)
 
