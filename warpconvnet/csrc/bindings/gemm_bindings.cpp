@@ -94,6 +94,24 @@ int run_cutlass_gemm_trAB_gather(const void *tensor_a,
                                  float alpha,
                                  float beta);
 }  // namespace gemm
+
+namespace cute_gemm {
+template <typename ElementInput, typename TileTag>
+int run_cute_gemm_ad_gather_scatter(const void *a,
+                                    const void *b,
+                                    const void *c,
+                                    void *d,
+                                    const int *idx_a,
+                                    const int *idx_d,
+                                    int M_A,
+                                    int K,
+                                    int N,
+                                    int M_C,
+                                    int idx_size,
+                                    float alpha,
+                                    float beta);
+}  // namespace cute_gemm
+
 }  // namespace warpconvnet
 
 namespace warpconvnet {
@@ -823,6 +841,116 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
   return status;
 }
 
+// ------------------- CuTe 3.x dispatch helpers -------------------
+
+template <torch::ScalarType SA>
+static int dispatch_cute_gemm_ad_gather_scatter(const torch::Tensor &tensor_a,
+                                                const torch::Tensor &tensor_b,
+                                                const torch::Tensor &tensor_c,
+                                                torch::Tensor &tensor_d,
+                                                const torch::Tensor &indices_a,
+                                                const torch::Tensor &indices_d,
+                                                int mma_tile,
+                                                int M_A,
+                                                int K,
+                                                int N,
+                                                int M_C,
+                                                int gather_ad_size,
+                                                float alpha,
+                                                float beta) {
+  using ElementInput = typename torch_to_cutlass<SA>::type;
+  auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
+  switch (tile) {
+    case warpconvnet::gemm::MMATile::Tile128x128x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
+          ElementInput, warpconvnet::gemm::Tile128x128x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
+          M_A, K, N, M_C, gather_ad_size, alpha, beta);
+    case warpconvnet::gemm::MMATile::Tile128x64x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
+          ElementInput, warpconvnet::gemm::Tile128x64x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
+          M_A, K, N, M_C, gather_ad_size, alpha, beta);
+    case warpconvnet::gemm::MMATile::Tile64x128x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
+          ElementInput, warpconvnet::gemm::Tile64x128x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
+          M_A, K, N, M_C, gather_ad_size, alpha, beta);
+    case warpconvnet::gemm::MMATile::Tile64x64x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
+          ElementInput, warpconvnet::gemm::Tile64x64x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
+          M_A, K, N, M_C, gather_ad_size, alpha, beta);
+    default:
+      TORCH_CHECK(false, "Unsupported mma_tile value");
+  }
+}
+
+// ------------------- CuTe GEMM Python-facing functions -------------------
+
+int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
+                                torch::Tensor tensor_b,
+                                torch::Tensor tensor_c,
+                                torch::Tensor tensor_d,
+                                torch::Tensor indices_a,
+                                torch::Tensor indices_d,
+                                int mma_tile,
+                                float alpha,
+                                float beta) {
+  // CuTe GEMM always uses FP32 accumulator and FP32 output
+  const auto params =
+      validate_ad_gather_scatter_args(tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d);
+  TORCH_CHECK(tensor_c.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 C tensor");
+  TORCH_CHECK(tensor_d.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 D tensor");
+
+  auto scalar_a = tensor_a.scalar_type();
+  int status = 0;
+  bool handled = false;
+
+  if (!handled && scalar_a == torch::kFloat16) {
+    handled = true;
+    status = dispatch_cute_gemm_ad_gather_scatter<torch::kFloat16>(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,
+        mma_tile, params.M_A, params.K, params.N, params.M_C, params.gather_ad_size, alpha, beta);
+  }
+#ifndef DISABLE_BFLOAT16
+  if (!handled && scalar_a == torch::kBFloat16) {
+    handled = true;
+    status = dispatch_cute_gemm_ad_gather_scatter<torch::kBFloat16>(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,
+        mma_tile, params.M_A, params.K, params.N, params.M_C, params.gather_ad_size, alpha, beta);
+  }
+#endif
+  if (!handled && scalar_a == torch::kFloat32) {
+    handled = true;
+    tensor_a = tensor_a.to(torch::kFloat16);
+    tensor_b = tensor_b.to(torch::kFloat16);
+    status = dispatch_cute_gemm_ad_gather_scatter<torch::kFloat16>(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,
+        mma_tile, params.M_A, params.K, params.N, params.M_C, params.gather_ad_size, alpha, beta);
+  }
+  TORCH_CHECK(handled, "CuTe GEMM: unsupported input dtype");
+  return status;
+}
+
+int cute_gemm_trAB_gather(torch::Tensor tensor_a,
+                           torch::Tensor tensor_b,
+                           torch::Tensor tensor_c,
+                           torch::Tensor tensor_d,
+                           torch::Tensor indices_a,
+                           torch::Tensor indices_b,
+                           int mma_tile,
+                           float alpha,
+                           float beta) {
+  // TODO: TrAB gather requires different GmemTiledCopy configuration
+  // that vectorizes along the non-gathered dimension. Deferred to Phase 11.
+  return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
+}
+
 void register_gemm(py::module_ &m) {
   py::module_ gemm = m.def_submodule(
       "gemm", "CUTLASS GEMM with gather/scatter operations supporting multiple precisions");
@@ -873,6 +1001,30 @@ void register_gemm(py::module_ &m) {
         return std::string(warpconvnet::gemm::GemmStatusToString(status));
       },
       py::arg("status"));
+
+  gemm.def("cute_gemm_AD_gather_scatter",
+           &cute_gemm_AD_gather_scatter,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_d"),
+           py::arg("mma_tile") = 0,
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 1.0f);
+
+  gemm.def("cute_gemm_trAB_gather",
+           &cute_gemm_trAB_gather,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_b"),
+           py::arg("mma_tile") = 0,
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 1.0f);
 
   gemm.def("implicit_gemm",
            &implicit_gemm_cuda,
