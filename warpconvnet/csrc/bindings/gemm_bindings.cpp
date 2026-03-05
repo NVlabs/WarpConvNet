@@ -972,6 +972,16 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
 
 // ------------------- CuTe 3.x dispatch helpers -------------------
 
+// Dispatch helper macro — expands one case of the tile switch for AD gather-scatter.
+#define CUTE_AD_GS_CASE(TILE_ENUM, TILE_TAG)                                  \
+  case warpconvnet::gemm::MMATile::TILE_ENUM:                                 \
+    return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<          \
+        ElementInput, warpconvnet::gemm::TILE_TAG, ElementOutput>(             \
+        tensor_a.data_ptr(), tensor_b.data_ptr(),                              \
+        tensor_c.data_ptr(), tensor_d.data_ptr(),                              \
+        indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),                  \
+        M_A, K, N, M_C, gather_ad_size, alpha, beta);
+
 template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_ad_gather_scatter(const torch::Tensor &tensor_a,
                                                 const torch::Tensor &tensor_b,
@@ -991,34 +1001,21 @@ static int dispatch_cute_gemm_ad_gather_scatter(const torch::Tensor &tensor_a,
   using ElementOutput = typename torch_to_cutlass<SC>::type;
   auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
   switch (tile) {
-    case warpconvnet::gemm::MMATile::Tile128x128x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile128x128x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
-          M_A, K, N, M_C, gather_ad_size, alpha, beta);
-    case warpconvnet::gemm::MMATile::Tile128x64x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile128x64x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
-          M_A, K, N, M_C, gather_ad_size, alpha, beta);
-    case warpconvnet::gemm::MMATile::Tile64x128x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile64x128x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
-          M_A, K, N, M_C, gather_ad_size, alpha, beta);
-    case warpconvnet::gemm::MMATile::Tile64x64x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile64x64x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
-          M_A, K, N, M_C, gather_ad_size, alpha, beta);
+    CUTE_AD_GS_CASE(Tile128x128x32, Tile128x128x32)
+    CUTE_AD_GS_CASE(Tile128x64x32,  Tile128x64x32)
+    CUTE_AD_GS_CASE(Tile64x128x32,  Tile64x128x32)
+    CUTE_AD_GS_CASE(Tile64x64x32,   Tile64x64x32)
+    CUTE_AD_GS_CASE(Tile64x64x64,   Tile64x64x64)
+    CUTE_AD_GS_CASE(Tile128x64x64,  Tile128x64x64)
+    CUTE_AD_GS_CASE(Tile64x128x64,  Tile64x128x64)
+    CUTE_AD_GS_CASE(Tile128x128x64, Tile128x128x64)
+    CUTE_AD_GS_CASE(Tile256x64x32,  Tile256x64x32)
+    CUTE_AD_GS_CASE(Tile64x256x32,  Tile64x256x32)
     default:
       TORCH_CHECK(false, "Unsupported mma_tile value");
   }
 }
+#undef CUTE_AD_GS_CASE
 
 // ------------------- CuTe GEMM Python-facing functions -------------------
 
@@ -1087,6 +1084,16 @@ int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
 }
 #undef DISPATCH_CUTE_AD_GS
 
+// Dispatch helper macro — expands one case of the tile switch for TrAB gather.
+#define CUTE_TRAB_CASE(TILE_ENUM, TILE_TAG)                                    \
+  case warpconvnet::gemm::MMATile::TILE_ENUM:                                 \
+    return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<                \
+        ElementInput, warpconvnet::gemm::TILE_TAG, ElementOutput>(             \
+        tensor_a.data_ptr(), tensor_b.data_ptr(),                              \
+        tensor_c.data_ptr(), tensor_d.data_ptr(),                              \
+        indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),                  \
+        M_A, K, K_B, N, gather_ab_size, alpha, beta);
+
 template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_trAB_gather(const torch::Tensor &tensor_a,
                                            const torch::Tensor &tensor_b,
@@ -1106,34 +1113,21 @@ static int dispatch_cute_gemm_trAB_gather(const torch::Tensor &tensor_a,
   using ElementOutput = typename torch_to_cutlass<SC>::type;
   auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
   switch (tile) {
-    case warpconvnet::gemm::MMATile::Tile128x128x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile128x128x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
-          M_A, K, K_B, N, gather_ab_size, alpha, beta);
-    case warpconvnet::gemm::MMATile::Tile128x64x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile128x64x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
-          M_A, K, K_B, N, gather_ab_size, alpha, beta);
-    case warpconvnet::gemm::MMATile::Tile64x128x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile64x128x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
-          M_A, K, K_B, N, gather_ab_size, alpha, beta);
-    case warpconvnet::gemm::MMATile::Tile64x64x32:
-      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile64x64x32, ElementOutput>(
-          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
-          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
-          M_A, K, K_B, N, gather_ab_size, alpha, beta);
+    CUTE_TRAB_CASE(Tile128x128x32, Tile128x128x32)
+    CUTE_TRAB_CASE(Tile128x64x32,  Tile128x64x32)
+    CUTE_TRAB_CASE(Tile64x128x32,  Tile64x128x32)
+    CUTE_TRAB_CASE(Tile64x64x32,   Tile64x64x32)
+    CUTE_TRAB_CASE(Tile64x64x64,   Tile64x64x64)
+    CUTE_TRAB_CASE(Tile128x64x64,  Tile128x64x64)
+    CUTE_TRAB_CASE(Tile64x128x64,  Tile64x128x64)
+    CUTE_TRAB_CASE(Tile128x128x64, Tile128x128x64)
+    CUTE_TRAB_CASE(Tile256x64x32,  Tile256x64x32)
+    CUTE_TRAB_CASE(Tile64x256x32,  Tile64x256x32)
     default:
       TORCH_CHECK(false, "Unsupported mma_tile value");
   }
 }
+#undef CUTE_TRAB_CASE
 
 // Macro to dispatch TrAB gather on (input dtype, output dtype) pair.
 #define DISPATCH_CUTE_TRAB(INPUT_SCALAR, OUTPUT_SCALAR)                        \

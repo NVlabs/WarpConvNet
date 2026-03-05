@@ -236,5 +236,71 @@ struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x128x32> {
   static constexpr bool UseCpAsyncGatherA = false;
 };
 
+// ============================================================================
+// Additional tile specializations — generated via macro since only TileShape
+// differs (all SM80 configs share the same MMA atom, smem layout, copy atoms).
+// ============================================================================
+
+#define DEFINE_CUTE_TILE_CONFIG_FP16(TileTag, M_DIM, N_DIM, K_DIM)           \
+  template <>                                                                 \
+  struct CuteTileConfig<cutlass::half_t, gemm::TileTag> {                    \
+    using ElementInput = cutlass::half_t;                                     \
+    using TileShape = Shape<Int<M_DIM>, Int<N_DIM>, Int<K_DIM>>;             \
+    using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,       \
+                               Layout<Shape<_2, _2, _1>>,                    \
+                               Tile<_32, _32, _16>>;                         \
+    using SmemLayoutAtomA = SmemLayoutAtomA_FP16;                             \
+    using SmemLayoutAtomB = SmemLayoutAtomB_FP16;                             \
+    using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;        \
+    using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;        \
+    using GmemTiledCopyA = void;                                              \
+    using GmemTiledCopyB = void;                                              \
+    static constexpr int NumStages = 2;                                       \
+    static constexpr int AlignmentA = 4;                                      \
+    static constexpr int AlignmentB = 4;                                      \
+    static constexpr bool UseCpAsyncGatherA = false;                          \
+  };
+
+#define DEFINE_CUTE_TILE_CONFIG_BF16(TileTag, M_DIM, N_DIM, K_DIM)           \
+  template <>                                                                 \
+  struct CuteTileConfig<cutlass::bfloat16_t, gemm::TileTag> {               \
+    using ElementInput = cutlass::bfloat16_t;                                 \
+    using TileShape = Shape<Int<M_DIM>, Int<N_DIM>, Int<K_DIM>>;             \
+    using TiledMma = TiledMMA<MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>,     \
+                               Layout<Shape<_2, _2, _1>>,                    \
+                               Tile<_32, _32, _16>>;                         \
+    using SmemLayoutAtomA = SmemLayoutAtomA_FP16;                             \
+    using SmemLayoutAtomB = SmemLayoutAtomB_FP16;                             \
+    using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementInput>;        \
+    using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementInput>;        \
+    using GmemTiledCopyA = void;                                              \
+    using GmemTiledCopyB = void;                                              \
+    static constexpr int NumStages = 2;                                       \
+    static constexpr int AlignmentA = 4;                                      \
+    static constexpr int AlignmentB = 4;                                      \
+    static constexpr bool UseCpAsyncGatherA = false;                          \
+  };
+
+// tK=64 tiles
+DEFINE_CUTE_TILE_CONFIG_FP16(Tile64x64x64,   64,  64, 64)
+DEFINE_CUTE_TILE_CONFIG_FP16(Tile128x64x64, 128,  64, 64)
+DEFINE_CUTE_TILE_CONFIG_FP16(Tile64x128x64,  64, 128, 64)
+DEFINE_CUTE_TILE_CONFIG_FP16(Tile128x128x64,128, 128, 64)
+
+DEFINE_CUTE_TILE_CONFIG_BF16(Tile64x64x64,   64,  64, 64)
+DEFINE_CUTE_TILE_CONFIG_BF16(Tile128x64x64, 128,  64, 64)
+DEFINE_CUTE_TILE_CONFIG_BF16(Tile64x128x64,  64, 128, 64)
+DEFINE_CUTE_TILE_CONFIG_BF16(Tile128x128x64,128, 128, 64)
+
+// Asymmetric M/N tiles (tK=32)
+DEFINE_CUTE_TILE_CONFIG_FP16(Tile256x64x32, 256,  64, 32)
+DEFINE_CUTE_TILE_CONFIG_FP16(Tile64x256x32,  64, 256, 32)
+
+DEFINE_CUTE_TILE_CONFIG_BF16(Tile256x64x32, 256,  64, 32)
+DEFINE_CUTE_TILE_CONFIG_BF16(Tile64x256x32,  64, 256, 32)
+
+#undef DEFINE_CUTE_TILE_CONFIG_FP16
+#undef DEFINE_CUTE_TILE_CONFIG_BF16
+
 }  // namespace cute_gemm
 }  // namespace warpconvnet

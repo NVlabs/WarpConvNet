@@ -231,8 +231,8 @@ def _key_cute_trAB_gather(
     return ("cute_gemm_trAB_gather", sm, dtype, out_dtype, K, N, log_len_a, log_len_b)
 
 
-_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS = [{"mma_tile": i} for i in range(4)]
-_BENCHMARK_CUTE_TRAB_GATHER_PARAMS = [{"mma_tile": i} for i in range(4)]
+_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS = [{"mma_tile": i} for i in range(10)]
+_BENCHMARK_CUTE_TRAB_GATHER_PARAMS = [{"mma_tile": i} for i in range(10)]
 
 if _HAS_CUTE_GEMM:
     cute_gemm_AD_gather_scatter_autotuned = make_autotuned_op(

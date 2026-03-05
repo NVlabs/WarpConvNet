@@ -55,70 +55,49 @@ int run_cute_gemm_trAB_gather(const void *a,
 // Explicit instantiations
 // ============================================================================
 
-// --- AD gather-scatter: (InputType × OutputType × 4 tiles) ---
+// Macro instantiates AD gather-scatter for one (InputType, OutputType, TileTag).
 #define INSTANTIATE_CUTE_AD_GS(ElemIn, ElemOut, TileTag)                       \
   template int run_cute_gemm_ad_gather_scatter<ElemIn, gemm::TileTag, ElemOut>(\
       const void *, const void *, const void *, void *,                        \
       const int *, const int *,                                                \
       int, int, int, int, int, float, float);
 
-// half_t input, float output (16-mixed)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile64x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile128x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile64x128x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile128x128x32)
-
-// half_t input, half_t output (16-true)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile64x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile128x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile64x128x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile128x128x32)
-
-// bfloat16_t input, float output (16-mixed)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile64x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile128x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile64x128x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile128x128x32)
-
-// bfloat16_t input, bfloat16_t output (16-true)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x128x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x128x32)
-
-#undef INSTANTIATE_CUTE_AD_GS
-
-// --- TrAB gather: (InputType × OutputType × 4 tiles) ---
+// Macro instantiates TrAB gather for one (InputType, OutputType, TileTag).
 #define INSTANTIATE_CUTE_TRAB(ElemIn, ElemOut, TileTag)                        \
   template int run_cute_gemm_trAB_gather<ElemIn, gemm::TileTag, ElemOut>(      \
       const void *, const void *, const void *, void *,                        \
       const int *, const int *,                                                \
       int, int, int, int, int, float, float);
 
-// half_t input, float output (16-mixed)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile64x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile128x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile64x128x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile128x128x32)
+// Instantiate both AD and TrAB for all 4 (input, output) dtype pairs for a given tile.
+#define INSTANTIATE_ALL_DTYPES(TileTag)                                        \
+  INSTANTIATE_CUTE_AD_GS(cutlass::half_t,      float,              TileTag)    \
+  INSTANTIATE_CUTE_AD_GS(cutlass::half_t,      cutlass::half_t,    TileTag)    \
+  INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t,  float,              TileTag)    \
+  INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t,  cutlass::bfloat16_t,TileTag)   \
+  INSTANTIATE_CUTE_TRAB(cutlass::half_t,        float,              TileTag)   \
+  INSTANTIATE_CUTE_TRAB(cutlass::half_t,        cutlass::half_t,    TileTag)   \
+  INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t,    float,              TileTag)   \
+  INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t,    cutlass::bfloat16_t,TileTag)
 
-// half_t input, half_t output (16-true)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile64x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile128x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile64x128x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile128x128x32)
+// --- tK=32 tiles (original) ---
+INSTANTIATE_ALL_DTYPES(Tile64x64x32)
+INSTANTIATE_ALL_DTYPES(Tile128x64x32)
+INSTANTIATE_ALL_DTYPES(Tile64x128x32)
+INSTANTIATE_ALL_DTYPES(Tile128x128x32)
 
-// bfloat16_t input, float output (16-mixed)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile64x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile128x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile64x128x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile128x128x32)
+// --- tK=64 tiles ---
+INSTANTIATE_ALL_DTYPES(Tile64x64x64)
+INSTANTIATE_ALL_DTYPES(Tile128x64x64)
+INSTANTIATE_ALL_DTYPES(Tile64x128x64)
+INSTANTIATE_ALL_DTYPES(Tile128x128x64)
 
-// bfloat16_t input, bfloat16_t output (16-true)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x128x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x128x32)
+// --- Asymmetric M/N tiles (tK=32) ---
+INSTANTIATE_ALL_DTYPES(Tile256x64x32)
+INSTANTIATE_ALL_DTYPES(Tile64x256x32)
 
+#undef INSTANTIATE_ALL_DTYPES
+#undef INSTANTIATE_CUTE_AD_GS
 #undef INSTANTIATE_CUTE_TRAB
 
 }  // namespace cute_gemm

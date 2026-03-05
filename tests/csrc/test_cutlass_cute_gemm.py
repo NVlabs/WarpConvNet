@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 # Test 1: AD Gather-Scatter Correctness
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tile", [0, 1, 2, 3])
+@pytest.mark.parametrize("tile", list(range(10)))
 def test_cute_gemm_ad_gather_scatter(dtype, tile):
     """D[out_map] = alpha * A[in_map] @ B + beta * C[out_map]"""
     M, K, N, idx_size = 4096, 128, 128, 2048
@@ -133,7 +133,7 @@ def test_cute_vs_2x_cross_validate(tile):
 # Test 4: TrAB Gather Correctness
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tile", [0, 1, 2, 3])
+@pytest.mark.parametrize("tile", list(range(10)))
 def test_cute_gemm_trAB_gather(dtype, tile):
     """D[k,n] = alpha * A[idx_a]^T @ B[idx_b] + beta * C[k,n]"""
     M_A, K, M_B, N, idx_size = 4096, 64, 4096, 128, 2048
