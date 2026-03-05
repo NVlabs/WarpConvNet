@@ -35,6 +35,20 @@ int run_implicit_gemm_templated(const void *tensor_a,
                                 int indices_size,
                                 const std::string &kernel_type,
                                 int block_size);
+template <typename ElementA, typename ElementB, typename ElementC, typename Itype>
+int run_implicit_gemm_grouped_templated(const void *tensor_a,
+                                        const void *tensor_b,
+                                        void *tensor_c,
+                                        const Itype *in_map,
+                                        const Itype *out_map,
+                                        const Itype *weight_idx,
+                                        int wA,
+                                        int hA,
+                                        int wB,
+                                        int hB,
+                                        int indices_size,
+                                        const std::string &kernel_type,
+                                        int block_size);
 }  // namespace implicit_gemm
 
 namespace split_k_implicit_gemm {
@@ -755,6 +769,106 @@ int implicit_gemm_cuda(torch::Tensor a,
   return status;
 }
 
+// Grouped implicit GEMM: multiple weight matrices per launch via weight_idx
+int implicit_gemm_grouped_cuda(torch::Tensor a,
+                               torch::Tensor b,
+                               torch::Tensor c,
+                               torch::Tensor in_map,
+                               torch::Tensor out_map,
+                               torch::Tensor weight_idx,
+                               const std::string &kernel_type,
+                               int block_size) {
+  TORCH_CHECK(a.dim() == 2 && c.dim() == 2, "a and c must be 2D");
+  TORCH_CHECK(b.dim() == 3, "b must be 3D (num_weights x hB x wB)");
+  TORCH_CHECK(in_map.dim() == 1 && out_map.dim() == 1 && weight_idx.dim() == 1,
+              "in_map, out_map, and weight_idx must be 1D");
+  TORCH_CHECK(in_map.scalar_type() == torch::kInt32 && out_map.scalar_type() == torch::kInt32 &&
+                  weight_idx.scalar_type() == torch::kInt32,
+              "in_map, out_map, and weight_idx must be int32");
+  TORCH_CHECK(a.scalar_type() == b.scalar_type() && a.scalar_type() == c.scalar_type(),
+              "a, b, and c must have the same type");
+
+  int hA = a.size(0);
+  int wA = a.size(1);
+  int hB = b.size(1);
+  int wB = b.size(2);
+  TORCH_CHECK(wA == hB,
+              "Matrix dimensions must be compatible. wA: " + std::to_string(wA) +
+                  ", hB: " + std::to_string(hB));
+  TORCH_CHECK(c.size(1) == wB, "c.size(1) must match wB");
+  TORCH_CHECK(a.is_cuda() && b.is_cuda() && c.is_cuda() && in_map.is_cuda() && out_map.is_cuda() &&
+                  weight_idx.is_cuda(),
+              "All tensors must be on GPU");
+
+  a = a.contiguous();
+  b = b.contiguous();
+  c = c.contiguous();
+  in_map = in_map.contiguous();
+  out_map = out_map.contiguous();
+  weight_idx = weight_idx.contiguous();
+
+  int indices_size = in_map.size(0);
+  TORCH_CHECK(indices_size == out_map.size(0) && indices_size == weight_idx.size(0),
+              "in_map, out_map, and weight_idx must have the same length");
+
+  int status = 0;
+  if (a.scalar_type() == torch::kFloat32) {
+    status =
+        ::warpconvnet::implicit_gemm::run_implicit_gemm_grouped_templated<float, float, float, int>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            in_map.data_ptr<int>(),
+            out_map.data_ptr<int>(),
+            weight_idx.data_ptr<int>(),
+            wA,
+            hA,
+            wB,
+            hB,
+            indices_size,
+            kernel_type,
+            block_size);
+  } else if (a.scalar_type() == torch::kFloat16) {
+    status = ::warpconvnet::implicit_gemm::
+        run_implicit_gemm_grouped_templated<__half, __half, __half, int>(a.data_ptr(),
+                                                                         b.data_ptr(),
+                                                                         c.data_ptr(),
+                                                                         in_map.data_ptr<int>(),
+                                                                         out_map.data_ptr<int>(),
+                                                                         weight_idx.data_ptr<int>(),
+                                                                         wA,
+                                                                         hA,
+                                                                         wB,
+                                                                         hB,
+                                                                         indices_size,
+                                                                         kernel_type,
+                                                                         block_size);
+  } else if (a.scalar_type() == torch::kBFloat16) {
+    status = ::warpconvnet::implicit_gemm::
+        run_implicit_gemm_grouped_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
+            a.data_ptr(),
+            b.data_ptr(),
+            c.data_ptr(),
+            in_map.data_ptr<int>(),
+            out_map.data_ptr<int>(),
+            weight_idx.data_ptr<int>(),
+            wA,
+            hA,
+            wB,
+            hB,
+            indices_size,
+            kernel_type,
+            block_size);
+  } else {
+    TORCH_CHECK(false, "Unsupported data type for grouped implicit GEMM");
+  }
+  if (status != 0) {
+    TORCH_CHECK(false,
+                "Grouped implicit GEMM kernel failed with status: " + std::to_string(status));
+  }
+  return status;
+}
+
 // Non cutlass split-K implicit GEMM
 int split_k_implicit_gemm_cuda(torch::Tensor a,
                                torch::Tensor b,
@@ -1036,6 +1150,17 @@ void register_gemm(py::module_ &m) {
            py::arg("kernel_type") = "basic",
            py::arg("block_size") = 16);
 
+  gemm.def("implicit_gemm_grouped",
+           &implicit_gemm_grouped_cuda,
+           py::arg("a"),
+           py::arg("b"),
+           py::arg("c"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("weight_idx"),
+           py::arg("kernel_type") = "basic",
+           py::arg("block_size") = 16);
+
   gemm.def("split_k_implicit_gemm",
            &split_k_implicit_gemm_cuda,
            py::arg("a"),
@@ -1045,7 +1170,6 @@ void register_gemm(py::module_ &m) {
            py::arg("indices_b"),
            py::arg("split_k_factor") = 4,
            py::arg("block_size") = 16);
-
 }
 
 }  // namespace bindings

@@ -20,6 +20,9 @@ Both implementations feature a **unified benchmarking system** that automaticall
 - `EXPLICIT_GEMM`: Traditional matrix multiplication approach
 - `IMPLICIT_GEMM`: Custom CUDA kernels with implicit GEMM operations
 - `CUTLASS_IMPLICIT_GEMM`: NVIDIA CUTLASS-based high-performance kernels
+- `EXPLICIT_GEMM_GROUPED`: Explicit GEMM with [adaptive offset grouping](./adaptive_gemm_grouping.md) (batched `torch.bmm`)
+- `IMPLICIT_GEMM_GROUPED`: Implicit GEMM with adaptive grouping (fused CUDA kernel, zero padding waste)
+- `CUTLASS_GROUPED_HYBRID`: CUTLASS for large offsets + batched GEMM for grouped small offsets
 - `AUTO`: Automatically benchmark and select the best algorithm
 
 #### Depthwise Sparse Convolution
@@ -135,6 +138,18 @@ export WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE=auto
 export WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE=auto
 ```
 
+### Auto-Tuning Log Verbosity
+
+```bash
+# Suppress auto-tuning logs (default: true)
+export WARPCONVNET_AUTOTUNE_LOG=false
+
+# Re-enable auto-tuning logs
+export WARPCONVNET_AUTOTUNE_LOG=true
+```
+
+Accepts `true`, `false`, `1`, or `0`. When set to `false` (or `0`), auto-tuning benchmark logs are suppressed. This is useful in production or when running many iterations where the tuning output becomes noisy.
+
 ## Benchmarking and Performance Optimization
 
 ### How Benchmarking Works
@@ -160,6 +175,13 @@ The system automatically optimizes parameters like:
 - `mma_tile`: 0, 1, 2, 3
 - `split_k_slices`: 1, 2, 4, 8
 - `accumulator_type`: float32
+
+**Grouped Variants** (`EXPLICIT_GEMM_GROUPED`, `IMPLICIT_GEMM_GROUPED`, `CUTLASS_GROUPED_HYBRID`):
+
+- `saturation_m`: 1000, 5000, 20000 (threshold for individual vs. grouped processing)
+- `grouping_threshold`: 0.1 (maximum padding waste fraction per bucket)
+
+See [Adaptive GEMM Grouping](./adaptive_gemm_grouping.md) for details.
 
 ### Performance Benefits
 

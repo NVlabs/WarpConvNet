@@ -18,6 +18,10 @@ from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.type_cast import _min_dtype
 from warpconvnet.utils.ntuple import _pad_tuple
 
+from warpconvnet.nn.functional.sparse_conv.detail.grouping import (
+    prepare_grouped_kernel_map,
+)
+
 
 def _cutlass_implicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
@@ -142,6 +146,212 @@ def _cutlass_implicit_gemm_backward_logic(
             )
             if status != 0:
                 return status, i
+
+    return (
+        grad_in_features.to(dtype=in_features.dtype),
+        grad_weight.to(dtype=weight.dtype),
+    )
+
+
+def _cutlass_implicit_gemm_forward_grouped(
+    in_features: Float[Tensor, "N C_in"],
+    weight: Float[Tensor, "K C_in C_out"],
+    kernel_map: IntSearchResult,
+    num_out_coords: int,
+    accumulator_type: torch.dtype = torch.float32,
+    grouping_threshold: float = 0.1,
+    saturation_m: int = 5000,
+) -> Union[Float[Tensor, "M C_out"], int]:
+    """Forward pass: CUTLASS for large offsets, torch.bmm for grouped small offsets."""
+    assert (
+        _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
+    ), "CUTLASS autotuned ops are not available."
+
+    device = in_features.device
+    iden_idx = kernel_map.identity_map_index
+    min_dtype = _min_dtype(in_features.dtype, weight.dtype)
+    if min_dtype == torch.float64:
+        min_dtype = torch.float32
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
+
+    if iden_idx is not None:
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
+    else:
+        output_feature_tensor = torch.zeros(
+            num_out_coords, weight.shape[-1], device=device, dtype=min_dtype
+        )
+
+    grouped = prepare_grouped_kernel_map(
+        kernel_map,
+        grouping_threshold=grouping_threshold,
+        saturation_m=saturation_m,
+    )
+
+    # Large offsets: CUTLASS with fused gather/scatter (existing path)
+    for k_idx in grouped.large_offset_indices:
+        in_map, out_map = kernel_map[k_idx]
+        if in_map.shape[0] == 0:
+            continue
+        in_map = in_map.to(device).int()
+        out_map = out_map.to(device).int()
+        status = cutlass_gemm_AD_gather_scatter_autotuned(
+            _in_features_detached,
+            _weight_detached[k_idx],
+            output_feature_tensor,
+            output_feature_tensor,
+            in_map,
+            out_map,
+            accumulator_type=accumulator_type,
+            alpha=1.0,
+            beta=1.0,
+        )
+        if status != 0:
+            return status
+
+    # Small offset buckets: vectorized gather + torch.bmm + vectorized scatter
+    C_in = weight.shape[1]
+    C_out = weight.shape[2]
+    for bucket_offsets, cat_in, cat_out, flat_idx, max_m in zip(
+        grouped.buckets,
+        grouped.bucket_cat_in_maps,
+        grouped.bucket_cat_out_maps,
+        grouped.bucket_gather_flat_idx,
+        grouped.bucket_max_m,
+    ):
+        B = len(bucket_offsets)
+
+        # Vectorized gather
+        gathered_flat = torch.zeros(B * max_m, C_in, device=device, dtype=min_dtype)
+        gathered_flat[flat_idx] = _in_features_detached[cat_in]
+        gathered = gathered_flat.view(B, max_m, C_in)
+
+        bucket_w = _weight_detached[bucket_offsets].contiguous()
+        result = torch.bmm(gathered, bucket_w)
+
+        # Vectorized scatter
+        result_flat = result.view(B * max_m, C_out)
+        output_feature_tensor.scatter_add_(
+            0,
+            cat_out.unsqueeze(1).expand(-1, C_out),
+            result_flat[flat_idx].to(dtype=output_feature_tensor.dtype),
+        )
+
+    return output_feature_tensor.to(dtype=in_features.dtype)
+
+
+def _cutlass_implicit_gemm_backward_grouped(
+    grad_output: Float[Tensor, "M C_out"],
+    in_features: Float[Tensor, "N C_in"],
+    weight: Float[Tensor, "K C_in C_out"],
+    kernel_map: IntSearchResult,
+    accumulator_type: torch.dtype = torch.float32,
+    requires_grad: Tuple[bool, bool] = (True, True),
+    device: torch.device = None,
+    grouping_threshold: float = 0.1,
+    saturation_m: int = 5000,
+) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
+    """Backward: CUTLASS for large offsets, torch.bmm for grouped small offsets."""
+    assert (
+        _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
+    ), "CUTLASS autotuned ops are not available."
+
+    if device is None:
+        device = in_features.device
+
+    min_dtype = _min_dtype(in_features.dtype, weight.dtype, grad_output.dtype)
+    if min_dtype == torch.float64:
+        min_dtype = torch.float32
+    _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
+    _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
+    _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
+    grad_weight = torch.zeros_like(weight, device=device)
+    C_in = weight.shape[1]
+    C_out = weight.shape[2]
+
+    iden_idx = kernel_map.identity_map_index
+    if iden_idx is not None:
+        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
+        grad_weight[iden_idx] = torch.matmul(_in_features_detached.T, _grad_output_detached)
+    else:
+        grad_in_features = torch.zeros_like(_in_features_detached, device=device)
+
+    grouped = prepare_grouped_kernel_map(
+        kernel_map,
+        grouping_threshold=grouping_threshold,
+        saturation_m=saturation_m,
+    )
+
+    # Large offsets: CUTLASS
+    for k_idx in grouped.large_offset_indices:
+        in_map, out_map = kernel_map[k_idx]
+        if in_map.shape[0] == 0:
+            continue
+        in_map = in_map.to(device).int()
+        out_map = out_map.to(device).int()
+
+        if requires_grad[0]:
+            status = cutlass_gemm_AD_gather_scatter_autotuned(
+                _grad_output_detached,
+                _weight_detached[k_idx].T.contiguous(),
+                grad_in_features,
+                grad_in_features,
+                out_map,
+                in_map,
+                accumulator_type=accumulator_type,
+                alpha=1.0,
+                beta=1.0,
+            )
+            if status != 0:
+                return status, k_idx
+
+        if requires_grad[1]:
+            status = cutlass_gemm_trAB_gather_autotuned(
+                _in_features_detached,
+                _grad_output_detached,
+                grad_weight[k_idx],
+                grad_weight[k_idx],
+                in_map,
+                out_map,
+                alpha=1.0,
+                beta=0.0,
+                accumulator_type=accumulator_type,
+            )
+            if status != 0:
+                return status, k_idx
+
+    # Small offset buckets: vectorized gather + bmm + vectorized scatter
+    for bucket_offsets, cat_in, cat_out, flat_idx, max_m in zip(
+        grouped.buckets,
+        grouped.bucket_cat_in_maps,
+        grouped.bucket_cat_out_maps,
+        grouped.bucket_gather_flat_idx,
+        grouped.bucket_max_m,
+    ):
+        B = len(bucket_offsets)
+
+        # Vectorized gather of grad_output and in_features
+        gathered_grad_flat = torch.zeros(B * max_m, C_out, device=device, dtype=min_dtype)
+        gathered_in_flat = torch.zeros(B * max_m, C_in, device=device, dtype=min_dtype)
+        gathered_grad_flat[flat_idx] = _grad_output_detached[cat_out]
+        gathered_in_flat[flat_idx] = _in_features_detached[cat_in]
+
+        gathered_grad = gathered_grad_flat.view(B, max_m, C_out)
+        gathered_in = gathered_in_flat.view(B, max_m, C_in)
+
+        if requires_grad[0]:
+            bucket_w_T = _weight_detached[bucket_offsets].transpose(-1, -2).contiguous()
+            grad_in_result = torch.bmm(gathered_grad, bucket_w_T)
+            grad_in_result_flat = grad_in_result.view(B * max_m, C_in)
+            grad_in_features.scatter_add_(
+                0,
+                cat_in.unsqueeze(1).expand(-1, C_in),
+                grad_in_result_flat[flat_idx].to(dtype=grad_in_features.dtype),
+            )
+
+        if requires_grad[1]:
+            grad_w_result = torch.bmm(gathered_in.transpose(1, 2), gathered_grad)
+            grad_weight[bucket_offsets] = grad_w_result.to(dtype=grad_weight.dtype)
 
     return (
         grad_in_features.to(dtype=in_features.dtype),

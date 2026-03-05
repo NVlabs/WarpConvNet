@@ -141,13 +141,17 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
     "WARPCONVNET_BENCHMARK_CACHE_DIR", "~/.cache/warpconvnet"
 )
 
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 4.0
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 5.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory
 WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE = os.environ.get(
     "WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE"
 )
+
+# Control auto-tuning log verbosity.
+# Set WARPCONVNET_AUTOTUNE_LOG=false (or 0) to suppress auto-tuning logs.
+WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
 
 # --- Types ---
 
