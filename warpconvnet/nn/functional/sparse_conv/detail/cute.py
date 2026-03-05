@@ -39,14 +39,18 @@ def _cute_implicit_gemm_forward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
-    # CuTe always uses FP32 accumulator/output
+    # C/D output dtype: use min_dtype for 16-true, float32 for 16-mixed.
+    # We match the output dtype to the compute dtype (min_dtype) so that
+    # the kernel writes directly in the desired precision without extra casts.
+    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+
     if iden_idx is not None:
         output_feature_tensor = torch.matmul(
-            _in_features_detached.float(), _weight_detached[iden_idx].float()
-        )
+            _in_features_detached, _weight_detached[iden_idx]
+        ).to(dtype=out_dtype)
     else:
         output_feature_tensor = torch.zeros(
-            num_out_coords, weight.shape[-1], device=device, dtype=torch.float32
+            num_out_coords, weight.shape[-1], device=device, dtype=out_dtype
         )
 
     for i in range(len(kernel_map)):
@@ -70,7 +74,7 @@ def _cute_implicit_gemm_forward_logic(
         )
         if status != 0:
             return status
-    return output_feature_tensor.to(dtype=in_features.dtype)
+    return output_feature_tensor
 
 
 def _cute_implicit_gemm_backward_logic(
@@ -95,23 +99,25 @@ def _cute_implicit_gemm_backward_logic(
     _grad_output_detached = grad_output.contiguous().detach().to(dtype=min_dtype)
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
-    grad_weight = torch.zeros_like(weight, device=device)
+
+    # Output dtype: match compute precision for 16-true, float32 for 16-mixed
+    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
         grad_in_features = torch.matmul(
-            _grad_output_detached.float(), _weight_detached[iden_idx].float().T
-        )
+            _grad_output_detached, _weight_detached[iden_idx].T
+        ).to(dtype=out_dtype)
         grad_weight[iden_idx] = torch.matmul(
-            _in_features_detached.float().T, _grad_output_detached.float()
-        )
+            _in_features_detached.T, _grad_output_detached
+        ).to(dtype=out_dtype)
     else:
-        # CuTe uses FP32 accumulation
         grad_in_features = torch.zeros(
             _in_features_detached.shape[0],
             _in_features_detached.shape[1],
             device=device,
-            dtype=torch.float32,
+            dtype=out_dtype,
         )
 
     for i in range(len(kernel_map)):
@@ -155,13 +161,13 @@ def _cute_implicit_gemm_backward_logic(
             else:
                 # Fallback: torch.matmul when CuTe TrAB is not available
                 grad_weight[i] = torch.matmul(
-                    _in_features_detached[in_map].float().T,
-                    _grad_output_detached[out_map].float(),
-                )
+                    _in_features_detached[in_map].T,
+                    _grad_output_detached[out_map],
+                ).to(dtype=out_dtype)
 
     return (
-        grad_in_features.to(dtype=in_features.dtype),
-        grad_weight.to(dtype=weight.dtype),
+        grad_in_features,
+        grad_weight,
     )
 
 

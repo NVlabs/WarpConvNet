@@ -44,6 +44,31 @@ def test_cute_gemm_ad_gather_scatter(dtype, tile):
 
 
 # ---------------------------------------------------------------------------
+# Test 1b: AD Gather-Scatter with fp16/bf16 output (16-true mode)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tile", [0, 3])
+def test_cute_gemm_ad_gather_scatter_fp16_output(dtype, tile):
+    """D[out_map] = alpha * A[in_map] @ B with C/D in fp16/bf16."""
+    M, K, N, idx_size = 4096, 128, 128, 2048
+    A = torch.randn(M, K, dtype=dtype, device="cuda") * 0.1
+    B = torch.randn(K, N, dtype=dtype, device="cuda") * 0.1
+    idx_a = torch.randperm(M, device="cuda")[:idx_size].int()
+    idx_d = torch.randperm(M, device="cuda")[:idx_size].int()
+    D = torch.zeros(M, N, dtype=dtype, device="cuda")
+
+    status = _C.gemm.cute_gemm_AD_gather_scatter(
+        A, B, D, D, idx_a, idx_d, mma_tile=tile, alpha=1.0, beta=0.0
+    )
+    assert status == 0, f"Kernel returned status {status}"
+
+    # Reference in float32
+    D_ref = torch.zeros(M, N, dtype=torch.float32, device="cuda")
+    D_ref[idx_d] = A[idx_a].float() @ B.float()
+    torch.testing.assert_close(D.float(), D_ref, atol=1e-1, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
 # Test 2: AD Gather-Scatter with beta accumulation
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("dtype", [torch.float16])
@@ -153,6 +178,29 @@ def test_cute_gemm_trAB_gather_beta(dtype, tile):
 
     D_ref = alpha * (A[idx_a].float().T @ B[idx_b].float()) + beta * C
     torch.testing.assert_close(D, D_ref, atol=1e-1, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Test 4c: TrAB Gather with fp16/bf16 output (16-true mode)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tile", [0, 3])
+def test_cute_gemm_trAB_gather_fp16_output(dtype, tile):
+    """D[k,n] = alpha * A[idx_a]^T @ B[idx_b] with C/D in fp16/bf16."""
+    M_A, K, M_B, N, idx_size = 4096, 64, 4096, 128, 2048
+    A = torch.randn(M_A, K, dtype=dtype, device="cuda") * 0.1
+    B = torch.randn(M_B, N, dtype=dtype, device="cuda") * 0.1
+    idx_a = torch.randperm(M_A, device="cuda")[:idx_size].int()
+    idx_b = torch.randperm(M_B, device="cuda")[:idx_size].int()
+    D = torch.zeros(K, N, dtype=dtype, device="cuda")
+
+    status = _C.gemm.cute_gemm_trAB_gather(
+        A, B, D, D, idx_a, idx_b, mma_tile=tile, alpha=1.0, beta=0.0
+    )
+    assert status == 0, f"Kernel returned status {status}"
+
+    D_ref = A[idx_a].float().T @ B[idx_b].float()
+    torch.testing.assert_close(D.float(), D_ref, atol=1e-1, rtol=1e-2)
 
 
 # ---------------------------------------------------------------------------

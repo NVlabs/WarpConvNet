@@ -22,7 +22,7 @@ namespace cute_gemm {
 /// B is (K, N) row-major, dense
 /// C is (M_C, N) row-major, gathered by out_map
 /// D is (M_C, N) row-major, scattered by out_map
-template <typename ElementInput, typename TileConfig>
+template <typename ElementInput, typename TileConfig, typename ElementOutput = float>
 int launch_cute_gemm_ad_gather_scatter(const void *ptr_A,
                                        const void *ptr_B,
                                        const void *ptr_C,
@@ -37,7 +37,7 @@ int launch_cute_gemm_ad_gather_scatter(const void *ptr_A,
                                        float alpha,
                                        float beta,
                                        cudaStream_t stream = 0) {
-  using Kernel = CuteGemmKernel<TileConfig>;
+  using Kernel = CuteGemmKernel<TileConfig, ElementOutput>;
   constexpr int TileM = cute::size<0>(typename TileConfig::TileShape{});
   constexpr int TileN = cute::size<1>(typename TileConfig::TileShape{});
 
@@ -58,8 +58,8 @@ int launch_cute_gemm_ad_gather_scatter(const void *ptr_A,
       <<<grid, Kernel::MaxThreadsPerBlock, smem_size, stream>>>(
           reinterpret_cast<const ElementInput *>(ptr_A),
           reinterpret_cast<const ElementInput *>(ptr_B),
-          reinterpret_cast<const float *>(ptr_C),
-          reinterpret_cast<float *>(ptr_D),
+          reinterpret_cast<const ElementOutput *>(ptr_C),
+          reinterpret_cast<ElementOutput *>(ptr_D),
           in_map, out_map,
           gather_size, N, K, alpha, beta);
 
@@ -75,7 +75,7 @@ int launch_cute_gemm_ad_gather_scatter(const void *ptr_A,
 /// A is (M_A, K) row-major, gathered by indices_a
 /// B is (M_B, N) row-major, gathered by indices_b
 /// D is (K, N) dense output
-template <typename ElementInput, typename TileConfig>
+template <typename ElementInput, typename TileConfig, typename ElementOutput = float>
 int launch_cute_gemm_trAB_gather(const void *ptr_A,
                                  const void *ptr_B,
                                  const void *ptr_C,
@@ -90,7 +90,7 @@ int launch_cute_gemm_trAB_gather(const void *ptr_A,
                                  float alpha,
                                  float beta,
                                  cudaStream_t stream = 0) {
-  using Kernel = CuteGemmTrABKernel<TileConfig>;
+  using Kernel = CuteGemmTrABKernel<TileConfig, ElementOutput>;
   constexpr int TileM = cute::size<0>(typename TileConfig::TileShape{});  // tiles K
   constexpr int TileN = cute::size<1>(typename TileConfig::TileShape{});  // tiles N
 
@@ -110,8 +110,8 @@ int launch_cute_gemm_trAB_gather(const void *ptr_A,
       <<<grid, Kernel::MaxThreadsPerBlock, smem_size, stream>>>(
           reinterpret_cast<const ElementInput *>(ptr_A),
           reinterpret_cast<const ElementInput *>(ptr_B),
-          reinterpret_cast<const float *>(ptr_C),
-          reinterpret_cast<float *>(ptr_D),
+          reinterpret_cast<const ElementOutput *>(ptr_C),
+          reinterpret_cast<ElementOutput *>(ptr_D),
           indices_a, indices_b,
           K, N, gather_size, alpha, beta);
 

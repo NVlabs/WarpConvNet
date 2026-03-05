@@ -110,7 +110,7 @@ int run_cutlass_gemm_trAB_gather(const void *tensor_a,
 }  // namespace gemm
 
 namespace cute_gemm {
-template <typename ElementInput, typename TileTag>
+template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_ad_gather_scatter(const void *a,
                                     const void *b,
                                     const void *c,
@@ -125,7 +125,7 @@ int run_cute_gemm_ad_gather_scatter(const void *a,
                                     float alpha,
                                     float beta);
 
-template <typename ElementInput, typename TileTag>
+template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_trAB_gather(const void *a,
                                const void *b,
                                const void *c,
@@ -972,7 +972,7 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
 
 // ------------------- CuTe 3.x dispatch helpers -------------------
 
-template <torch::ScalarType SA>
+template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_ad_gather_scatter(const torch::Tensor &tensor_a,
                                                 const torch::Tensor &tensor_b,
                                                 const torch::Tensor &tensor_c,
@@ -988,29 +988,30 @@ static int dispatch_cute_gemm_ad_gather_scatter(const torch::Tensor &tensor_a,
                                                 float alpha,
                                                 float beta) {
   using ElementInput = typename torch_to_cutlass<SA>::type;
+  using ElementOutput = typename torch_to_cutlass<SC>::type;
   auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
   switch (tile) {
     case warpconvnet::gemm::MMATile::Tile128x128x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile128x128x32>(
+          ElementInput, warpconvnet::gemm::Tile128x128x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
           M_A, K, N, M_C, gather_ad_size, alpha, beta);
     case warpconvnet::gemm::MMATile::Tile128x64x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile128x64x32>(
+          ElementInput, warpconvnet::gemm::Tile128x64x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
           M_A, K, N, M_C, gather_ad_size, alpha, beta);
     case warpconvnet::gemm::MMATile::Tile64x128x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile64x128x32>(
+          ElementInput, warpconvnet::gemm::Tile64x128x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
           M_A, K, N, M_C, gather_ad_size, alpha, beta);
     case warpconvnet::gemm::MMATile::Tile64x64x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_ad_gather_scatter<
-          ElementInput, warpconvnet::gemm::Tile64x64x32>(
+          ElementInput, warpconvnet::gemm::Tile64x64x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_d.data_ptr<int>(),
           M_A, K, N, M_C, gather_ad_size, alpha, beta);
@@ -1021,6 +1022,14 @@ static int dispatch_cute_gemm_ad_gather_scatter(const torch::Tensor &tensor_a,
 
 // ------------------- CuTe GEMM Python-facing functions -------------------
 
+// Macro to dispatch AD gather-scatter on (input dtype, output dtype) pair.
+// Supported output dtypes: float32, float16, bfloat16 (matching input type).
+#define DISPATCH_CUTE_AD_GS(INPUT_SCALAR, OUTPUT_SCALAR)                       \
+  status = dispatch_cute_gemm_ad_gather_scatter<INPUT_SCALAR, OUTPUT_SCALAR>(  \
+      tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,            \
+      mma_tile, params.M_A, params.K, params.N, params.M_C,                   \
+      params.gather_ad_size, alpha, beta);
+
 int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
                                 torch::Tensor tensor_b,
                                 torch::Tensor tensor_c,
@@ -1030,11 +1039,10 @@ int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
                                 int mma_tile,
                                 float alpha,
                                 float beta) {
-  // CuTe GEMM always uses FP32 accumulator and FP32 output
   const auto params =
       validate_ad_gather_scatter_args(tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d);
-  TORCH_CHECK(tensor_c.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 C tensor");
-  TORCH_CHECK(tensor_d.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 D tensor");
+  TORCH_CHECK(tensor_c.scalar_type() == tensor_d.scalar_type(),
+              "CuTe GEMM: C and D must have the same dtype");
 
   // CuTe kernel requires 128-bit aligned K and N (8 elements for fp16/bf16)
   int elem_size = (tensor_a.scalar_type() == torch::kFloat32) ? 2 : tensor_a.element_size();
@@ -1044,36 +1052,42 @@ int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
   }
 
   auto scalar_a = tensor_a.scalar_type();
+  auto scalar_c = tensor_c.scalar_type();
+  // Downcast float32 inputs to float16 for compute
+  if (scalar_a == torch::kFloat32) {
+    tensor_a = tensor_a.to(torch::kFloat16);
+    tensor_b = tensor_b.to(torch::kFloat16);
+    scalar_a = torch::kFloat16;
+  }
+
   int status = 0;
   bool handled = false;
 
-  if (!handled && scalar_a == torch::kFloat16) {
+  // Dispatch on (input dtype, output dtype) — 6 combinations
+  if (scalar_a == torch::kFloat16 && scalar_c == torch::kFloat32) {
     handled = true;
-    status = dispatch_cute_gemm_ad_gather_scatter<torch::kFloat16>(
-        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,
-        mma_tile, params.M_A, params.K, params.N, params.M_C, params.gather_ad_size, alpha, beta);
+    DISPATCH_CUTE_AD_GS(torch::kFloat16, torch::kFloat32);
+  } else if (scalar_a == torch::kFloat16 && scalar_c == torch::kFloat16) {
+    handled = true;
+    DISPATCH_CUTE_AD_GS(torch::kFloat16, torch::kFloat16);
   }
 #ifndef DISABLE_BFLOAT16
-  if (!handled && scalar_a == torch::kBFloat16) {
+  else if (scalar_a == torch::kBFloat16 && scalar_c == torch::kFloat32) {
     handled = true;
-    status = dispatch_cute_gemm_ad_gather_scatter<torch::kBFloat16>(
-        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,
-        mma_tile, params.M_A, params.K, params.N, params.M_C, params.gather_ad_size, alpha, beta);
+    DISPATCH_CUTE_AD_GS(torch::kBFloat16, torch::kFloat32);
+  } else if (scalar_a == torch::kBFloat16 && scalar_c == torch::kBFloat16) {
+    handled = true;
+    DISPATCH_CUTE_AD_GS(torch::kBFloat16, torch::kBFloat16);
   }
 #endif
-  if (!handled && scalar_a == torch::kFloat32) {
-    handled = true;
-    tensor_a = tensor_a.to(torch::kFloat16);
-    tensor_b = tensor_b.to(torch::kFloat16);
-    status = dispatch_cute_gemm_ad_gather_scatter<torch::kFloat16>(
-        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d,
-        mma_tile, params.M_A, params.K, params.N, params.M_C, params.gather_ad_size, alpha, beta);
-  }
-  TORCH_CHECK(handled, "CuTe GEMM: unsupported input dtype");
+  // float16 input, bfloat16 output (or vice versa) is not supported
+  TORCH_CHECK(handled, "CuTe GEMM: unsupported input/output dtype combination (",
+              tensor_a.scalar_type(), " input, ", tensor_c.scalar_type(), " output)");
   return status;
 }
+#undef DISPATCH_CUTE_AD_GS
 
-template <torch::ScalarType SA>
+template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_trAB_gather(const torch::Tensor &tensor_a,
                                            const torch::Tensor &tensor_b,
                                            const torch::Tensor &tensor_c,
@@ -1089,29 +1103,30 @@ static int dispatch_cute_gemm_trAB_gather(const torch::Tensor &tensor_a,
                                            float alpha,
                                            float beta) {
   using ElementInput = typename torch_to_cutlass<SA>::type;
+  using ElementOutput = typename torch_to_cutlass<SC>::type;
   auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
   switch (tile) {
     case warpconvnet::gemm::MMATile::Tile128x128x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile128x128x32>(
+          ElementInput, warpconvnet::gemm::Tile128x128x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
           M_A, K, K_B, N, gather_ab_size, alpha, beta);
     case warpconvnet::gemm::MMATile::Tile128x64x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile128x64x32>(
+          ElementInput, warpconvnet::gemm::Tile128x64x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
           M_A, K, K_B, N, gather_ab_size, alpha, beta);
     case warpconvnet::gemm::MMATile::Tile64x128x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile64x128x32>(
+          ElementInput, warpconvnet::gemm::Tile64x128x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
           M_A, K, K_B, N, gather_ab_size, alpha, beta);
     case warpconvnet::gemm::MMATile::Tile64x64x32:
       return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
-          ElementInput, warpconvnet::gemm::Tile64x64x32>(
+          ElementInput, warpconvnet::gemm::Tile64x64x32, ElementOutput>(
           tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
           indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
           M_A, K, K_B, N, gather_ab_size, alpha, beta);
@@ -1119,6 +1134,13 @@ static int dispatch_cute_gemm_trAB_gather(const torch::Tensor &tensor_a,
       TORCH_CHECK(false, "Unsupported mma_tile value");
   }
 }
+
+// Macro to dispatch TrAB gather on (input dtype, output dtype) pair.
+#define DISPATCH_CUTE_TRAB(INPUT_SCALAR, OUTPUT_SCALAR)                        \
+  status = dispatch_cute_gemm_trAB_gather<INPUT_SCALAR, OUTPUT_SCALAR>(        \
+      tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,            \
+      mma_tile, params.M_A, params.K, params.K_B, params.N,                   \
+      params.gather_ab_size, alpha, beta);
 
 int cute_gemm_trAB_gather(torch::Tensor tensor_a,
                            torch::Tensor tensor_b,
@@ -1131,8 +1153,8 @@ int cute_gemm_trAB_gather(torch::Tensor tensor_a,
                            float beta) {
   const auto params =
       validate_trAB_gather_args(tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b);
-  TORCH_CHECK(tensor_c.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 C tensor");
-  TORCH_CHECK(tensor_d.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 D tensor");
+  TORCH_CHECK(tensor_c.scalar_type() == tensor_d.scalar_type(),
+              "CuTe GEMM TrAB: C and D must have the same dtype");
 
   // CuTe TrAB kernel requires 128-bit aligned K and N (8 elements for fp16/bf16)
   int elem_size_trAB = (tensor_a.scalar_type() == torch::kFloat32) ? 2 : tensor_a.element_size();
@@ -1142,34 +1164,38 @@ int cute_gemm_trAB_gather(torch::Tensor tensor_a,
   }
 
   auto scalar_a = tensor_a.scalar_type();
+  auto scalar_c = tensor_c.scalar_type();
+  // Downcast float32 inputs to float16 for compute
+  if (scalar_a == torch::kFloat32) {
+    tensor_a = tensor_a.to(torch::kFloat16);
+    tensor_b = tensor_b.to(torch::kFloat16);
+    scalar_a = torch::kFloat16;
+  }
+
   int status = 0;
   bool handled = false;
 
-  if (!handled && scalar_a == torch::kFloat16) {
+  if (scalar_a == torch::kFloat16 && scalar_c == torch::kFloat32) {
     handled = true;
-    status = dispatch_cute_gemm_trAB_gather<torch::kFloat16>(
-        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,
-        mma_tile, params.M_A, params.K, params.K_B, params.N, params.gather_ab_size, alpha, beta);
+    DISPATCH_CUTE_TRAB(torch::kFloat16, torch::kFloat32);
+  } else if (scalar_a == torch::kFloat16 && scalar_c == torch::kFloat16) {
+    handled = true;
+    DISPATCH_CUTE_TRAB(torch::kFloat16, torch::kFloat16);
   }
 #ifndef DISABLE_BFLOAT16
-  if (!handled && scalar_a == torch::kBFloat16) {
+  else if (scalar_a == torch::kBFloat16 && scalar_c == torch::kFloat32) {
     handled = true;
-    status = dispatch_cute_gemm_trAB_gather<torch::kBFloat16>(
-        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,
-        mma_tile, params.M_A, params.K, params.K_B, params.N, params.gather_ab_size, alpha, beta);
+    DISPATCH_CUTE_TRAB(torch::kBFloat16, torch::kFloat32);
+  } else if (scalar_a == torch::kBFloat16 && scalar_c == torch::kBFloat16) {
+    handled = true;
+    DISPATCH_CUTE_TRAB(torch::kBFloat16, torch::kBFloat16);
   }
 #endif
-  if (!handled && scalar_a == torch::kFloat32) {
-    handled = true;
-    tensor_a = tensor_a.to(torch::kFloat16);
-    tensor_b = tensor_b.to(torch::kFloat16);
-    status = dispatch_cute_gemm_trAB_gather<torch::kFloat16>(
-        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,
-        mma_tile, params.M_A, params.K, params.K_B, params.N, params.gather_ab_size, alpha, beta);
-  }
-  TORCH_CHECK(handled, "CuTe GEMM TrAB: unsupported input dtype");
+  TORCH_CHECK(handled, "CuTe GEMM TrAB: unsupported input/output dtype combination (",
+              tensor_a.scalar_type(), " input, ", tensor_c.scalar_type(), " output)");
   return status;
 }
+#undef DISPATCH_CUTE_TRAB
 
 void register_gemm(py::module_ &m) {
   py::module_ gemm = m.def_submodule(

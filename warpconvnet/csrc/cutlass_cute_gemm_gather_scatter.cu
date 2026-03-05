@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // CuTe 3.x GEMM with gather/scatter via layout composition.
-// Explicit template instantiations for all (element type × tile) combinations.
+// Explicit template instantiations for all (element type × tile × output type) combinations.
 
 #include "include/cute_gemm_launch.h"
 
@@ -13,7 +13,7 @@ namespace cute_gemm {
 // Type-erased entry points called by pybind11 dispatch
 // ============================================================================
 
-template <typename ElementInput, typename TileTag>
+template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_ad_gather_scatter(const void *a,
                                     const void *b,
                                     const void *c,
@@ -28,11 +28,11 @@ int run_cute_gemm_ad_gather_scatter(const void *a,
                                     float alpha,
                                     float beta) {
   using Config = CuteTileConfig<ElementInput, TileTag>;
-  return launch_cute_gemm_ad_gather_scatter<ElementInput, Config>(
+  return launch_cute_gemm_ad_gather_scatter<ElementInput, Config, ElementOutput>(
       a, b, c, d, idx_a, idx_d, idx_size, M_A, K, N, M_C, alpha, beta);
 }
 
-template <typename ElementInput, typename TileTag>
+template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_trAB_gather(const void *a,
                                const void *b,
                                const void *c,
@@ -47,7 +47,7 @@ int run_cute_gemm_trAB_gather(const void *a,
                                float alpha,
                                float beta) {
   using Config = CuteTileConfig<ElementInput, TileTag>;
-  return launch_cute_gemm_trAB_gather<ElementInput, Config>(
+  return launch_cute_gemm_trAB_gather<ElementInput, Config, ElementOutput>(
       a, b, c, d, idx_a, idx_b, idx_size, M_A, K, K_B, N, alpha, beta);
 }
 
@@ -55,41 +55,69 @@ int run_cute_gemm_trAB_gather(const void *a,
 // Explicit instantiations
 // ============================================================================
 
-// --- AD gather-scatter: half_t × 4 tiles ---
-#define INSTANTIATE_CUTE_AD_GS(ElemType, TileTag)                          \
-  template int run_cute_gemm_ad_gather_scatter<ElemType, gemm::TileTag>(   \
-      const void *, const void *, const void *, void *,                    \
-      const int *, const int *,                                            \
+// --- AD gather-scatter: (InputType × OutputType × 4 tiles) ---
+#define INSTANTIATE_CUTE_AD_GS(ElemIn, ElemOut, TileTag)                       \
+  template int run_cute_gemm_ad_gather_scatter<ElemIn, gemm::TileTag, ElemOut>(\
+      const void *, const void *, const void *, void *,                        \
+      const int *, const int *,                                                \
       int, int, int, int, int, float, float);
 
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, Tile64x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, Tile128x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, Tile64x128x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::half_t, Tile128x128x32)
+// half_t input, float output (16-mixed)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile64x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile128x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile64x128x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, float, Tile128x128x32)
 
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, Tile64x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, Tile128x64x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, Tile64x128x32)
-INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, Tile128x128x32)
+// half_t input, half_t output (16-true)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile64x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile128x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile64x128x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::half_t, cutlass::half_t, Tile128x128x32)
+
+// bfloat16_t input, float output (16-mixed)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile64x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile128x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile64x128x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, float, Tile128x128x32)
+
+// bfloat16_t input, bfloat16_t output (16-true)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x64x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x128x32)
+INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x128x32)
 
 #undef INSTANTIATE_CUTE_AD_GS
 
-// --- TrAB gather: half_t × 4 tiles + bfloat16_t × 4 tiles ---
-#define INSTANTIATE_CUTE_TRAB(ElemType, TileTag)                             \
-  template int run_cute_gemm_trAB_gather<ElemType, gemm::TileTag>(           \
-      const void *, const void *, const void *, void *,                      \
-      const int *, const int *,                                              \
+// --- TrAB gather: (InputType × OutputType × 4 tiles) ---
+#define INSTANTIATE_CUTE_TRAB(ElemIn, ElemOut, TileTag)                        \
+  template int run_cute_gemm_trAB_gather<ElemIn, gemm::TileTag, ElemOut>(      \
+      const void *, const void *, const void *, void *,                        \
+      const int *, const int *,                                                \
       int, int, int, int, int, float, float);
 
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile64x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile128x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile64x128x32)
-INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile128x128x32)
+// half_t input, float output (16-mixed)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile64x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile128x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile64x128x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, float, Tile128x128x32)
 
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile64x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile128x64x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile64x128x32)
-INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile128x128x32)
+// half_t input, half_t output (16-true)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile64x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile128x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile64x128x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, cutlass::half_t, Tile128x128x32)
+
+// bfloat16_t input, float output (16-mixed)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile64x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile128x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile64x128x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, float, Tile128x128x32)
+
+// bfloat16_t input, bfloat16_t output (16-true)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile64x128x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, cutlass::bfloat16_t, Tile128x128x32)
 
 #undef INSTANTIATE_CUTE_TRAB
 

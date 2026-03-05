@@ -30,11 +30,12 @@ namespace cute_gemm {
 using namespace cute;
 
 /// Device GEMM kernel with manual gather/scatter and pipelined mainloop
-template <class TileConfig>
+template <class TileConfig, typename ElementOutput_ = float>
 struct CuteGemmKernel {
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
+  using ElementOutput = ElementOutput_;
 
   using SmemLayoutAtomA = typename TileConfig::SmemLayoutAtomA;
   using SmemLayoutAtomB = typename TileConfig::SmemLayoutAtomB;
@@ -74,8 +75,8 @@ struct CuteGemmKernel {
   /// Main kernel with 2-stage pipelined mainloop
   __device__ void operator()(const ElementInput *ptr_A,
                              const ElementInput *ptr_B,
-                             const float *ptr_C,
-                             float *ptr_D,
+                             const ElementOutput *ptr_C,
+                             ElementOutput *ptr_D,
                              const int *in_map,
                              const int *out_map,
                              int M,
@@ -346,8 +347,8 @@ struct CuteGemmKernel {
   /// Epilogue: D[out_map[i], j] = alpha * accum(i, j) + beta * C[out_map[i], j]
   template <class Accumulator, class TiledMma_>
   __device__ void _epilogue(Accumulator &accum,
-                            const float *ptr_C,
-                            float *ptr_D,
+                            const ElementOutput *ptr_C,
+                            ElementOutput *ptr_D,
                             const int *out_map,
                             int m_start,
                             int n_start,
@@ -373,9 +374,9 @@ struct CuteGemmKernel {
         float acc_val = accum(i);
         float result = alpha * acc_val;
         if (beta != 0.0f) {
-          result += beta * ptr_C[phys_row * N + n_global];
+          result += beta * static_cast<float>(ptr_C[phys_row * N + n_global]);
         }
-        ptr_D[phys_row * N + n_global] = result;
+        ptr_D[phys_row * N + n_global] = static_cast<ElementOutput>(result);
       }
     }
   }
@@ -386,8 +387,8 @@ template <class Kernel>
 __global__ __launch_bounds__(Kernel::MaxThreadsPerBlock)
     void cute_gemm_kernel_entry(const typename Kernel::ElementInput *ptr_A,
                                 const typename Kernel::ElementInput *ptr_B,
-                                const float *ptr_C,
-                                float *ptr_D,
+                                const typename Kernel::ElementOutput *ptr_C,
+                                typename Kernel::ElementOutput *ptr_D,
                                 const int *in_map,
                                 const int *out_map,
                                 int M,
@@ -417,11 +418,12 @@ __global__ __launch_bounds__(Kernel::MaxThreadsPerBlock)
 //   Load: vectorized LDG along N, vectorized STS (N contiguous in both).
 // ===========================================================================
 
-template <class TileConfig>
+template <class TileConfig, typename ElementOutput_ = float>
 struct CuteGemmTrABKernel {
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
+  using ElementOutput = ElementOutput_;
 
   using SmemLayoutAtomA = typename TileConfig::SmemLayoutAtomA;
   using SmemLayoutAtomB = typename TileConfig::SmemLayoutAtomB;
@@ -456,8 +458,8 @@ struct CuteGemmTrABKernel {
   /// Main TrAB kernel with 2-stage pipelined mainloop
   __device__ void operator()(const ElementInput *ptr_A,
                              const ElementInput *ptr_B,
-                             const float *ptr_C,
-                             float *ptr_D,
+                             const ElementOutput *ptr_C,
+                             ElementOutput *ptr_D,
                              const int *idx_a,
                              const int *idx_b,
                              int K_dim,        // input channels (MMA M)
@@ -644,8 +646,8 @@ struct CuteGemmTrABKernel {
   /// Dense epilogue: D[k, n] = alpha * accum + beta * C[k, n]
   template <class Accumulator, class TiledMma_>
   __device__ void _epilogue_trAB(Accumulator &accum,
-                                  const float *ptr_C,
-                                  float *ptr_D,
+                                  const ElementOutput *ptr_C,
+                                  ElementOutput *ptr_D,
                                   int k_start,
                                   int n_start,
                                   int K_dim,
@@ -669,9 +671,9 @@ struct CuteGemmTrABKernel {
         float acc_val = accum(i);
         float result = alpha * acc_val;
         if (beta != 0.0f) {
-          result += beta * ptr_C[k_global * N + n_global];
+          result += beta * static_cast<float>(ptr_C[k_global * N + n_global]);
         }
-        ptr_D[k_global * N + n_global] = result;
+        ptr_D[k_global * N + n_global] = static_cast<ElementOutput>(result);
       }
     }
   }
@@ -682,8 +684,8 @@ template <class Kernel>
 __global__ __launch_bounds__(Kernel::MaxThreadsPerBlock)
     void cute_gemm_trAB_kernel_entry(const typename Kernel::ElementInput *ptr_A,
                                       const typename Kernel::ElementInput *ptr_B,
-                                      const float *ptr_C,
-                                      float *ptr_D,
+                                      const typename Kernel::ElementOutput *ptr_C,
+                                      typename Kernel::ElementOutput *ptr_D,
                                       const int *idx_a,
                                       const int *idx_b,
                                       int K_dim,
