@@ -110,7 +110,7 @@ def test_cute_vs_2x_cross_validate(tile):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tile", [0, 1, 2, 3])
 def test_cute_gemm_trAB_gather(dtype, tile):
-    """TrAB gather is not yet implemented — should return unsupported error."""
+    """D[k,n] = alpha * A[idx_a]^T @ B[idx_b] + beta * C[k,n]"""
     M_A, K, M_B, N, idx_size = 4096, 64, 4096, 128, 2048
     A = torch.randn(M_A, K, dtype=dtype, device="cuda") * 0.1
     B = torch.randn(M_B, N, dtype=dtype, device="cuda") * 0.1
@@ -121,8 +121,38 @@ def test_cute_gemm_trAB_gather(dtype, tile):
     status = _C.gemm.cute_gemm_trAB_gather(
         A, B, D, D, idx_a, idx_b, mma_tile=tile, alpha=1.0, beta=0.0
     )
-    # TrAB gather returns kErrorUnsupportedConfig (deferred to later phase)
-    assert status != 0, "TrAB gather should return unsupported error"
+    assert status == 0, f"Kernel returned status {status}"
+
+    # Reference
+    D_ref = torch.zeros_like(D)
+    D_ref = A[idx_a].float().T @ B[idx_b].float()
+    torch.testing.assert_close(D, D_ref, atol=1e-1, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Test 4b: TrAB Gather with beta accumulation
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("tile", [3])
+def test_cute_gemm_trAB_gather_beta(dtype, tile):
+    """Test alpha/beta: D = alpha * A[idx_a]^T @ B[idx_b] + beta * C"""
+    M_A, K, M_B, N, idx_size = 2048, 64, 2048, 64, 1024
+    A = torch.randn(M_A, K, dtype=dtype, device="cuda") * 0.1
+    B = torch.randn(M_B, N, dtype=dtype, device="cuda") * 0.1
+    idx_a = torch.randperm(M_A, device="cuda")[:idx_size].int()
+    idx_b = torch.randperm(M_B, device="cuda")[:idx_size].int()
+
+    C = torch.randn(K, N, dtype=torch.float32, device="cuda") * 0.1
+    D = C.clone()
+
+    alpha, beta = 0.5, 0.3
+    status = _C.gemm.cute_gemm_trAB_gather(
+        A, B, C, D, idx_a, idx_b, mma_tile=tile, alpha=alpha, beta=beta
+    )
+    assert status == 0
+
+    D_ref = alpha * (A[idx_a].float().T @ B[idx_b].float()) + beta * C
+    torch.testing.assert_close(D, D_ref, atol=1e-1, rtol=1e-2)
 
 
 # ---------------------------------------------------------------------------

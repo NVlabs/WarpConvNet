@@ -46,6 +46,15 @@ from .cutlass import (
     _cutlass_implicit_gemm_forward_grouped,
     _cutlass_implicit_gemm_backward_grouped,
 )
+try:
+    from .cute import (
+        _cute_implicit_gemm_forward_logic,
+        _cute_implicit_gemm_backward_logic,
+    )
+
+    _HAS_CUTE_BACKEND = True
+except Exception:
+    _HAS_CUTE_BACKEND = False
 from .grouping import prepare_grouped_kernel_map
 
 logger = get_logger(__name__)
@@ -59,6 +68,7 @@ _AUTOTUNE_BANNER_SHOWN = False
 # Forward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (block size), EXPLICIT
 _BENCHMARK_FORWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
     ("explicit_gemm", {}),
     # Grouped variants: adaptive offset grouping with batched execution
@@ -74,6 +84,7 @@ _BENCHMARK_FORWARD_PARAMS = [
 # Backward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (configs), EXPLICIT
 _BENCHMARK_BACKWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[
         (
             "implicit_gemm",
@@ -122,6 +133,7 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
+    CUTE_IMPLICIT_GEMM = "cute_implicit_gemm"
     EXPLICIT_GEMM_GROUPED = "explicit_gemm_grouped"
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
@@ -132,6 +144,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
+    CUTE_IMPLICIT_GEMM = "cute_implicit_gemm"
     EXPLICIT_GEMM_GROUPED = "explicit_gemm_grouped"
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
@@ -328,6 +341,17 @@ def _run_forward_benchmarks(
                 fwd_block_size=params_config.get("fwd_block_size", 16),
                 saturation_m=params_config.get("saturation_m", 5000),
             )
+        elif algo_mode == "cute_implicit_gemm":
+            if not _HAS_CUTE_BACKEND:
+                return -1
+            status = _cute_implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+            )
+            if isinstance(status, int) and status != 0:
+                return status
         elif algo_mode == "cutlass_grouped_hybrid":
             status = _cutlass_implicit_gemm_forward_grouped(
                 in_features,
@@ -472,6 +496,18 @@ def _run_backward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
+        elif algo_mode == "cute_implicit_gemm":
+            if not _HAS_CUTE_BACKEND:
+                return -1
+            result = _cute_implicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                device=device,
+            )
+            if isinstance(result[0], int) and result[0] != 0:
+                return result[0]
         elif algo_mode == "explicit_gemm_grouped":
             _, _ = _explicit_gemm_backward_grouped(
                 grad_output,
@@ -746,6 +782,17 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 raise RuntimeError(
                     f"Error in _cutlass_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
                 )
+        elif chosen_fwd_algo == "cute_implicit_gemm":
+            output_feature_tensor = _cute_implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+            )
+            if isinstance(output_feature_tensor, int) and output_feature_tensor != 0:
+                raise RuntimeError(
+                    f"Error in _cute_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
+                )
         elif chosen_fwd_algo == "explicit_gemm_grouped":
             output_feature_tensor = _explicit_gemm_forward_grouped(
                 in_features,
@@ -990,6 +1037,19 @@ class UnifiedSpatiallySparseConvFunction(Function):
             if isinstance(grad_in_features, int) and grad_in_features != 0:
                 raise RuntimeError(
                     f"Error in _cutlass_implicit_gemm_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
+                )
+        elif chosen_bwd_algo == "cute_implicit_gemm":
+            grad_in_features, grad_weight = _cute_implicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
+                device=device,
+            )
+            if isinstance(grad_in_features, int) and grad_in_features != 0:
+                raise RuntimeError(
+                    f"Error in _cute_implicit_gemm_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
                 )
         elif chosen_bwd_algo == "explicit_gemm_grouped":
             grad_in_features, grad_weight = _explicit_gemm_backward_grouped(

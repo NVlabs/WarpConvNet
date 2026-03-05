@@ -124,6 +124,21 @@ int run_cute_gemm_ad_gather_scatter(const void *a,
                                     int idx_size,
                                     float alpha,
                                     float beta);
+
+template <typename ElementInput, typename TileTag>
+int run_cute_gemm_trAB_gather(const void *a,
+                               const void *b,
+                               const void *c,
+                               void *d,
+                               const int *idx_a,
+                               const int *idx_b,
+                               int M_A,
+                               int K,
+                               int K_B,
+                               int N,
+                               int idx_size,
+                               float alpha,
+                               float beta);
 }  // namespace cute_gemm
 
 }  // namespace warpconvnet
@@ -1021,6 +1036,13 @@ int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
   TORCH_CHECK(tensor_c.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 C tensor");
   TORCH_CHECK(tensor_d.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 D tensor");
 
+  // CuTe kernel requires 128-bit aligned K and N (8 elements for fp16/bf16)
+  int elem_size = (tensor_a.scalar_type() == torch::kFloat32) ? 2 : tensor_a.element_size();
+  int vec_width = 16 / elem_size;  // 8 for fp16/bf16
+  if (params.K % vec_width != 0 || params.N % vec_width != 0) {
+    return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
+  }
+
   auto scalar_a = tensor_a.scalar_type();
   int status = 0;
   bool handled = false;
@@ -1051,6 +1073,53 @@ int cute_gemm_AD_gather_scatter(torch::Tensor tensor_a,
   return status;
 }
 
+template <torch::ScalarType SA>
+static int dispatch_cute_gemm_trAB_gather(const torch::Tensor &tensor_a,
+                                           const torch::Tensor &tensor_b,
+                                           const torch::Tensor &tensor_c,
+                                           torch::Tensor &tensor_d,
+                                           const torch::Tensor &indices_a,
+                                           const torch::Tensor &indices_b,
+                                           int mma_tile,
+                                           int M_A,
+                                           int K,
+                                           int K_B,
+                                           int N,
+                                           int gather_ab_size,
+                                           float alpha,
+                                           float beta) {
+  using ElementInput = typename torch_to_cutlass<SA>::type;
+  auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
+  switch (tile) {
+    case warpconvnet::gemm::MMATile::Tile128x128x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
+          ElementInput, warpconvnet::gemm::Tile128x128x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
+          M_A, K, K_B, N, gather_ab_size, alpha, beta);
+    case warpconvnet::gemm::MMATile::Tile128x64x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
+          ElementInput, warpconvnet::gemm::Tile128x64x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
+          M_A, K, K_B, N, gather_ab_size, alpha, beta);
+    case warpconvnet::gemm::MMATile::Tile64x128x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
+          ElementInput, warpconvnet::gemm::Tile64x128x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
+          M_A, K, K_B, N, gather_ab_size, alpha, beta);
+    case warpconvnet::gemm::MMATile::Tile64x64x32:
+      return ::warpconvnet::cute_gemm::run_cute_gemm_trAB_gather<
+          ElementInput, warpconvnet::gemm::Tile64x64x32>(
+          tensor_a.data_ptr(), tensor_b.data_ptr(), tensor_c.data_ptr(), tensor_d.data_ptr(),
+          indices_a.data_ptr<int>(), indices_b.data_ptr<int>(),
+          M_A, K, K_B, N, gather_ab_size, alpha, beta);
+    default:
+      TORCH_CHECK(false, "Unsupported mma_tile value");
+  }
+}
+
 int cute_gemm_trAB_gather(torch::Tensor tensor_a,
                            torch::Tensor tensor_b,
                            torch::Tensor tensor_c,
@@ -1060,9 +1129,46 @@ int cute_gemm_trAB_gather(torch::Tensor tensor_a,
                            int mma_tile,
                            float alpha,
                            float beta) {
-  // TODO: TrAB gather requires different GmemTiledCopy configuration
-  // that vectorizes along the non-gathered dimension. Deferred to Phase 11.
-  return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
+  const auto params =
+      validate_trAB_gather_args(tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b);
+  TORCH_CHECK(tensor_c.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 C tensor");
+  TORCH_CHECK(tensor_d.scalar_type() == torch::kFloat32, "CuTe GEMM requires float32 D tensor");
+
+  // CuTe TrAB kernel requires 128-bit aligned K and N (8 elements for fp16/bf16)
+  int elem_size_trAB = (tensor_a.scalar_type() == torch::kFloat32) ? 2 : tensor_a.element_size();
+  int vec_width_trAB = 16 / elem_size_trAB;
+  if (params.K % vec_width_trAB != 0 || params.N % vec_width_trAB != 0) {
+    return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
+  }
+
+  auto scalar_a = tensor_a.scalar_type();
+  int status = 0;
+  bool handled = false;
+
+  if (!handled && scalar_a == torch::kFloat16) {
+    handled = true;
+    status = dispatch_cute_gemm_trAB_gather<torch::kFloat16>(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,
+        mma_tile, params.M_A, params.K, params.K_B, params.N, params.gather_ab_size, alpha, beta);
+  }
+#ifndef DISABLE_BFLOAT16
+  if (!handled && scalar_a == torch::kBFloat16) {
+    handled = true;
+    status = dispatch_cute_gemm_trAB_gather<torch::kBFloat16>(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,
+        mma_tile, params.M_A, params.K, params.K_B, params.N, params.gather_ab_size, alpha, beta);
+  }
+#endif
+  if (!handled && scalar_a == torch::kFloat32) {
+    handled = true;
+    tensor_a = tensor_a.to(torch::kFloat16);
+    tensor_b = tensor_b.to(torch::kFloat16);
+    status = dispatch_cute_gemm_trAB_gather<torch::kFloat16>(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b,
+        mma_tile, params.M_A, params.K, params.K_B, params.N, params.gather_ab_size, alpha, beta);
+  }
+  TORCH_CHECK(handled, "CuTe GEMM TrAB: unsupported input dtype");
+  return status;
 }
 
 void register_gemm(py::module_ &m) {

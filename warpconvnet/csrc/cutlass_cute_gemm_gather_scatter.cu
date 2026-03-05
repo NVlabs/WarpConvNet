@@ -74,8 +74,24 @@ INSTANTIATE_CUTE_AD_GS(cutlass::bfloat16_t, Tile128x128x32)
 
 #undef INSTANTIATE_CUTE_AD_GS
 
-// TrAB gather: TODO — requires different GmemTiledCopy that vectorizes
-// along the contiguous (non-gathered) dimension. Deferred to Phase 11.
+// --- TrAB gather: half_t × 4 tiles + bfloat16_t × 4 tiles ---
+#define INSTANTIATE_CUTE_TRAB(ElemType, TileTag)                             \
+  template int run_cute_gemm_trAB_gather<ElemType, gemm::TileTag>(           \
+      const void *, const void *, const void *, void *,                      \
+      const int *, const int *,                                              \
+      int, int, int, int, int, float, float);
+
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile64x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile128x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile64x128x32)
+INSTANTIATE_CUTE_TRAB(cutlass::half_t, Tile128x128x32)
+
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile64x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile128x64x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile64x128x32)
+INSTANTIATE_CUTE_TRAB(cutlass::bfloat16_t, Tile128x128x32)
+
+#undef INSTANTIATE_CUTE_TRAB
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet

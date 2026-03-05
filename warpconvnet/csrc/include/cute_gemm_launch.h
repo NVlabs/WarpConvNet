@@ -68,7 +68,13 @@ int launch_cute_gemm_ad_gather_scatter(const void *ptr_A,
                             : static_cast<int>(gemm::GemmStatus::kErrorKernelExecution);
 }
 
-/// Launch a CuTe GEMM with TrAB gather (currently unsupported — returns error)
+/// Launch a CuTe GEMM with TrAB gather
+///
+/// Computes: D[k, n] = alpha * A[idx_a]^T @ B[idx_b] + beta * C[k, n]
+///
+/// A is (M_A, K) row-major, gathered by indices_a
+/// B is (M_B, N) row-major, gathered by indices_b
+/// D is (K, N) dense output
 template <typename ElementInput, typename TileConfig>
 int launch_cute_gemm_trAB_gather(const void *ptr_A,
                                  const void *ptr_B,
@@ -84,7 +90,34 @@ int launch_cute_gemm_trAB_gather(const void *ptr_A,
                                  float alpha,
                                  float beta,
                                  cudaStream_t stream = 0) {
-  return static_cast<int>(gemm::GemmStatus::kErrorUnsupportedConfig);
+  using Kernel = CuteGemmTrABKernel<TileConfig>;
+  constexpr int TileM = cute::size<0>(typename TileConfig::TileShape{});  // tiles K
+  constexpr int TileN = cute::size<1>(typename TileConfig::TileShape{});  // tiles N
+
+  dim3 grid((K + TileM - 1) / TileM, (N + TileN - 1) / TileN, 1);
+  constexpr size_t smem_size = Kernel::SharedStorageSize;
+
+  if (smem_size > 48 * 1024) {
+    auto err = cudaFuncSetAttribute(
+        cute_gemm_trAB_kernel_entry<Kernel>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    if (err != cudaSuccess) {
+      return static_cast<int>(gemm::GemmStatus::kErrorKernelInitialization);
+    }
+  }
+
+  cute_gemm_trAB_kernel_entry<Kernel>
+      <<<grid, Kernel::MaxThreadsPerBlock, smem_size, stream>>>(
+          reinterpret_cast<const ElementInput *>(ptr_A),
+          reinterpret_cast<const ElementInput *>(ptr_B),
+          reinterpret_cast<const float *>(ptr_C),
+          reinterpret_cast<float *>(ptr_D),
+          indices_a, indices_b,
+          K, N, gather_size, alpha, beta);
+
+  auto err = cudaGetLastError();
+  return err == cudaSuccess ? static_cast<int>(gemm::GemmStatus::kSuccess)
+                            : static_cast<int>(gemm::GemmStatus::kErrorKernelExecution);
 }
 
 }  // namespace cute_gemm
