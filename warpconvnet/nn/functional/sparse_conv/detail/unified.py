@@ -241,6 +241,7 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
     CUTE_GROUPED = "cute_grouped"
     AUTO = "auto"  # Benchmark and select the best algorithm
+    ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
 
 
 class SPARSE_CONV_BWD_ALGO_MODE(Enum):
@@ -253,6 +254,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
     CUTE_GROUPED = "cute_grouped"
     AUTO = "auto"  # Benchmark and select the best algorithm
+    ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
 
 
 # ------------------------------
@@ -317,6 +319,24 @@ def _initialize_benchmark_cache():
 
 # Initialize cache on module load
 _initialize_benchmark_cache()
+
+
+def _get_filtered_forward_params() -> List[Tuple[str, Dict[str, Any]]]:
+    """Get forward benchmark parameters filtered by environment variable.
+
+    For "auto", returns the adaptive (reduced) set for a generic large-channel config.
+    For "all", returns the full exhaustive set.
+    """
+    return _filter_benchmark_params_by_env_config(
+        _BENCHMARK_FORWARD_PARAMS_BASE, WARPCONVNET_FWD_ALGO_MODE, is_forward=True
+    )
+
+
+def _get_filtered_backward_params() -> List[Tuple[str, Dict[str, Any]]]:
+    """Get backward benchmark parameters filtered by environment variable."""
+    return _filter_benchmark_params_by_env_config(
+        _BENCHMARK_BACKWARD_PARAMS, WARPCONVNET_BWD_ALGO_MODE, is_forward=False
+    )
 
 
 def _filter_benchmark_params_by_env_config(
@@ -793,8 +813,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # Step 1: Determine algorithm filter set
         if isinstance(fwd_algo, list):
             algorithm_filter = fwd_algo
-        elif fwd_algo == "auto":
-            algorithm_filter = "auto"  # All algorithms
+        elif fwd_algo in ("auto", "all"):
+            algorithm_filter = fwd_algo
         else:
             # Single algorithm - create list for consistent processing
             algorithm_filter = [str(fwd_algo)]
@@ -823,7 +843,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 best_list = [best_tuple]
             else:
                 best_list = cached_result
-            if algorithm_filter == "auto":
+            if algorithm_filter in ("auto", "all"):
                 chosen_fwd_algo, chosen_fwd_params, _ = best_list[0]
             else:
                 filtered_cached_results = []
@@ -862,9 +882,11 @@ class UnifiedSpatiallySparseConvFunction(Function):
                         chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
         else:
             # Step 4: No cache - always benchmark within filtered space
-            if algorithm_filter == "auto":
-                # Benchmark all (channel-adaptive) algorithms
-                filtered_params = adaptive_fwd_params
+            if algorithm_filter in ("auto", "all"):
+                # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
+                filtered_params = _filter_benchmark_params_by_env_config(
+                    adaptive_fwd_params, algorithm_filter, is_forward=True
+                )
             else:
                 # Filter benchmark parameters to only include algorithms in filter set
                 filtered_params = _filter_benchmark_params_by_env_config(
@@ -1084,8 +1106,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # Step 1: Determine algorithm filter set
         if isinstance(initial_bwd_algo, list):
             algorithm_filter = initial_bwd_algo
-        elif initial_bwd_algo == "auto":
-            algorithm_filter = "auto"  # All algorithms
+        elif initial_bwd_algo in ("auto", "all"):
+            algorithm_filter = initial_bwd_algo
         else:
             # Single algorithm - create list for consistent processing
             algorithm_filter = [str(initial_bwd_algo)]
@@ -1108,7 +1130,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 best_list = [cached_result]
             else:
                 best_list = cached_result
-            if algorithm_filter == "auto":
+            if algorithm_filter in ("auto", "all"):
                 chosen_bwd_algo, chosen_bwd_params, _ = best_list[0]
             else:
                 filtered_cached_results = []
@@ -1148,9 +1170,11 @@ class UnifiedSpatiallySparseConvFunction(Function):
                         chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]
         else:
             # Step 4: No cache - always benchmark within filtered space
-            if algorithm_filter == "auto":
-                # Benchmark all algorithms
-                filtered_params = _BENCHMARK_BACKWARD_PARAMS
+            if algorithm_filter in ("auto", "all"):
+                # Benchmark algorithms - "auto" uses reduced set, "all" uses exhaustive set
+                filtered_params = _filter_benchmark_params_by_env_config(
+                    _BENCHMARK_BACKWARD_PARAMS, algorithm_filter, is_forward=False
+                )
             else:
                 # Filter benchmark parameters to only include algorithms in filter set
                 filtered_params = _filter_benchmark_params_by_env_config(
