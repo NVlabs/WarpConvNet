@@ -183,6 +183,7 @@ cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
 # ---------------------------------------------------------------------------
 
 _HAS_CUTE_GEMM = hasattr(_C.gemm, "cute_gemm_AD_gather_scatter")
+_HAS_CUTE_GEMM_STAGED = hasattr(_C.gemm, "cute_gemm_AD_gather_scatter_staged")
 
 
 def _key_cute_AD_gather_scatter(
@@ -196,6 +197,8 @@ def _key_cute_AD_gather_scatter(
     mma_tile: int = 0,
     alpha: float = 1.0,
     beta: float = 1.0,
+    num_stages: int = 2,
+    use_cp_async: bool = False,
 ) -> Tuple[Any, ...]:
     sm, dtype = _sm_dtype_key(tensor_a)
     out_dtype = str(tensor_c.dtype)
@@ -219,6 +222,8 @@ def _key_cute_trAB_gather(
     mma_tile: int = 0,
     alpha: float = 1.0,
     beta: float = 1.0,
+    num_stages: int = 2,
+    use_cp_async: bool = False,
 ) -> Tuple[Any, ...]:
     sm, dtype = _sm_dtype_key(tensor_a)
     out_dtype = str(tensor_c.dtype)
@@ -231,29 +236,132 @@ def _key_cute_trAB_gather(
     return ("cute_gemm_trAB_gather", sm, dtype, out_dtype, K, N, log_len_a, log_len_b)
 
 
-_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS = [{"mma_tile": i} for i in range(10)]
-_BENCHMARK_CUTE_TRAB_GATHER_PARAMS = [{"mma_tile": i} for i in range(10)]
+def _build_cute_staged_params() -> list:
+    """Build staged param variants for SM >= 9.0 (Hopper+)."""
+    staged = []
+    if not _HAS_CUTE_GEMM_STAGED:
+        return staged
+    try:
+        sm = torch.cuda.get_device_capability()
+    except Exception:
+        return staged
+    if sm[0] >= 9:
+        for tile in range(4):  # Tile128x128x32..Tile64x64x32
+            for s in [2, 3, 4]:
+                for cp in [False, True]:
+                    if s == 2 and not cp:
+                        continue  # Already covered by base params
+                    staged.append({"mma_tile": tile, "num_stages": s, "use_cp_async": cp})
+    return staged
+
+
+def _cute_ad_gs_dispatch(
+    tensor_a,
+    tensor_b,
+    tensor_c,
+    tensor_d,
+    indices_a,
+    indices_d,
+    *,
+    mma_tile=0,
+    alpha=1.0,
+    beta=1.0,
+    num_stages=2,
+    use_cp_async=False,
+):
+    if num_stages != 2 or use_cp_async:
+        return _C.gemm.cute_gemm_AD_gather_scatter_staged(
+            tensor_a,
+            tensor_b,
+            tensor_c,
+            tensor_d,
+            indices_a,
+            indices_d,
+            mma_tile=mma_tile,
+            alpha=alpha,
+            beta=beta,
+            num_stages=num_stages,
+            use_cp_async=use_cp_async,
+        )
+    return _C.gemm.cute_gemm_AD_gather_scatter(
+        tensor_a,
+        tensor_b,
+        tensor_c,
+        tensor_d,
+        indices_a,
+        indices_d,
+        mma_tile=mma_tile,
+        alpha=alpha,
+        beta=beta,
+    )
+
+
+def _cute_trAB_dispatch(
+    tensor_a,
+    tensor_b,
+    tensor_c,
+    tensor_d,
+    indices_a,
+    indices_b,
+    *,
+    mma_tile=0,
+    alpha=1.0,
+    beta=1.0,
+    num_stages=2,
+    use_cp_async=False,
+):
+    if num_stages != 2 or use_cp_async:
+        return _C.gemm.cute_gemm_trAB_gather_staged(
+            tensor_a,
+            tensor_b,
+            tensor_c,
+            tensor_d,
+            indices_a,
+            indices_b,
+            mma_tile=mma_tile,
+            alpha=alpha,
+            beta=beta,
+            num_stages=num_stages,
+            use_cp_async=use_cp_async,
+        )
+    return _C.gemm.cute_gemm_trAB_gather(
+        tensor_a,
+        tensor_b,
+        tensor_c,
+        tensor_d,
+        indices_a,
+        indices_b,
+        mma_tile=mma_tile,
+        alpha=alpha,
+        beta=beta,
+    )
+
+
+_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS = [
+    *[{"mma_tile": i} for i in range(10)],
+    *_build_cute_staged_params(),
+]
+_BENCHMARK_CUTE_TRAB_GATHER_PARAMS = [
+    *[{"mma_tile": i} for i in range(10)],
+    *_build_cute_staged_params(),
+]
 
 if _HAS_CUTE_GEMM:
     cute_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
         namespace="cute_gemm_AD_gather_scatter",
-        c_fn=_C.gemm.cute_gemm_AD_gather_scatter,
+        c_fn=_cute_ad_gs_dispatch,
         param_space=_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS,
         key_fn=_key_cute_AD_gather_scatter,
-        run_and_time_fn=_status_runner_factory(
-            _C.gemm.cute_gemm_AD_gather_scatter, (2, 3)
-        ),
+        run_and_time_fn=_status_runner_factory(_cute_ad_gs_dispatch, (2, 3)),
         record_failures_as_inf=False,
     )
 
     cute_gemm_trAB_gather_autotuned = make_autotuned_op(
         namespace="cute_gemm_trAB_gather",
-        c_fn=_C.gemm.cute_gemm_trAB_gather,
+        c_fn=_cute_trAB_dispatch,
         param_space=_BENCHMARK_CUTE_TRAB_GATHER_PARAMS,
         key_fn=_key_cute_trAB_gather,
-        run_and_time_fn=_status_runner_factory(
-            _C.gemm.cute_gemm_trAB_gather, (2, 3)
-        ),
+        run_and_time_fn=_status_runner_factory(_cute_trAB_dispatch, (2, 3)),
         record_failures_as_inf=False,
     )
 else:

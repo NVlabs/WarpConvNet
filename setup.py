@@ -53,7 +53,9 @@ include_dirs = [
     os.path.join(workspace_dir, "3rdparty/cutlass/include"),  # CUTLASS includes
     os.path.join(workspace_dir, "3rdparty/cutlass/tools/util/include"),  # CUTLASS util includes
     os.path.join(workspace_dir, "warpconvnet/csrc/include"),  # Project includes
-    os.path.join(workspace_dir, "3rdparty/cutlass/examples/common"),  # CUTLASS examples (gather_tensor.hpp)
+    os.path.join(
+        workspace_dir, "3rdparty/cutlass/examples/common"
+    ),  # CUTLASS examples (gather_tensor.hpp)
     f"{cuda_home}/include",  # CUDA includes
 ]
 
@@ -120,6 +122,7 @@ ext_modules = [
             "warpconvnet/csrc/bindings/utils_bindings.cpp",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter.cu",
             "warpconvnet/csrc/cutlass_cute_gemm_gather_scatter.cu",
+            "warpconvnet/csrc/cutlass_cute_gemm_staged.cu",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter_sm80_fp32.cu",
             "warpconvnet/csrc/cub_sort.cu",
             "warpconvnet/csrc/voxel_mapping_kernels.cu",

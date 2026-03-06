@@ -21,15 +21,14 @@
 
 #pragma once
 
-#include "cute/tensor.hpp"
-#include "cute/atom/copy_atom.hpp"
-#include "cute/atom/mma_atom.hpp"
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+
 #include "cute/algorithm/copy.hpp"
 #include "cute/arch/copy_sm80.hpp"
-
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-
+#include "cute/atom/copy_atom.hpp"
+#include "cute/atom/mma_atom.hpp"
+#include "cute/tensor.hpp"
 #include "cute_gemm_config.h"
 #include "grouped_gemm_params.h"
 
@@ -45,22 +44,19 @@ __device__ __forceinline__ void atomic_add(T *addr, T val) {
 }
 
 template <>
-__device__ __forceinline__ void atomic_add<cutlass::half_t>(
-    cutlass::half_t *addr, cutlass::half_t val) {
+__device__ __forceinline__ void atomic_add<cutlass::half_t>(cutlass::half_t *addr,
+                                                            cutlass::half_t val) {
   atomicAdd(reinterpret_cast<__half *>(addr), __float2half(float(val)));
 }
 
 template <>
-__device__ __forceinline__ void atomic_add<cutlass::bfloat16_t>(
-    cutlass::bfloat16_t *addr, cutlass::bfloat16_t val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(addr),
-            __float2bfloat16(float(val)));
+__device__ __forceinline__ void atomic_add<cutlass::bfloat16_t>(cutlass::bfloat16_t *addr,
+                                                                cutlass::bfloat16_t val) {
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(addr), __float2bfloat16(float(val)));
 }
 
 /// Binary search: find g such that tile_offsets[g] <= tile_idx < tile_offsets[g+1]
-__device__ __forceinline__ int find_group(const int *tile_offsets,
-                                           int num_groups,
-                                           int tile_idx) {
+__device__ __forceinline__ int find_group(const int *tile_offsets, int num_groups, int tile_idx) {
   int lo = 0, hi = num_groups;
   while (lo < hi) {
     int mid = (lo + hi) >> 1;
@@ -94,12 +90,10 @@ struct CuteGemmGroupedKernel {
   static constexpr int NumStages = TileConfig::NumStages;
   static constexpr bool UseCpAsyncGatherA = TileConfig::UseCpAsyncGatherA;
 
-  using SmemLayoutA = decltype(tile_to_shape(
-      SmemLayoutAtomA{},
-      make_shape(Int<tM>{}, Int<tK>{}, Int<NumStages>{})));
-  using SmemLayoutB = decltype(tile_to_shape(
-      SmemLayoutAtomB{},
-      make_shape(Int<tN>{}, Int<tK>{}, Int<NumStages>{})));
+  using SmemLayoutA = decltype(tile_to_shape(SmemLayoutAtomA{},
+                                             make_shape(Int<tM>{}, Int<tK>{}, Int<NumStages>{})));
+  using SmemLayoutB = decltype(tile_to_shape(SmemLayoutAtomB{},
+                                             make_shape(Int<tN>{}, Int<tK>{}, Int<NumStages>{})));
 
   struct SharedStorage {
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
@@ -131,8 +125,7 @@ struct CuteGemmGroupedKernel {
     int n_start = n_tile * tN;
 
     // Per-group pointers
-    const ElementInput *ptr_B_g = reinterpret_cast<const ElementInput *>(
-        params.ptr_B_array[g]);
+    const ElementInput *ptr_B_g = reinterpret_cast<const ElementInput *>(params.ptr_B_array[g]);
     const int *in_map_g = in_map + map_offset_g;
     const int *out_map_g = out_map + map_offset_g;
 
@@ -150,21 +143,20 @@ struct CuteGemmGroupedKernel {
     Tensor tCrB = thr_mma.partition_fragment_B(sB(_, _, 0));
 
     auto smem_tiled_copy_A = make_tiled_copy_A(SmemCopyAtomA{}, tiled_mma);
-    auto smem_thr_copy_A   = smem_tiled_copy_A.get_slice(threadIdx.x);
-    Tensor tCsA            = smem_thr_copy_A.partition_S(sA);
-    Tensor tCrA_copy_view  = smem_thr_copy_A.retile_D(tCrA);
+    auto smem_thr_copy_A = smem_tiled_copy_A.get_slice(threadIdx.x);
+    Tensor tCsA = smem_thr_copy_A.partition_S(sA);
+    Tensor tCrA_copy_view = smem_thr_copy_A.retile_D(tCrA);
 
     auto smem_tiled_copy_B = make_tiled_copy_B(SmemCopyAtomB{}, tiled_mma);
-    auto smem_thr_copy_B   = smem_tiled_copy_B.get_slice(threadIdx.x);
-    Tensor tCsB            = smem_thr_copy_B.partition_S(sB);
-    Tensor tCrB_copy_view  = smem_thr_copy_B.retile_D(tCrB);
+    auto smem_thr_copy_B = smem_tiled_copy_B.get_slice(threadIdx.x);
+    Tensor tCsB = smem_thr_copy_B.partition_S(sB);
+    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
 
     int num_k_tiles = (K_dim + tK - 1) / tK;
     auto K_BLOCK_MAX = size<2>(tCrA);
 
     if (num_k_tiles == 0) {
-      _epilogue_atomic(accum, ptr_D, out_map_g,
-                       m_start, n_start, M_g, N, alpha, tiled_mma);
+      _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
       return;
     }
 
@@ -178,14 +170,12 @@ struct CuteGemmGroupedKernel {
     // Mainloop: overlap load(next) with compute(curr)
     CUTLASS_PRAGMA_NO_UNROLL
     for (int k_tile = 1; k_tile < num_k_tiles; ++k_tile) {
-      int curr_stage = (k_tile - 1) & 1;
-      int next_stage = k_tile & 1;
+      int curr_stage = (k_tile - 1) % NumStages;
+      int next_stage = k_tile % NumStages;
       int k_start = k_tile * tK;
 
-      _load_A(ptr_A, in_map_g, sA(_, _, next_stage),
-              m_start, k_start, M_g, K_dim);
-      _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, next_stage),
-                                 n_start, k_start, N, K_dim);
+      _load_A(ptr_A, in_map_g, sA(_, _, next_stage), m_start, k_start, M_g, K_dim);
+      _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, next_stage), n_start, k_start, N, K_dim);
       cute::cp_async_fence();
 
       CUTLASS_PRAGMA_UNROLL
@@ -195,13 +185,13 @@ struct CuteGemmGroupedKernel {
         cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
       }
 
-      cute::cp_async_wait<0>();
+      cute::cp_async_wait<NumStages - 2>();
       __syncthreads();
     }
 
     // Epilog: compute last k_tile
     {
-      int last_stage = (num_k_tiles - 1) & 1;
+      int last_stage = (num_k_tiles - 1) % NumStages;
       CUTLASS_PRAGMA_UNROLL
       for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
         copy(smem_tiled_copy_A, tCsA(_, _, k_block, last_stage), tCrA_copy_view(_, _, k_block));
@@ -210,11 +200,10 @@ struct CuteGemmGroupedKernel {
       }
     }
 
-    _epilogue_atomic(accum, ptr_D, out_map_g,
-                     m_start, n_start, M_g, N, alpha, tiled_mma);
+    _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
   }
 
- private:
+private:
   // ---- A load (gathered) ----
   template <class SmemTensor>
   __device__ void _load_A(const ElementInput *ptr,
@@ -225,11 +214,9 @@ struct CuteGemmGroupedKernel {
                           int M_phys,
                           int K_dim) const {
     if constexpr (UseCpAsyncGatherA) {
-      _load_gathered_tile_cpasync(ptr, gather_map, smem_tile,
-                                  m_start, k_start, M_phys, K_dim);
+      _load_gathered_tile_cpasync(ptr, gather_map, smem_tile, m_start, k_start, M_phys, K_dim);
     } else {
-      _load_gathered_tile_sync(ptr, gather_map, smem_tile,
-                               m_start, k_start, M_phys, K_dim);
+      _load_gathered_tile_sync(ptr, gather_map, smem_tile, m_start, k_start, M_phys, K_dim);
     }
   }
 
@@ -257,13 +244,11 @@ struct CuteGemmGroupedKernel {
       if (m_global < M_phys) {
         int phys_row = gather_map[m_global];
         if (k_global + kVec <= K_dim) {
-          vec_data = *reinterpret_cast<const uint4 *>(
-              &ptr[phys_row * K_dim + k_global]);
+          vec_data = *reinterpret_cast<const uint4 *>(&ptr[phys_row * K_dim + k_global]);
         } else {
           auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
           for (int v = 0; v < kVec; ++v) {
-            if (k_global + v < K_dim)
-              elems[v] = ptr[phys_row * K_dim + k_global + v];
+            if (k_global + v < K_dim) elems[v] = ptr[phys_row * K_dim + k_global + v];
           }
         }
       }
@@ -297,13 +282,14 @@ struct CuteGemmGroupedKernel {
       if (pred) {
         int phys_row = gather_map[m_global];
         const void *gmem_src = &ptr[phys_row * K_dim + k_global];
-        asm volatile(
-            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
-            :: "r"(smem_addr), "l"(gmem_src), "n"(16));
+        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+                     "l"(gmem_src),
+                     "n"(16));
       } else {
-        asm volatile(
-            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n"
-            :: "r"(smem_addr), "l"(ptr), "n"(16), "r"(0));
+        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                     "l"(ptr),
+                     "n"(16),
+                     "r"(0));
       }
     }
   }
@@ -333,13 +319,14 @@ struct CuteGemmGroupedKernel {
 
       if (pred) {
         const void *gmem_src = &ptr_B[k_global * N + n_global];
-        asm volatile(
-            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
-            :: "r"(smem_addr), "l"(gmem_src), "n"(16));
+        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+                     "l"(gmem_src),
+                     "n"(16));
       } else {
-        asm volatile(
-            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n"
-            :: "r"(smem_addr), "l"(ptr_B), "n"(16), "r"(0));
+        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                     "l"(ptr_B),
+                     "n"(16),
+                     "r"(0));
       }
     }
   }
@@ -347,17 +334,16 @@ struct CuteGemmGroupedKernel {
   // ---- Epilogue with atomicAdd for concurrent group writes ----
   template <class Accumulator, class TiledMma_>
   __device__ void _epilogue_atomic(Accumulator &accum,
-                                    ElementOutput *ptr_D,
-                                    const int *out_map,
-                                    int m_start,
-                                    int n_start,
-                                    int M_g,
-                                    int N,
-                                    float alpha,
-                                    TiledMma_ &tiled_mma) const {
+                                   ElementOutput *ptr_D,
+                                   const int *out_map,
+                                   int m_start,
+                                   int n_start,
+                                   int M_g,
+                                   int N,
+                                   float alpha,
+                                   TiledMma_ &tiled_mma) const {
     auto thr_mma = tiled_mma.get_slice(threadIdx.x);
-    Tensor tCrC = thr_mma.partition_C(
-        make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
+    Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
 
     CUTE_UNROLL
     for (int i = 0; i < size(accum); ++i) {
@@ -370,8 +356,7 @@ struct CuteGemmGroupedKernel {
       if (m_global < M_g && n_global < N) {
         int phys_row = out_map[m_global];
         float result = alpha * float(accum(i));
-        atomic_add(&ptr_D[phys_row * N + n_global],
-                   static_cast<ElementOutput>(result));
+        atomic_add(&ptr_D[phys_row * N + n_global], static_cast<ElementOutput>(result));
       }
     }
   }
@@ -379,16 +364,15 @@ struct CuteGemmGroupedKernel {
 
 /// Global kernel entry point for grouped AD gather-scatter
 template <class Kernel>
-__global__ __launch_bounds__(Kernel::MaxThreadsPerBlock)
-    void cute_gemm_grouped_kernel_entry(
-        const typename Kernel::ElementInput *ptr_A,
-        typename Kernel::ElementOutput *ptr_D,
-        const int *in_map,
-        const int *out_map,
-        GroupedGemmParams params,
-        int N,
-        int K_dim,
-        float alpha) {
+__global__ __launch_bounds__(Kernel::MaxThreadsPerBlock) void cute_gemm_grouped_kernel_entry(
+    const typename Kernel::ElementInput *ptr_A,
+    typename Kernel::ElementOutput *ptr_D,
+    const int *in_map,
+    const int *out_map,
+    GroupedGemmParams params,
+    int N,
+    int K_dim,
+    float alpha) {
   extern __shared__ char smem[];
   Kernel{}(ptr_A, ptr_D, in_map, out_map, params, N, K_dim, alpha, smem);
 }
