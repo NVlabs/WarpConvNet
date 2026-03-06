@@ -87,6 +87,8 @@ export WARPCONVNET_FWD_ALGO_MODE="[implicit_gemm,cutlass_implicit_gemm]"
 
 Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`.
 
+To skip auto-tuning entirely by pre-populating the cache, see [Pre-Populate Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/populate_benchmark_cache/) or the [installation section](#optional-pre-populate-the-benchmark-cache) below.
+
 For details on algorithm backends, cache inspection, and tuning, see the [Sparse Convolutions](https://nvlabs.github.io/WarpConvNet/user_guide/sparse_convolutions/) and [Inspecting the Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/inspect_benchmark_cache/) documentation.
 
 ## Installation
@@ -122,7 +124,21 @@ python setup.py build_ext --inplace
 pip install -e . --no-deps --no-build-isolation --force-reinstall
 ```
 
-Available optional dependency groups:
+### Optional: Pre-Populate the Benchmark Cache
+
+To eliminate first-run auto-tuning latency, you can pre-populate the cache for common configurations:
+
+```bash
+# Quick smoke test (~1 minute)
+python scripts/populate_benchmark_cache.py --preset quick
+
+# Full grid for production (728 configs — takes longer)
+python scripts/populate_benchmark_cache.py
+```
+
+The cache file (`~/.cache/warpconvnet/benchmark_cache_generic.msgpack`) is GPU-architecture-specific and can be distributed to other machines with the same GPU type. See the [Pre-Populate Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/populate_benchmark_cache/) guide for details.
+
+### Optional dependency groups
 
 - `warpconvnet[dev]`: Development tools (pytest, coverage, pre-commit)
 - `warpconvnet[docs]`: Documentation building tools

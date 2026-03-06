@@ -242,7 +242,7 @@ Auto-tuning is important because algorithm performance differences are small:
 
 ## Troubleshooting
 
-**Slow first run**: Normal -- auto-tuning benchmarks candidates. Subsequent runs use the cache. Use `auto` mode (not `all`) to minimize tuning time.
+**Slow first run**: Normal -- auto-tuning benchmarks candidates. Subsequent runs use the cache. Use `auto` mode (not `all`) to minimize tuning time. To skip auto-tuning entirely, [pre-populate the cache](./populate_benchmark_cache.md) before your first run.
 
 **Clear cache when switching GPUs**:
 
