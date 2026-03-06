@@ -176,3 +176,86 @@ cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
     run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)),
     record_failures_as_inf=False,
 )
+
+
+# ---------------------------------------------------------------------------
+# CuTe 3.x autotuned wrappers (no split_k, no accumulator_type)
+# ---------------------------------------------------------------------------
+
+_HAS_CUTE_GEMM = hasattr(_C.gemm, "cute_gemm_AD_gather_scatter")
+
+
+def _key_cute_AD_gather_scatter(
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
+    tensor_c: torch.Tensor,
+    tensor_d: torch.Tensor,
+    indices_a: torch.Tensor,
+    indices_d: torch.Tensor,
+    *,
+    mma_tile: int = 0,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+) -> Tuple[Any, ...]:
+    sm, dtype = _sm_dtype_key(tensor_a)
+    out_dtype = str(tensor_c.dtype)
+    _, K = tensor_a.shape
+    K2, N = tensor_b.shape
+    len_a = int(indices_a.numel())
+    len_d = int(indices_d.numel())
+    log_len_a = int(math.ceil(math.log2(len_a))) if len_a > 0 else 0
+    log_len_d = int(math.ceil(math.log2(len_d))) if len_d > 0 else 0
+    return ("cute_gemm_AD_gather_scatter", sm, dtype, out_dtype, K, N, log_len_a, log_len_d)
+
+
+def _key_cute_trAB_gather(
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
+    tensor_c: torch.Tensor,
+    tensor_d: torch.Tensor,
+    indices_a: torch.Tensor,
+    indices_b: torch.Tensor,
+    *,
+    mma_tile: int = 0,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+) -> Tuple[Any, ...]:
+    sm, dtype = _sm_dtype_key(tensor_a)
+    out_dtype = str(tensor_c.dtype)
+    _, K = tensor_a.shape
+    _, N = tensor_b.shape
+    len_a = int(indices_a.numel())
+    len_b = int(indices_b.numel())
+    log_len_a = int(math.ceil(math.log2(len_a))) if len_a > 0 else 0
+    log_len_b = int(math.ceil(math.log2(len_b))) if len_b > 0 else 0
+    return ("cute_gemm_trAB_gather", sm, dtype, out_dtype, K, N, log_len_a, log_len_b)
+
+
+_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS = [{"mma_tile": i} for i in range(10)]
+_BENCHMARK_CUTE_TRAB_GATHER_PARAMS = [{"mma_tile": i} for i in range(10)]
+
+if _HAS_CUTE_GEMM:
+    cute_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
+        namespace="cute_gemm_AD_gather_scatter",
+        c_fn=_C.gemm.cute_gemm_AD_gather_scatter,
+        param_space=_BENCHMARK_CUTE_AD_GATHER_SCATTER_PARAMS,
+        key_fn=_key_cute_AD_gather_scatter,
+        run_and_time_fn=_status_runner_factory(
+            _C.gemm.cute_gemm_AD_gather_scatter, (2, 3)
+        ),
+        record_failures_as_inf=False,
+    )
+
+    cute_gemm_trAB_gather_autotuned = make_autotuned_op(
+        namespace="cute_gemm_trAB_gather",
+        c_fn=_C.gemm.cute_gemm_trAB_gather,
+        param_space=_BENCHMARK_CUTE_TRAB_GATHER_PARAMS,
+        key_fn=_key_cute_trAB_gather,
+        run_and_time_fn=_status_runner_factory(
+            _C.gemm.cute_gemm_trAB_gather, (2, 3)
+        ),
+        record_failures_as_inf=False,
+    )
+else:
+    cute_gemm_AD_gather_scatter_autotuned = None
+    cute_gemm_trAB_gather_autotuned = None
