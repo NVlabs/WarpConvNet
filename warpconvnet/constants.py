@@ -102,6 +102,7 @@ VALID_ALGOS = [
     "implicit_gemm",
     "cutlass_implicit_gemm",
     "auto",
+    "all",
 ]
 
 # Algorithm selection constants
@@ -110,14 +111,18 @@ VALID_ALGOS = [
 # Single algorithm examples:
 #   export WARPCONVNET_FWD_ALGO_MODE=implicit_gemm
 #   export WARPCONVNET_BWD_ALGO_MODE=cutlass_implicit_gemm
-#   export WARPCONVNET_FWD_ALGO_MODE=auto  # (default) benchmark all algorithms
+#   export WARPCONVNET_FWD_ALGO_MODE=auto  # (default) benchmark reduced candidate set
+#   export WARPCONVNET_FWD_ALGO_MODE=all   # benchmark ALL candidates (slow, exhaustive)
 #
 # Multiple algorithm examples (will benchmark only the specified algorithms):
 #   export WARPCONVNET_FWD_ALGO_MODE="[implicit_gemm,cutlass_implicit_gemm]"
 #   export WARPCONVNET_BWD_ALGO_MODE="[explicit_gemm,implicit_gemm]"
 #
-# When multiple algorithms are specified, the system will benchmark only those
-# algorithms instead of all available algorithms and select the best one.
+# "auto" (default): uses a reduced candidate set based on empirical analysis of which
+# algorithms win most frequently. This cuts autotune time by ~60% for forward and ~70%
+# for backward with negligible performance loss.
+#
+# "all": uses the full exhaustive candidate set (19 forward, 32 backward).
 WARPCONVNET_FWD_ALGO_MODE = _get_env_string_list("WARPCONVNET_FWD_ALGO_MODE", "auto", VALID_ALGOS)
 WARPCONVNET_BWD_ALGO_MODE = _get_env_string_list("WARPCONVNET_BWD_ALGO_MODE", "auto", VALID_ALGOS)
 
@@ -141,7 +146,7 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
     "WARPCONVNET_BENCHMARK_CACHE_DIR", "~/.cache/warpconvnet"
 )
 
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 5.0
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 6.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory

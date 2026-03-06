@@ -36,7 +36,7 @@ With `saturation_m=5000`, the 6 face offsets are processed individually while th
 
 ## Grouped Backends
 
-Three grouped variants are available, each applying the grouping strategy to its respective backend.
+Four grouped variants are available, each applying the grouping strategy to its respective backend.
 
 ### Explicit GEMM Grouped (`EXPLICIT_GEMM_GROUPED`)
 
@@ -63,7 +63,15 @@ CUDA kernel: A[in_map[i]] @ B[weight_idx[i]] → atomicAdd to C[out_map[i]]
 
 ### CUTLASS Hybrid Grouped (`CUTLASS_GROUPED_HYBRID`)
 
-Combines CUTLASS fused gather-GEMM-scatter for large offsets with `torch.bmm` for grouped small offsets. This is the highest-performing variant at large scale since CUTLASS has significant per-offset setup cost that grouping amortizes.
+Combines CUTLASS fused gather-GEMM-scatter for large offsets with `torch.bmm` for grouped small offsets. Amortizes CUTLASS per-offset setup cost.
+
+### CuTe Grouped (`CUTE_GROUPED`)
+
+Uses the CuTe 3.x programming model for grouped GEMM with batched offset execution. Auto-tunes the MMA tile shape (`mma_tile` parameter). This is the **most frequently optimal forward backend overall** (44% win rate), dominating at channels >= 96. It processes all offsets in a single grouped GEMM call, avoiding per-offset launch overhead entirely.
+
+```
+CuTe 3.x grouped GEMM: A[in_map] @ B[weight_idx] → C[out_map]
+```
 
 ## Algorithm Selection
 
@@ -137,6 +145,7 @@ The CUTLASS hybrid achieves 6x speedup at 500K coordinates with C=64, where per-
 | `warpconvnet/nn/functional/sparse_conv/detail/explicit.py`        | `_explicit_gemm_forward_grouped()`, `_explicit_gemm_backward_grouped()`                 |
 | `warpconvnet/nn/functional/sparse_conv/detail/implicit_direct.py` | `_implicit_gemm_forward_grouped()`, `_implicit_gemm_backward_grouped()`                 |
 | `warpconvnet/nn/functional/sparse_conv/detail/cutlass.py`         | `_cutlass_implicit_gemm_forward_grouped()`, `_cutlass_implicit_gemm_backward_grouped()` |
+| `warpconvnet/nn/functional/sparse_conv/detail/cute_grouped.py`    | `_cute_grouped_forward()`, `_cute_grouped_backward()` (CuTe 3.x)                        |
 | `warpconvnet/csrc/implicit_gemm.cu`                               | `implicit_gemm_grouped` CUDA kernel                                                     |
 | `warpconvnet/csrc/bindings/gemm_bindings.cpp`                     | pybind11 binding for `_C.gemm.implicit_gemm_grouped`                                    |
 | `warpconvnet/nn/functional/sparse_conv/detail/unified.py`         | Autotuning integration                                                                  |

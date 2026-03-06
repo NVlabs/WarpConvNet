@@ -1,12 +1,18 @@
 ## Inspecting the Benchmark Cache
 
-WarpConvNet benchmarks sparse convolution algorithms at runtime and caches the results for fast reuse across sessions. This page documents the `scripts/inspect_benchmark_cache.py` helper script, which pretty-prints the cached results so you can understand what was tried and which configurations performed best.
+WarpConvNet benchmarks sparse convolution algorithms at runtime and caches the results for fast reuse across sessions. Two scripts are available:
 
-### What it shows
+- `scripts/inspect_benchmark_cache.py` -- Pretty-prints cached results per configuration
+- `scripts/analyze_autotune_cache.py` -- Statistical analysis of algorithm win rates, margins, and coverage
 
-- **Namespaces**: Logical groups of cached results (e.g., `sparse_conv_forward`, `sparse_conv_backward`, low-level kernels).
-- **Per-configuration results**: For each input configuration (number of coords, channels, kernel volume, dtype), the script lists algorithms that were benchmarked and the measured time.
-- **Ordering**: Results are shown best-first by default within each configuration.
+### What the cache contains
+
+- **Namespaces**: Logical groups of cached results:
+  - `sparse_conv_forward` / `sparse_conv_backward` -- Top-level algorithm selection (e.g., `cute_grouped`, `cutlass_implicit_gemm`)
+  - `implicit_gemm_AD_gather_scatter` / `cute_gemm_AD_gather_scatter` -- MMA tile + split-K tuning for per-offset forward kernels
+  - `implicit_gemm_trAB_gather` / `cute_gemm_trAB_gather` -- MMA tile + split-K tuning for transposed (TrAB) backward kernels
+- **Per-configuration results**: For each input configuration (log2(N), channels, kernel volume, dtype), the cache stores all benchmarked algorithms sorted by time.
+- **Ordering**: Results are stored best-first within each configuration.
 
 ## Quick start
 
@@ -137,23 +143,38 @@ Results:
 
 ## Interpreting results
 
-- **Configuration**: A unique combination of problem shape and dtype: `num_in_coords`, `num_out_coords` (logged as powers of 2 for brevity), `in_channels`, `out_channels`, `kernel_volume`, and `in_dtype`.
+- **Configuration**: A unique combination of problem shape and dtype: `log_num_in_coords`, `log_num_out_coords` (ceil(log2(N)) for quantization), `in_channels`, `out_channels`, `kernel_volume`, and `in_dtype`.
 - **Algorithms**: Each entry is `[algo_name, params, time_ms]`.
-  - `implicit_gemm` may include parameters like `fwd_block_size`, `gemm_block_size`, `split_k_threads_per_block`, `split_k_factor` depending on forward/backward.
-  - `cutlass_implicit_gemm` and `wmma_implicit_gemm` typically list `{}` because they auto-tune internally.
-  - `explicit_gemm` uses a dense path and lists `{}`.
+  - `implicit_gemm`: includes `fwd_block_size` (forward) or `gemm_block_size`, `split_k_factor` (backward)
+  - `cutlass_implicit_gemm`: typically `{}` (auto-tunes MMA tile internally)
+  - `cute_grouped`: includes `mma_tile` (CuTe 3.x tile shape index)
+  - `cutlass_grouped_hybrid`, `implicit_gemm_grouped`: include `saturation_m` (grouping threshold)
+  - `explicit_gemm`: `{}` (no tunable parameters)
 - **Best-first**: The first result per configuration is the fastest among those benchmarked.
+
+## Statistical analysis
+
+For aggregate analysis across all cached configs (win rates, margins, per-channel breakdowns), use:
+
+```bash
+python scripts/analyze_autotune_cache.py --markdown --output analysis.md
+```
+
+This generates:
+
+- Algorithm win rates and top-3 rates
+- Wins broken down by channel pair, kernel volume, and problem size
+- Margin analysis (how close is the runner-up to the winner)
+- Recommendations for reduced candidate sets
 
 ## Relationship to environment variables
 
 The cache reflects runs filtered by your environment variable settings in `warpconvnet/constants.py`:
 
-- `WARPCONVNET_FWD_ALGO_MODE`
-- `WARPCONVNET_BWD_ALGO_MODE`
+- `WARPCONVNET_FWD_ALGO_MODE`: `auto` (adaptive reduced set), `all` (exhaustive), single algorithm, or bracket list
+- `WARPCONVNET_BWD_ALGO_MODE`: same options
 
-These accept a single algorithm (e.g., `implicit_gemm`, `cutlass_implicit_gemm`, `wmma_implicit_gemm`, `explicit_gemm`) or a list like `[implicit_gemm,wmma_implicit_gemm,cutlass_implicit_gemm]`. The inspector shows what was actually benchmarked inside that filtered search space.
-
-See the sparse convolutions guide for details on recommended settings and AUTO mode.
+When set to `auto` (default), the system uses an adaptive candidate set that varies by channel size. See [Sparse Convolutions](./sparse_convolutions.md) for details on `auto` vs `all` mode.
 
 ## Benchmark cache management
 
