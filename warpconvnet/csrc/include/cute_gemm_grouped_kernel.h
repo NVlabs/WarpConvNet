@@ -24,18 +24,16 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include "cute/tensor.hpp"
 #include "cute/algorithm/copy.hpp"
 #include "cute/arch/copy_sm80.hpp"
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
-#include "cute/tensor.hpp"
 #include "cute_gemm_config.h"
 #include "grouped_gemm_params.h"
 
 namespace warpconvnet {
 namespace cute_gemm {
-
-using namespace cute;
 
 /// atomicAdd wrapper that handles cutlass types by casting to native CUDA types.
 template <typename T>
@@ -81,19 +79,19 @@ struct CuteGemmGroupedKernel {
   using SmemCopyAtomA = typename TileConfig::SmemCopyAtomA;
   using SmemCopyAtomB = typename TileConfig::SmemCopyAtomB;
 
-  static constexpr int MaxThreadsPerBlock = size(TiledMma{});
+  static constexpr int MaxThreadsPerBlock = cute::size(TiledMma{});
   static constexpr int MinBlocksPerMultiprocessor = 1;
 
-  static constexpr int tM = size<0>(TileShape{});
-  static constexpr int tN = size<1>(TileShape{});
-  static constexpr int tK = size<2>(TileShape{});
+  static constexpr int tM = cute::size<0>(TileShape{});
+  static constexpr int tN = cute::size<1>(TileShape{});
+  static constexpr int tK = cute::size<2>(TileShape{});
   static constexpr int NumStages = TileConfig::NumStages;
   static constexpr bool UseCpAsyncGatherA = TileConfig::UseCpAsyncGatherA;
 
-  using SmemLayoutA = decltype(tile_to_shape(SmemLayoutAtomA{},
-                                             make_shape(Int<tM>{}, Int<tK>{}, Int<NumStages>{})));
-  using SmemLayoutB = decltype(tile_to_shape(SmemLayoutAtomB{},
-                                             make_shape(Int<tN>{}, Int<tK>{}, Int<NumStages>{})));
+  using SmemLayoutA = decltype(cute::tile_to_shape(SmemLayoutAtomA{},
+                                             cute::make_shape(cute::Int<tM>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
+  using SmemLayoutB = decltype(cute::tile_to_shape(SmemLayoutAtomB{},
+                                             cute::make_shape(cute::Int<tN>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
 
   struct SharedStorage {
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
@@ -113,6 +111,7 @@ struct CuteGemmGroupedKernel {
                              int K_dim,
                              float alpha,
                              char *smem_buf) const {
+    using namespace cute;
     // --- Step 1: Determine which group this block belongs to ---
     int global_m_tile = int(blockIdx.x);
     int n_tile = int(blockIdx.y);
@@ -342,6 +341,7 @@ private:
                                    int N,
                                    float alpha,
                                    TiledMma_ &tiled_mma) const {
+    using namespace cute;
     auto thr_mma = tiled_mma.get_slice(threadIdx.x);
     Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
 
