@@ -23,6 +23,9 @@ from warpconvnet.nn.functional.sparse_conv.detail.grouping import (
 )
 
 
+_CUTLASS_ALIGNMENT = 8  # CUTLASS tensor ops require channels aligned to 8
+
+
 def _cutlass_implicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
@@ -34,6 +37,11 @@ def _cutlass_implicit_gemm_forward_logic(
     assert (
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available. Please install warpconvnet with cutlass support."
+
+    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
+    C_in, C_out = weight.shape[1], weight.shape[2]
+    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
+        return -1  # kErrorProblemNotSupported
 
     device = in_features.device
     iden_idx = kernel_map.identity_map_index
@@ -88,6 +96,11 @@ def _cutlass_implicit_gemm_backward_logic(
     assert (
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available. Please install warpconvnet with cutlass support."
+
+    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
+    C_in, C_out = weight.shape[1], weight.shape[2]
+    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
+        return -1, 0  # kErrorProblemNotSupported
 
     if device is None:
         device = in_features.device
@@ -166,6 +179,11 @@ def _cutlass_implicit_gemm_forward_grouped(
     assert (
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available."
+
+    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
+    C_in, C_out = weight.shape[1], weight.shape[2]
+    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
+        return -1  # kErrorProblemNotSupported
 
     device = in_features.device
     iden_idx = kernel_map.identity_map_index
@@ -255,6 +273,11 @@ def _cutlass_implicit_gemm_backward_grouped(
     assert (
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available."
+
+    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
+    C_in, C_out = weight.shape[1], weight.shape[2]
+    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
+        return -1, 0  # kErrorProblemNotSupported
 
     if device is None:
         device = in_features.device
