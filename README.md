@@ -54,6 +54,41 @@ dense: Tensor = vox.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=
 
 See `examples/modelnet.py` for a full training script.
 
+## Sparse Convolution Auto-Tuning
+
+WarpConvNet automatically benchmarks CUDA kernel algorithms (GEMM tile shapes, grouping strategies) on the first forward pass and caches the results to `~/.cache/warpconvnet/`. Subsequent runs reuse cached results with no overhead.
+
+**The first iteration will be slower** while auto-tuning runs. You will see log messages like:
+
+```
+Auto-tuning sparse convolution algorithms. The first few iterations will be slow...
+Auto-tune forward complete: cute_grouped (mma_tile=1) — 0.54ms
+```
+
+### Configuration
+
+| Environment Variable              | Default                | Description                                                                                         |
+| --------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | Forward algorithm. `auto` (benchmark reduced set), `all` (exhaustive), or a specific algorithm name |
+| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | Backward algorithm. Same options as forward                                                         |
+| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` or `0` to suppress auto-tuning log messages                                          |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Directory for cached auto-tune results                                                              |
+
+```bash
+# Suppress auto-tuning logs
+export WARPCONVNET_AUTOTUNE_LOG=false
+
+# Pin a specific algorithm (skip auto-tuning entirely)
+export WARPCONVNET_FWD_ALGO_MODE=explicit_gemm
+
+# Benchmark only specific algorithms
+export WARPCONVNET_FWD_ALGO_MODE="[implicit_gemm,cutlass_implicit_gemm]"
+```
+
+Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`.
+
+For details on algorithm backends, cache inspection, and tuning, see the [Sparse Convolutions](https://nvlabs.github.io/WarpConvNet/user_guide/sparse_convolutions/) and [Inspecting the Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/inspect_benchmark_cache/) documentation.
+
 ## Installation
 
 Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies. When using `uv`, prepend with `uv pip install ...`.

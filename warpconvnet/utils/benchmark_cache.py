@@ -122,6 +122,19 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 
+def _get_sm_capability() -> Tuple[int, int]:
+    """Return (major, minor) compute capability of the current CUDA device.
+
+    Cached after first call.  Falls back to (0, 0) when no GPU is available.
+    """
+    if not hasattr(_get_sm_capability, "_cached"):
+        try:
+            _get_sm_capability._cached = torch.cuda.get_device_capability()
+        except Exception:
+            _get_sm_capability._cached = (0, 0)
+    return _get_sm_capability._cached
+
+
 @dataclass
 class SpatiallySparseConvConfig:
     log_num_in_coords: int
@@ -130,7 +143,7 @@ class SpatiallySparseConvConfig:
     out_channels: int
     kernel_volume: int
     in_dtype: torch.dtype
-    # explicit_matmul_batch_size: Optional[int] = None # TODO: Add if supporting batched explicit
+    sm_capability: Tuple[int, int]
 
     def __init__(
         self,
@@ -140,7 +153,6 @@ class SpatiallySparseConvConfig:
         out_channels: int,
         kernel_volume: int,
         in_dtype: torch.dtype,
-        # explicit_matmul_batch_size: Optional[int] = None, # TODO
     ):
         self.log_num_in_coords = math.ceil(math.log2(num_in_coords)) if num_in_coords > 0 else 0
         self.log_num_out_coords = math.ceil(math.log2(num_out_coords)) if num_out_coords > 0 else 0
@@ -149,7 +161,7 @@ class SpatiallySparseConvConfig:
         self.kernel_volume = kernel_volume
         assert in_dtype in _SPARSE_CONV_CONFIG_DTYPE_TO_INT, f"Unsupported in_dtype: {in_dtype}"
         self.in_dtype = in_dtype
-        # self.explicit_matmul_batch_size = explicit_matmul_batch_size # TODO
+        self.sm_capability = _get_sm_capability()
 
     def __hash__(self):
         return _int_sequence_hash(
@@ -160,6 +172,7 @@ class SpatiallySparseConvConfig:
                 self.out_channels,
                 self.kernel_volume,
                 _SPARSE_CONV_CONFIG_DTYPE_TO_INT[self.in_dtype],
+                self.sm_capability[0] * 10 + self.sm_capability[1],
             ]
         )
 
@@ -173,6 +186,7 @@ class SpatiallySparseConvConfig:
             and self.out_channels == other.out_channels
             and self.kernel_volume == other.kernel_volume
             and self.in_dtype == other.in_dtype
+            and self.sm_capability == other.sm_capability
         )
 
 

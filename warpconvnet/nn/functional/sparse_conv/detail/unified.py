@@ -46,6 +46,7 @@ from .cutlass import (
     _cutlass_implicit_gemm_forward_grouped,
     _cutlass_implicit_gemm_backward_grouped,
 )
+
 try:
     from .cute import (
         _cute_implicit_gemm_forward_logic,
@@ -74,8 +75,60 @@ _BENCHMARK_NUM_RUNS = 2
 # Track whether auto-tune banner has been shown (once per process)
 _AUTOTUNE_BANNER_SHOWN = False
 
-# Forward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (block size), EXPLICIT
-_BENCHMARK_FORWARD_PARAMS = [
+# Base forward benchmark candidates shared across all channel sizes.
+_BENCHMARK_FORWARD_PARAMS_BASE = [
+    ("cutlass_implicit_gemm", {}),
+    ("cutlass_grouped_hybrid", {"saturation_m": 2000}),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED
+        else [
+            ("cute_grouped", {"mma_tile": 3}),
+            ("cute_grouped", {"mma_tile": 0}),
+            ("cute_grouped", {"mma_tile": 1}),
+        ]
+    ),
+]
+
+# Additional candidates for small channels (max(C_in, C_out) <= 64).
+# implicit_gemm wins 14/38 at 32->32, 11/28 at 64->64 but never wins at C>=96.
+# cute_implicit_gemm wins 9 times total, all at small channels / small N.
+_BENCHMARK_FORWARD_PARAMS_SMALL_CH = [
+    *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [16, 32]],
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
+]
+
+# Additional candidates for small channels (max <= 64).
+# implicit_gemm_grouped wins 10/292 overall (3.4%), all at small channels:
+# 5 wins at 3->32 kv=125, 5 wins at 32->64/32->32/7->13 kv=8/27.
+# Margins vs implicit_gemm are tiny (0.1%-4.9%) so these are only needed
+# when implicit_gemm is already a candidate (i.e., small channels).
+_BENCHMARK_FORWARD_PARAMS_GROUPED = [
+    ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 2000}),
+    ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 5000}),
+]
+
+
+def _get_adaptive_forward_params(
+    in_channels: int, out_channels: int, kernel_volume: int
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get forward benchmark candidates adapted to the convolution dimensions.
+
+    Based on cache analysis of 292 configs:
+    - Small channels (max(C_in,C_out) <= 64): implicit_gemm wins ~30%,
+      implicit_gemm_grouped wins ~3.4% (all at small channels)
+    - Large channels (max >= 96): implicit_gemm/grouped never win forward
+    """
+    max_ch = max(in_channels, out_channels)
+    params = list(_BENCHMARK_FORWARD_PARAMS_BASE)
+    if max_ch <= 64:
+        params.extend(_BENCHMARK_FORWARD_PARAMS_SMALL_CH)
+        params.extend(_BENCHMARK_FORWARD_PARAMS_GROUPED)
+    return params
+
+
+# Full forward benchmark candidates ("all"): exhaustive search including rarely-winning variants.
+_ALL_BENCHMARK_FORWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
     *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
@@ -88,15 +141,41 @@ _BENCHMARK_FORWARD_PARAMS = [
         for m in [2000, 5000]
     ],
     *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    *([] if not _HAS_CUTE_GROUPED else [
-        ("cute_grouped", {"mma_tile": 3}),
-        ("cute_grouped", {"mma_tile": 0}),
-        ("cute_grouped", {"mma_tile": 1}),
-    ]),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED
+        else [
+            ("cute_grouped", {"mma_tile": 3}),
+            ("cute_grouped", {"mma_tile": 0}),
+            ("cute_grouped", {"mma_tile": 1}),
+        ]
+    ),
 ]
 
-# Backward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (configs), EXPLICIT
+# Reduced backward benchmark candidates (default "auto"): only algorithms that
+# win or appear in top-3 frequently. 9 candidates vs 32 in the full set.
 _BENCHMARK_BACKWARD_PARAMS = [
+    ("cutlass_implicit_gemm", {}),
+    ("explicit_gemm", {}),
+    ("explicit_gemm_grouped", {"saturation_m": 2000}),
+    (
+        "implicit_gemm",
+        {"gemm_block_size": 16, "split_k_threads_per_block": 256, "split_k_factor": 2},
+    ),
+    *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *(
+        []
+        if not _HAS_CUTE_GROUPED
+        else [
+            ("cute_grouped", {"mma_tile": 3}),
+            ("cute_grouped", {"mma_tile": 0}),
+            ("cute_grouped", {"mma_tile": 1}),
+        ]
+    ),
+]
+
+# Full backward benchmark candidates ("all"): exhaustive search.
+_ALL_BENCHMARK_BACKWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
     *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[
@@ -130,11 +209,15 @@ _BENCHMARK_BACKWARD_PARAMS = [
         for m in [2000, 5000]
     ],
     *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    *([] if not _HAS_CUTE_GROUPED else [
-        ("cute_grouped", {"mma_tile": 3}),
-        ("cute_grouped", {"mma_tile": 0}),
-        ("cute_grouped", {"mma_tile": 1}),
-    ]),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED
+        else [
+            ("cute_grouped", {"mma_tile": 3}),
+            ("cute_grouped", {"mma_tile": 0}),
+            ("cute_grouped", {"mma_tile": 1}),
+        ]
+    ),
 ]
 
 _BENCHMARK_FORWARD_RESULTS: Dict[
@@ -244,15 +327,22 @@ def _filter_benchmark_params_by_env_config(
     """Filter benchmark parameters based on environment variable configuration.
 
     Args:
-        all_params: All available benchmark parameters
+        all_params: All available benchmark parameters (the reduced "auto" set)
         env_config: Environment variable value (string or list of algorithm names)
         is_forward: Whether this is for forward pass (affects enum type)
 
     Returns:
         Filtered list of benchmark parameters
     """
+    if env_config == "all":
+        # When "all", use the full exhaustive candidate set
+        full_params = (
+            _ALL_BENCHMARK_FORWARD_PARAMS if is_forward else _ALL_BENCHMARK_BACKWARD_PARAMS
+        )
+        return [(str(algo), params) for algo, params in full_params]
+
     if env_config == "auto":
-        # When "auto", use all available algorithms
+        # When "auto", use reduced candidate set (default)
         return [(str(algo), params) for algo, params in all_params]
 
     # Convert environment config to list of algorithm names
@@ -279,20 +369,6 @@ def _filter_benchmark_params_by_env_config(
         return all_params
 
     return filtered_params
-
-
-def _get_filtered_forward_params() -> List[Tuple[str, Dict[str, Any]]]:
-    """Get forward benchmark parameters filtered by environment variable."""
-    return _filter_benchmark_params_by_env_config(
-        _BENCHMARK_FORWARD_PARAMS, WARPCONVNET_FWD_ALGO_MODE, is_forward=True
-    )
-
-
-def _get_filtered_backward_params() -> List[Tuple[str, Dict[str, Any]]]:
-    """Get backward benchmark parameters filtered by environment variable."""
-    return _filter_benchmark_params_by_env_config(
-        _BENCHMARK_BACKWARD_PARAMS, WARPCONVNET_BWD_ALGO_MODE, is_forward=False
-    )
 
 
 def _run_forward_benchmarks(
@@ -447,7 +523,9 @@ def _run_forward_benchmarks(
                     _execute_single_fwd_pass(algo_mode, params_config)
                 current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
         except (RuntimeError, Exception) as e:
-            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})")
+            logger.debug(
+                f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
+            )
             continue
 
         if current_algo_min_time_ms != float("inf"):
@@ -460,9 +538,7 @@ def _run_forward_benchmarks(
             )
 
     if not all_benchmark_results:
-        logger.warning(
-            "No forward benchmark succeeded. Falling back to explicit_gemm."
-        )
+        logger.warning("No forward benchmark succeeded. Falling back to explicit_gemm.")
         with timer:
             _execute_single_fwd_pass("explicit_gemm", {})
         all_benchmark_results.append(("explicit_gemm", {}, timer.elapsed_time))
@@ -652,7 +728,9 @@ def _run_backward_benchmarks(
                         _execute_single_bwd_pass(algo_mode, params_config)
                     current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
             except (RuntimeError, Exception) as e:
-                logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})")
+                logger.debug(
+                    f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
+                )
                 continue
 
         if current_algo_min_time_ms != float("inf"):
@@ -665,9 +743,7 @@ def _run_backward_benchmarks(
             )
 
     if not all_benchmark_results:
-        logger.warning(
-            "No backward benchmark succeeded. Falling back to explicit_gemm."
-        )
+        logger.warning("No backward benchmark succeeded. Falling back to explicit_gemm.")
         with timer:
             _execute_single_bwd_pass("explicit_gemm", {})
         all_benchmark_results.append(("explicit_gemm", {}, timer.elapsed_time))
@@ -724,12 +800,17 @@ class UnifiedSpatiallySparseConvFunction(Function):
             algorithm_filter = [str(fwd_algo)]
 
         # Step 2: Generate configuration for caching
+        C_in = in_features.shape[1]
+        C_out = weight.shape[2]
+        kv = weight.shape[0]
+        adaptive_fwd_params = _get_adaptive_forward_params(C_in, C_out, kv)
+
         config = SpatiallySparseConvConfig(
             num_in_coords=in_features.shape[0],
             num_out_coords=num_out_coords,
-            in_channels=in_features.shape[1],
-            out_channels=weight.shape[2],
-            kernel_volume=weight.shape[0],
+            in_channels=C_in,
+            out_channels=C_out,
+            kernel_volume=kv,
             in_dtype=in_features.dtype,
         )
 
@@ -754,7 +835,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[0]
                 else:
                     filtered_params = _filter_benchmark_params_by_env_config(
-                        _BENCHMARK_FORWARD_PARAMS, algorithm_filter, is_forward=True
+                        adaptive_fwd_params, algorithm_filter, is_forward=True
                     )
                     if not filtered_params and "explicit_gemm" in algorithm_filter:
                         chosen_fwd_algo, chosen_fwd_params = (
@@ -782,12 +863,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
         else:
             # Step 4: No cache - always benchmark within filtered space
             if algorithm_filter == "auto":
-                # Benchmark all algorithms
-                filtered_params = _BENCHMARK_FORWARD_PARAMS
+                # Benchmark all (channel-adaptive) algorithms
+                filtered_params = adaptive_fwd_params
             else:
                 # Filter benchmark parameters to only include algorithms in filter set
                 filtered_params = _filter_benchmark_params_by_env_config(
-                    _BENCHMARK_FORWARD_PARAMS, algorithm_filter, is_forward=True
+                    adaptive_fwd_params, algorithm_filter, is_forward=True
                 )
 
             # Always run benchmarks to find optimal parameters
@@ -813,7 +894,11 @@ class UnifiedSpatiallySparseConvFunction(Function):
         def _execute_chosen_fwd(algo, params):
             if algo == "explicit_gemm":
                 return _explicit_gemm_forward_logic(
-                    in_features, weight, kernel_map, num_out_coords, compute_dtype,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
+                    compute_dtype,
                 )
             elif algo == "implicit_gemm":
                 current_fwd_block_size = params.get("fwd_block_size")
@@ -823,12 +908,19 @@ class UnifiedSpatiallySparseConvFunction(Function):
                         f"fwd_block_size not found in chosen_fwd_params for IMPLICIT_GEMM, using fallback {current_fwd_block_size}"
                     )
                 return _implicit_gemm_forward_logic(
-                    in_features, weight, kernel_map, num_out_coords,
-                    compute_dtype, current_fwd_block_size,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
+                    compute_dtype,
+                    current_fwd_block_size,
                 )
             elif algo == "cutlass_implicit_gemm":
                 result = _cutlass_implicit_gemm_forward_logic(
-                    in_features, weight, kernel_map, num_out_coords,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
                     accumulator_type=params.get("accumulator_type", torch.float32),
                 )
                 if isinstance(result, int) and result != 0:
@@ -838,7 +930,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 return result
             elif algo == "cute_implicit_gemm":
                 result = _cute_implicit_gemm_forward_logic(
-                    in_features, weight, kernel_map, num_out_coords,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
                 )
                 if isinstance(result, int) and result != 0:
                     raise RuntimeError(
@@ -847,7 +942,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 return result
             elif algo == "cute_grouped":
                 result = _cute_grouped_forward_logic(
-                    in_features, weight, kernel_map, num_out_coords,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
                     mma_tile=params.get("mma_tile", 3),
                 )
                 if isinstance(result, int) and result != 0:
@@ -857,18 +955,29 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 return result
             elif algo == "explicit_gemm_grouped":
                 return _explicit_gemm_forward_grouped(
-                    in_features, weight, kernel_map, num_out_coords,
-                    compute_dtype, saturation_m=params.get("saturation_m", 5000),
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
+                    compute_dtype,
+                    saturation_m=params.get("saturation_m", 5000),
                 )
             elif algo == "implicit_gemm_grouped":
                 return _implicit_gemm_forward_grouped(
-                    in_features, weight, kernel_map, num_out_coords,
-                    compute_dtype, fwd_block_size=params.get("fwd_block_size", 16),
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
+                    compute_dtype,
+                    fwd_block_size=params.get("fwd_block_size", 16),
                     saturation_m=params.get("saturation_m", 5000),
                 )
             elif algo == "cutlass_grouped_hybrid":
                 result = _cutlass_implicit_gemm_forward_grouped(
-                    in_features, weight, kernel_map, num_out_coords,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
                     accumulator_type=params.get("accumulator_type", torch.float32),
                     saturation_m=params.get("saturation_m", 5000),
                 )
@@ -1072,11 +1181,20 @@ class UnifiedSpatiallySparseConvFunction(Function):
         def _execute_chosen_bwd(algo, params):
             if algo == "explicit_gemm":
                 return _explicit_gemm_backward_logic(
-                    grad_output, in_features, weight, kernel_map, compute_dtype, device,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    compute_dtype,
+                    device,
                 )
             elif algo == "implicit_gemm":
                 return _implicit_gemm_backward_logic(
-                    grad_output, in_features, weight, kernel_map, num_out_coords,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
                     gemm_block_size=params.get("bwd_block_size", 16),
                     split_k_threads_per_block=params.get("split_k_threads_per_block", 256),
                     split_k_factor=params.get("split_k_factor", 4),
@@ -1084,7 +1202,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 )
             elif algo == "cutlass_implicit_gemm":
                 result = _cutlass_implicit_gemm_backward_logic(
-                    grad_output, in_features, weight, kernel_map,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
                     accumulator_type=params.get("accumulator_type", torch.float32),
                     device=device,
                 )
@@ -1095,7 +1216,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 return result
             elif algo == "cute_implicit_gemm":
                 result = _cute_implicit_gemm_backward_logic(
-                    grad_output, in_features, weight, kernel_map,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
                     requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
                     device=device,
                 )
@@ -1106,13 +1230,21 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 return result
             elif algo == "explicit_gemm_grouped":
                 return _explicit_gemm_backward_grouped(
-                    grad_output, in_features, weight, kernel_map,
-                    compute_dtype, device,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    compute_dtype,
+                    device,
                     saturation_m=params.get("saturation_m", 5000),
                 )
             elif algo == "implicit_gemm_grouped":
                 return _implicit_gemm_backward_grouped(
-                    grad_output, in_features, weight, kernel_map, num_out_coords,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
+                    num_out_coords,
                     gemm_block_size=params.get("gemm_block_size", 16),
                     split_k_threads_per_block=params.get("split_k_threads_per_block", 256),
                     split_k_factor=params.get("split_k_factor", 4),
@@ -1121,7 +1253,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 )
             elif algo == "cutlass_grouped_hybrid":
                 result = _cutlass_implicit_gemm_backward_grouped(
-                    grad_output, in_features, weight, kernel_map,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
                     accumulator_type=params.get("accumulator_type", torch.float32),
                     device=device,
                     saturation_m=params.get("saturation_m", 5000),
@@ -1133,7 +1268,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 return result
             elif algo == "cute_grouped":
                 result = _cute_grouped_backward_logic(
-                    grad_output, in_features, weight, kernel_map,
+                    grad_output,
+                    in_features,
+                    weight,
+                    kernel_map,
                     requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
                     device=device,
                     mma_tile=params.get("mma_tile", 3),
