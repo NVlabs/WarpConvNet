@@ -132,7 +132,7 @@ To eliminate first-run auto-tuning latency, you can pre-populate the cache for c
 # Quick smoke test (~1 minute)
 python scripts/populate_benchmark_cache.py --preset quick
 
-# Full grid for production (728 configs — takes longer)
+# Full grid for production (364 configs — takes longer)
 python scripts/populate_benchmark_cache.py
 ```
 

@@ -98,7 +98,7 @@ NUM_VOXELS_DEFAULT = [
     2_000_000,  # log2 ~ 21
 ]
 
-KERNEL_SIZES_DEFAULT = [3, 5]  # 3^3=27, 5^3=125
+KERNEL_SIZES_DEFAULT = [3]  # 3^3=27
 DTYPES_DEFAULT = [torch.float16, torch.bfloat16]
 
 # Quick preset: minimal grid for smoke testing
