@@ -12,7 +12,7 @@ To eliminate this cold-start cost entirely, you can **pre-populate the cache** u
 
 ```bash
 # Pre-populate with default configs (MinkUNet/MaxViT-UNet channel progressions,
-# 7 voxel counts, ks=3 and ks=5, fp16 and bf16 — 728 configs total)
+# 7 voxel counts, ks=3, fp16 and bf16 — 364 configs total)
 python scripts/populate_benchmark_cache.py
 
 # Quick smoke test (6 configs, ~1 minute)
@@ -30,10 +30,10 @@ The default configuration grid covers common 3D deep learning architectures:
 | --------- | ------ | ------ |
 | **Voxel counts** | 30K, 65K, 130K, 260K, 500K, 1M, 2M | Indoor (ScanNet) to outdoor (nuScenes/Waymo) |
 | **Channel pairs** | 3→32, 32→64, 64→128, 128→256, 256→256, ... (26 pairs) | MinkUNet18/34, MaxViT-UNet, SparseConvUNet |
-| **Kernel sizes** | 3, 5 | Standard 3×3×3 and 5×5×5 |
+| **Kernel sizes** | 3 | Standard 3×3×3 |
 | **Dtypes** | float16, bfloat16 | Mixed-precision training |
 
-After log₂-deduplication (voxel counts that map to the same cache bucket are merged), this produces **728 unique configurations**.
+After log₂-deduplication (voxel counts that map to the same cache bucket are merged), this produces **364 unique configurations**.
 
 ### Customizing the grid
 
@@ -109,7 +109,7 @@ usage: populate_benchmark_cache.py [-h]
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
-| `--preset` | `default` | `default` (728 configs) or `quick` (6 configs) |
+| `--preset` | `default` | `default` (364 configs) or `quick` (6 configs) |
 | `--num-voxels` | preset | Override voxel counts |
 | `--channels` | preset | Override channel pairs as `C_in,C_out` |
 | `--kernel-sizes` | preset | Override kernel sizes |
