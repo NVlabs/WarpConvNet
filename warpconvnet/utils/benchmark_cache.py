@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import re
 import math
 import os
-import pickle
 import threading
 import time
 import atexit
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, Sequence, TypeVar, Generic, Callable, Iterable, List
 from dataclasses import dataclass
 
+import msgpack
 import torch
 
 from warpconvnet.constants import (
@@ -56,40 +57,32 @@ _SPARSE_CONV_CONFIG_DTYPE_TO_INT = {
 # ----------------------
 
 
-def _atomic_pickle_replace(target_path: Path, data: Any) -> None:
-    """Atomically write pickle data to target by writing to a temp file then renaming."""
+def _atomic_msgpack_replace(target_path: Path, data: Any) -> None:
+    """Atomically write msgpack data to target by writing to a temp file then renaming."""
     temp_file = target_path.with_suffix(".tmp")
     with open(temp_file, "wb") as f:
-        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.write(msgpack.packb(data, use_bin_type=True))
     temp_file.replace(target_path)
 
 
 def _sanitize_for_pickle(value: Any) -> Any:
-    """Recursively convert non-stable objects (Enums, dtypes, devices) to strings for safe pickling.
+    """Recursively convert non-stable objects (Enums, dtypes, devices) to strings.
 
-    Primary goal: avoid importing heavy modules (e.g., Enum classes defined in other modules)
-    during unpickling that can break due to import-time side effects.
+    Used to normalize in-memory cache values before writing to disk.
     """
     try:
-        # Enums -> their name (fallback to str)
         if isinstance(value, enum.Enum):
             try:
                 return str(value.name)
             except Exception:
                 return str(value)
-
-        # Common torch types to stringify
         try:
-            import torch as _torch  # local import to avoid mandatory global dependency at module load
-
-            if isinstance(value, _torch.dtype):
+            if isinstance(value, torch.dtype):
                 return str(value)
-            if isinstance(value, _torch.device):
+            if isinstance(value, torch.device):
                 return str(value)
         except Exception:
             pass
-
-        # Basic containers: preserve type where possible
         if isinstance(value, dict):
             return {_sanitize_for_pickle(k): _sanitize_for_pickle(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -99,12 +92,113 @@ def _sanitize_for_pickle(value: Any) -> Any:
         if isinstance(value, set):
             return {_sanitize_for_pickle(v) for v in value}
     except Exception:
-        # Best-effort sanitization; fall back to string on any unexpected issue
         try:
             return str(value)
         except Exception:
             return None
     return value
+
+
+# -----------------------------------------------------------------------
+# Msgpack serialization helpers
+#
+# Msgpack only supports basic types (str, int, float, bytes, list, dict
+# with str keys).  We need to convert:
+#   - SpatiallySparseConvConfig  →  tagged list
+#   - tuple keys (from autotuned_ops)  →  tagged list
+#   - tuple values (legacy benchmark results)  →  tagged list
+#   - sets  →  tagged list
+# -----------------------------------------------------------------------
+
+_DTYPE_STR_MAP = {
+    torch.bfloat16: "bfloat16",
+    torch.float16: "float16",
+    torch.float32: "float32",
+    torch.float64: "float64",
+}
+_STR_DTYPE_MAP = {v: k for k, v in _DTYPE_STR_MAP.items()}
+
+
+def _to_msgpack(obj: Any) -> Any:
+    """Recursively convert a Python object to msgpack-safe types."""
+    if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
+        return obj
+    if isinstance(obj, enum.Enum):
+        return str(obj.name)
+    if isinstance(obj, torch.dtype):
+        return str(obj)
+    if isinstance(obj, torch.device):
+        return str(obj)
+    if isinstance(obj, tuple):
+        return {"__t__": "T", "d": [_to_msgpack(v) for v in obj]}
+    if isinstance(obj, set):
+        return {"__t__": "S", "d": [_to_msgpack(v) for v in sorted(obj, key=str)]}
+    if isinstance(obj, list):
+        return [_to_msgpack(v) for v in obj]
+    if isinstance(obj, dict):
+        # msgpack dict keys must be str/bytes
+        return {str(_to_msgpack(k)): _to_msgpack(v) for k, v in obj.items()}
+    # SpatiallySparseConvConfig
+    if hasattr(obj, "log_num_in_coords") and hasattr(obj, "sm_capability"):
+        return {
+            "__t__": "SCC",
+            "li": obj.log_num_in_coords,
+            "lo": obj.log_num_out_coords,
+            "ci": obj.in_channels,
+            "co": obj.out_channels,
+            "kv": obj.kernel_volume,
+            "dt": _DTYPE_STR_MAP.get(obj.in_dtype, str(obj.in_dtype)),
+            "sm": list(obj.sm_capability),
+        }
+    return str(obj)
+
+
+def _from_msgpack(obj: Any) -> Any:
+    """Recursively convert msgpack-deserialized data back to Python objects."""
+    if obj is None or isinstance(obj, (bool, int, float, bytes)):
+        return obj
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, list):
+        return [_from_msgpack(v) for v in obj]
+    if isinstance(obj, dict):
+        tag = obj.get("__t__")
+        if tag == "T":
+            return tuple(_from_msgpack(v) for v in obj["d"])
+        if tag == "S":
+            return {_from_msgpack(v) for v in obj["d"]}
+        if tag == "SCC":
+            config = SpatiallySparseConvConfig.__new__(SpatiallySparseConvConfig)
+            config.log_num_in_coords = obj["li"]
+            config.log_num_out_coords = obj["lo"]
+            config.in_channels = obj["ci"]
+            config.out_channels = obj["co"]
+            config.kernel_volume = obj["kv"]
+            config.in_dtype = _STR_DTYPE_MAP.get(obj["dt"], torch.float32)
+            config.sm_capability = tuple(obj["sm"])
+            return config
+        # Regular dict — deserialize keys and values
+        return {_from_msgpack(k): _from_msgpack(v) for k, v in obj.items()}
+    return obj
+
+
+def _namespace_to_msgpack(ns_dict: Dict[Any, Any]) -> list:
+    """Convert a namespace dict to a list of [key, value] pairs for msgpack.
+
+    We store as a list of pairs because msgpack dict keys must be str/bytes,
+    but our keys are SpatiallySparseConvConfig or tuples.
+    """
+    return [[_to_msgpack(k), _to_msgpack(v)] for k, v in ns_dict.items()]
+
+
+def _namespace_from_msgpack(pairs: list) -> Dict[Any, Any]:
+    """Convert a list of [key, value] pairs back to a namespace dict."""
+    result = {}
+    for pair in pairs:
+        k = _from_msgpack(pair[0])
+        v = _from_msgpack(pair[1])
+        result[k] = v
+    return result
 
 
 def _parse_version_to_major_minor(version_value: Any) -> Tuple[int, int]:
@@ -218,7 +312,7 @@ class GenericBenchmarkCache(Generic[K, V]):
             logger.debug(f"Using override cache directory: {cache_dir}")
 
         self.cache_dir = Path(cache_dir).expanduser().resolve()  # Resolve symlinks
-        self.cache_file = self.cache_dir / "benchmark_cache_generic.pkl"
+        self.cache_file = self.cache_dir / "benchmark_cache_generic.msgpack"
         self.lock = threading.Lock()
 
         current_rank = _get_current_rank()
@@ -296,49 +390,62 @@ class GenericBenchmarkCache(Generic[K, V]):
                 ):
                     self._do_save()
 
+    def _load_disk_namespaces(self) -> Dict[str, Dict[K, V]]:
+        """Load namespaces from disk, returning empty dict on any failure."""
+        if not self.cache_file.exists():
+            return {}
+        try:
+            with open(self.cache_file, "rb") as f:
+                disk_data = msgpack.unpackb(f.read(), raw=False)
+            if not isinstance(disk_data, dict):
+                return {}
+            raw_ns = disk_data.get("namespaces", {})
+            if not isinstance(raw_ns, dict):
+                return {}
+            result: Dict[str, Dict[K, V]] = {}
+            for ns_name, pairs in raw_ns.items():
+                if isinstance(pairs, list):
+                    result[ns_name] = _namespace_from_msgpack(pairs)  # type: ignore[assignment]
+                elif isinstance(pairs, dict):
+                    # Should not happen with new format, but handle gracefully
+                    result[ns_name] = {_from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()}
+            return result
+        except Exception:
+            return {}
+
+    def _write_cache_to_disk(self, namespaces: Dict[str, Dict[K, V]], timestamp: float) -> None:
+        """Serialize namespaces to msgpack and atomically write to disk."""
+        serialized_ns: Dict[str, list] = {}
+        for ns_name, ns_dict in namespaces.items():
+            sanitized: Dict[Any, Any] = {}
+            for k, v in ns_dict.items():
+                sanitized[k] = _sanitize_for_pickle(v)
+            serialized_ns[ns_name] = _namespace_to_msgpack(sanitized)
+        cache_data = {
+            "namespaces": serialized_ns,
+            "timestamp": timestamp,
+            "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
+        }
+        _atomic_msgpack_replace(self.cache_file, cache_data)
+
     def _do_save(self) -> None:
         if not self.pending_changes:
             return
         try:
             current_time = time.time()
             # Merge with on-disk cache to avoid clobbering writes from other processes
-            on_disk: Dict[str, Dict[K, V]] = {}
-            if self.cache_file.exists():
-                try:
-                    with open(self.cache_file, "rb") as f:
-                        disk_data = pickle.load(f)
-                        if isinstance(disk_data, dict):
-                            on_disk = disk_data.get("namespaces", {}) or {}
-                except Exception:
-                    on_disk = {}
+            on_disk = self._load_disk_namespaces()
 
             merged: Dict[str, Dict[K, V]] = {}
-            # Start with on-disk
             for ns, kv in on_disk.items():
                 merged[ns] = dict(kv)
-            # Overlay in-memory changes per-namespace
             for ns, kv in self._results.items():
                 base = merged.get(ns, {})
                 base.update(kv)
                 merged[ns] = base
 
-            # Keep in-memory in sync with what we are about to write
             self._results = merged
-
-            # Sanitize values prior to pickling to avoid importing enum classes on load
-            sanitized_namespaces: Dict[str, Dict[K, V]] = {}
-            for ns, kv in merged.items():
-                sanitized_ns: Dict[K, V] = {}
-                for k, v in kv.items():
-                    sanitized_ns[k] = _sanitize_for_pickle(v)  # type: ignore[assignment]
-                sanitized_namespaces[ns] = sanitized_ns
-
-            cache_data = {
-                "namespaces": sanitized_namespaces,
-                "timestamp": current_time,
-                "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
-            }
-            _atomic_pickle_replace(self.cache_file, cache_data)
+            self._write_cache_to_disk(merged, current_time)
             self.last_save_time = current_time
             self.pending_changes = False
             total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
@@ -354,11 +461,11 @@ class GenericBenchmarkCache(Generic[K, V]):
             return {}
         try:
             with open(self.cache_file, "rb") as f:
-                cache_data = pickle.load(f)
+                cache_data = msgpack.unpackb(f.read(), raw=False)
 
             if not isinstance(cache_data, dict):
                 logger.warning(
-                    "Invalid generic cache file format, deleting cache and starting with empty cache"
+                    "Invalid generic cache file format, resetting to empty cache"
                 )
                 return {}
 
@@ -370,21 +477,27 @@ class GenericBenchmarkCache(Generic[K, V]):
             )
 
             if int(file_major) == int(expected_major):
-                namespaces = cache_data.get("namespaces", {})
-                if not isinstance(namespaces, dict):
+                raw_ns = cache_data.get("namespaces", {})
+                if not isinstance(raw_ns, dict):
                     logger.warning(
-                        "Generic cache 'namespaces' is not a dict; deleting cache and resetting to empty"
+                        "Generic cache 'namespaces' is not a dict; resetting to empty"
                     )
-                    namespaces = {}
-                return namespaces
+                    return {}
+                result: Dict[str, Dict[K, V]] = {}
+                for ns_name, pairs in raw_ns.items():
+                    if isinstance(pairs, list):
+                        result[ns_name] = _namespace_from_msgpack(pairs)  # type: ignore[assignment]
+                    elif isinstance(pairs, dict):
+                        result[ns_name] = {_from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()}
+                return result
             else:
                 logger.warning(
-                    f"Loaded generic benchmark cache v{file_major}.{file_minor}, but expected v{expected_major}.{expected_minor}. Deleting cache and resetting."
+                    f"Loaded generic benchmark cache v{file_major}.{file_minor}, but expected v{expected_major}.{expected_minor}. Resetting."
                 )
                 return {}
         except Exception as e:
             logger.warning(
-                f"Failed to load generic benchmark cache: {e}. Deleting cache and starting with empty cache."
+                f"Failed to load generic benchmark cache: {e}. Starting with empty cache."
             )
             return {}
 
@@ -413,16 +526,7 @@ class GenericBenchmarkCache(Generic[K, V]):
         with self.lock:
             current_time = time.time()
             try:
-                # Merge with on-disk cache
-                on_disk: Dict[str, Dict[K, V]] = {}
-                if self.cache_file.exists():
-                    try:
-                        with open(self.cache_file, "rb") as f:
-                            disk_data = pickle.load(f)
-                            if isinstance(disk_data, dict):
-                                on_disk = disk_data.get("namespaces", {}) or {}
-                    except Exception:
-                        on_disk = {}
+                on_disk = self._load_disk_namespaces()
 
                 merged: Dict[str, Dict[K, V]] = {}
                 for ns, kv in on_disk.items():
@@ -435,21 +539,7 @@ class GenericBenchmarkCache(Generic[K, V]):
                     merged[ns] = base
 
                 self._results = merged
-
-                # Sanitize before writing
-                sanitized_namespaces: Dict[str, Dict[K, V]] = {}
-                for ns, kv in merged.items():
-                    sanitized_ns: Dict[K, V] = {}
-                    for k, v in kv.items():
-                        sanitized_ns[k] = _sanitize_for_pickle(v)  # type: ignore[assignment]
-                    sanitized_namespaces[ns] = sanitized_ns
-
-                cache_data = {
-                    "namespaces": sanitized_namespaces,
-                    "timestamp": current_time,
-                    "version": WARPCONVNET_BENCHMARK_CACHE_VERSION,
-                }
-                _atomic_pickle_replace(self.cache_file, cache_data)
+                self._write_cache_to_disk(merged, current_time)
                 self.last_save_time = current_time
                 self.pending_changes = False
                 total_entries = sum(len(ns_dict) for ns_dict in self._results.values())

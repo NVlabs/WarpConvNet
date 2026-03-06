@@ -17,7 +17,7 @@ classifiers = [
     "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
 ]
-dependencies = ["numpy", "jaxtyping", "pybind11"]
+dependencies = ["numpy", "jaxtyping", "pybind11", "msgpack"]
 dynamic = ["version"]
 
 [project.urls]
