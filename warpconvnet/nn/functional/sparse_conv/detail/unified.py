@@ -425,10 +425,14 @@ def _run_forward_benchmarks(
     for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         # Warmup runs
         status = None
-        for _ in range(warmup_iters):
-            status = _execute_single_fwd_pass(algo_mode, params_config)
-            if isinstance(status, int) and status != 0:
-                break
+        try:
+            for _ in range(warmup_iters):
+                status = _execute_single_fwd_pass(algo_mode, params_config)
+                if isinstance(status, int) and status != 0:
+                    break
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            continue
 
         if isinstance(status, int) and status != 0:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
@@ -437,10 +441,14 @@ def _run_forward_benchmarks(
         # Benchmark runs
         current_algo_min_time_ms = float("inf")
 
-        for _ in range(benchmark_iters):
-            with timer:
-                _execute_single_fwd_pass(algo_mode, params_config)
-            current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+        try:
+            for _ in range(benchmark_iters):
+                with timer:
+                    _execute_single_fwd_pass(algo_mode, params_config)
+                current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})")
+            continue
 
         if current_algo_min_time_ms != float("inf"):
             all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
@@ -618,10 +626,14 @@ def _run_backward_benchmarks(
 
     for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         status = None
-        for _ in range(warmup_iters):
-            status = _execute_single_bwd_pass(algo_mode, params_config)
-            if isinstance(status, int) and status != 0:
-                break
+        try:
+            for _ in range(warmup_iters):
+                status = _execute_single_bwd_pass(algo_mode, params_config)
+                if isinstance(status, int) and status != 0:
+                    break
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            continue
 
         if isinstance(status, int) and status != 0:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
@@ -634,10 +646,14 @@ def _run_backward_benchmarks(
             if warmup_iters == 0:
                 continue
         else:
-            for _ in range(benchmark_iters):
-                with timer:
-                    _execute_single_bwd_pass(algo_mode, params_config)
-                current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+            try:
+                for _ in range(benchmark_iters):
+                    with timer:
+                        _execute_single_bwd_pass(algo_mode, params_config)
+                    current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+            except (RuntimeError, Exception) as e:
+                logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})")
+                continue
 
         if current_algo_min_time_ms != float("inf"):
             all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
