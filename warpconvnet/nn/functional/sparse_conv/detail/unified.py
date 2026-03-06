@@ -55,6 +55,15 @@ try:
     _HAS_CUTE_BACKEND = True
 except Exception:
     _HAS_CUTE_BACKEND = False
+try:
+    from .cute_grouped import (
+        _cute_grouped_forward_logic,
+        _cute_grouped_backward_logic,
+    )
+
+    _HAS_CUTE_GROUPED = _HAS_CUTE_BACKEND
+except Exception:
+    _HAS_CUTE_GROUPED = False
 from .grouping import prepare_grouped_kernel_map
 
 logger = get_logger(__name__)
@@ -79,6 +88,11 @@ _BENCHMARK_FORWARD_PARAMS = [
         for m in [2000, 5000]
     ],
     *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *([] if not _HAS_CUTE_GROUPED else [
+        ("cute_grouped", {"mma_tile": 3}),
+        ("cute_grouped", {"mma_tile": 0}),
+        ("cute_grouped", {"mma_tile": 1}),
+    ]),
 ]
 
 # Backward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (configs), EXPLICIT
@@ -116,6 +130,11 @@ _BENCHMARK_BACKWARD_PARAMS = [
         for m in [2000, 5000]
     ],
     *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *([] if not _HAS_CUTE_GROUPED else [
+        ("cute_grouped", {"mma_tile": 3}),
+        ("cute_grouped", {"mma_tile": 0}),
+        ("cute_grouped", {"mma_tile": 1}),
+    ]),
 ]
 
 _BENCHMARK_FORWARD_RESULTS: Dict[
@@ -137,6 +156,7 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM_GROUPED = "explicit_gemm_grouped"
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
+    CUTE_GROUPED = "cute_grouped"
     AUTO = "auto"  # Benchmark and select the best algorithm
 
 
@@ -148,6 +168,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM_GROUPED = "explicit_gemm_grouped"
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
+    CUTE_GROUPED = "cute_grouped"
     AUTO = "auto"  # Benchmark and select the best algorithm
 
 
@@ -363,6 +384,18 @@ def _run_forward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
+        elif algo_mode == "cute_grouped":
+            if not _HAS_CUTE_GROUPED:
+                return -1
+            status = _cute_grouped_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                mma_tile=params_config.get("mma_tile", 3),
+            )
+            if isinstance(status, int) and status != 0:
+                return status
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
 
@@ -540,6 +573,20 @@ def _run_backward_benchmarks(
                 accumulator_type=params_config.get("accumulator_type", torch.float32),
                 device=device,
                 saturation_m=params_config.get("saturation_m", 5000),
+            )
+            if isinstance(result[0], int) and result[0] != 0:
+                return result[0]
+        elif algo_mode == "cute_grouped":
+            if not _HAS_CUTE_GROUPED:
+                return -1
+            result = _cute_grouped_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(True, True),
+                device=device,
+                mma_tile=params_config.get("mma_tile", 3),
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
@@ -792,6 +839,18 @@ class UnifiedSpatiallySparseConvFunction(Function):
             if isinstance(output_feature_tensor, int) and output_feature_tensor != 0:
                 raise RuntimeError(
                     f"Error in _cute_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
+                )
+        elif chosen_fwd_algo == "cute_grouped":
+            output_feature_tensor = _cute_grouped_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                mma_tile=chosen_fwd_params.get("mma_tile", 3),
+            )
+            if isinstance(output_feature_tensor, int) and output_feature_tensor != 0:
+                raise RuntimeError(
+                    f"Error in _cute_grouped_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
                 )
         elif chosen_fwd_algo == "explicit_gemm_grouped":
             output_feature_tensor = _explicit_gemm_forward_grouped(
@@ -1087,6 +1146,20 @@ class UnifiedSpatiallySparseConvFunction(Function):
             if isinstance(grad_in_features, int) and grad_in_features != 0:
                 raise RuntimeError(
                     f"Error in _cutlass_implicit_gemm_backward_grouped: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
+                )
+        elif chosen_bwd_algo == "cute_grouped":
+            grad_in_features, grad_weight = _cute_grouped_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
+                device=device,
+                mma_tile=chosen_bwd_params.get("mma_tile", 3),
+            )
+            if isinstance(grad_in_features, int) and grad_in_features != 0:
+                raise RuntimeError(
+                    f"Error in _cute_grouped_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
                 )
         else:
             raise ValueError(f"Unsupported backward algorithm: {chosen_bwd_algo}")

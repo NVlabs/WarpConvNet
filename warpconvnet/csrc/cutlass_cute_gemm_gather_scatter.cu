@@ -52,6 +52,26 @@ int run_cute_gemm_trAB_gather(const void *a,
 }
 
 // ============================================================================
+// Grouped AD gather-scatter (fused multi-offset)
+// ============================================================================
+
+template <typename ElementInput, typename TileTag, typename ElementOutput>
+int run_cute_gemm_grouped_ad_gather_scatter(
+    const void *a,
+    void *d,
+    const int *in_map,
+    const int *out_map,
+    const GroupedGemmParams &params,
+    int total_m_tiles,
+    int K,
+    int N,
+    float alpha) {
+  using Config = CuteTileConfig<ElementInput, TileTag>;
+  return launch_cute_gemm_grouped_ad_gather_scatter<ElementInput, Config, ElementOutput>(
+      a, d, in_map, out_map, params, total_m_tiles, K, N, alpha);
+}
+
+// ============================================================================
 // Explicit instantiations
 // ============================================================================
 
@@ -99,6 +119,36 @@ INSTANTIATE_ALL_DTYPES(Tile64x256x32)
 #undef INSTANTIATE_ALL_DTYPES
 #undef INSTANTIATE_CUTE_AD_GS
 #undef INSTANTIATE_CUTE_TRAB
+
+// ============================================================================
+// Grouped GEMM explicit instantiations
+// ============================================================================
+
+#define INSTANTIATE_CUTE_GROUPED(ElemIn, ElemOut, TileTag)                      \
+  template int run_cute_gemm_grouped_ad_gather_scatter<                         \
+      ElemIn, gemm::TileTag, ElemOut>(                                          \
+      const void *, void *, const int *, const int *,                           \
+      const GroupedGemmParams &, int, int, int, float);
+
+#define INSTANTIATE_GROUPED_ALL_DTYPES(TileTag)                                \
+  INSTANTIATE_CUTE_GROUPED(cutlass::half_t,      float,              TileTag)  \
+  INSTANTIATE_CUTE_GROUPED(cutlass::half_t,      cutlass::half_t,    TileTag)  \
+  INSTANTIATE_CUTE_GROUPED(cutlass::bfloat16_t,  float,              TileTag)  \
+  INSTANTIATE_CUTE_GROUPED(cutlass::bfloat16_t,  cutlass::bfloat16_t,TileTag)
+
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile64x64x32)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile128x64x32)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile64x128x32)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile128x128x32)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile64x64x64)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile128x64x64)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile64x128x64)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile128x128x64)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile256x64x32)
+INSTANTIATE_GROUPED_ALL_DTYPES(Tile64x256x32)
+
+#undef INSTANTIATE_GROUPED_ALL_DTYPES
+#undef INSTANTIATE_CUTE_GROUPED
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet

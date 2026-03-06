@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include "cute_gemm_kernel.h"
+#include "cute_gemm_grouped_kernel.h"
 #include "gemm_error_codes.h"
 
 namespace warpconvnet {
@@ -114,6 +115,59 @@ int launch_cute_gemm_trAB_gather(const void *ptr_A,
           reinterpret_cast<ElementOutput *>(ptr_D),
           indices_a, indices_b,
           K, N, gather_size, alpha, beta);
+
+  auto err = cudaGetLastError();
+  return err == cudaSuccess ? static_cast<int>(gemm::GemmStatus::kSuccess)
+                            : static_cast<int>(gemm::GemmStatus::kErrorKernelExecution);
+}
+
+// ============================================================================
+// Grouped GEMM launcher — fused multi-offset sparse convolution
+// ============================================================================
+
+/// Launch a fused grouped CuTe GEMM with AD gather-scatter.
+///
+/// All groups share ptr_A (input features) and ptr_D (output, zero-initialized).
+/// Each group has its own weight pointer (ptr_B_array[g]), gather indices
+/// (in_map + map_offsets[g]), and scatter indices (out_map + map_offsets[g]).
+/// Output is accumulated via atomicAdd since multiple groups may write to
+/// overlapping output rows.
+template <typename ElementInput, typename TileConfig, typename ElementOutput = float>
+int launch_cute_gemm_grouped_ad_gather_scatter(
+    const void *ptr_A,
+    void *ptr_D,
+    const int *in_map,
+    const int *out_map,
+    const GroupedGemmParams &params,
+    int total_m_tiles,
+    int K,
+    int N,
+    float alpha,
+    cudaStream_t stream = 0) {
+  using Kernel = CuteGemmGroupedKernel<TileConfig, ElementOutput>;
+  constexpr int TileN = cute::size<1>(typename TileConfig::TileShape{});
+  constexpr size_t smem_size = Kernel::SharedStorageSize;
+
+  if (total_m_tiles == 0) {
+    return static_cast<int>(gemm::GemmStatus::kSuccess);
+  }
+
+  dim3 grid(total_m_tiles, (N + TileN - 1) / TileN, 1);
+
+  if (smem_size > 48 * 1024) {
+    auto err = cudaFuncSetAttribute(
+        cute_gemm_grouped_kernel_entry<Kernel>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    if (err != cudaSuccess) {
+      return static_cast<int>(gemm::GemmStatus::kErrorKernelInitialization);
+    }
+  }
+
+  cute_gemm_grouped_kernel_entry<Kernel>
+      <<<grid, Kernel::MaxThreadsPerBlock, smem_size, stream>>>(
+          reinterpret_cast<const ElementInput *>(ptr_A),
+          reinterpret_cast<ElementOutput *>(ptr_D),
+          in_map, out_map, params, N, K, alpha);
 
   auto err = cudaGetLastError();
   return err == cudaSuccess ? static_cast<int>(gemm::GemmStatus::kSuccess)
