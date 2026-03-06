@@ -46,6 +46,24 @@ from .cutlass import (
     _cutlass_implicit_gemm_forward_grouped,
     _cutlass_implicit_gemm_backward_grouped,
 )
+try:
+    from .cute import (
+        _cute_implicit_gemm_forward_logic,
+        _cute_implicit_gemm_backward_logic,
+    )
+
+    _HAS_CUTE_BACKEND = True
+except Exception:
+    _HAS_CUTE_BACKEND = False
+try:
+    from .cute_grouped import (
+        _cute_grouped_forward_logic,
+        _cute_grouped_backward_logic,
+    )
+
+    _HAS_CUTE_GROUPED = _HAS_CUTE_BACKEND
+except Exception:
+    _HAS_CUTE_GROUPED = False
 from .grouping import prepare_grouped_kernel_map
 
 logger = get_logger(__name__)
@@ -59,6 +77,7 @@ _AUTOTUNE_BANNER_SHOWN = False
 # Forward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (block size), EXPLICIT
 _BENCHMARK_FORWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
     ("explicit_gemm", {}),
     # Grouped variants: adaptive offset grouping with batched execution
@@ -69,11 +88,17 @@ _BENCHMARK_FORWARD_PARAMS = [
         for m in [2000, 5000]
     ],
     *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *([] if not _HAS_CUTE_GROUPED else [
+        ("cute_grouped", {"mma_tile": 3}),
+        ("cute_grouped", {"mma_tile": 0}),
+        ("cute_grouped", {"mma_tile": 1}),
+    ]),
 ]
 
 # Backward benchmark candidates: CUTLASS (autotuned per-call), IMPLICIT (configs), EXPLICIT
 _BENCHMARK_BACKWARD_PARAMS = [
     ("cutlass_implicit_gemm", {}),
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[
         (
             "implicit_gemm",
@@ -105,6 +130,11 @@ _BENCHMARK_BACKWARD_PARAMS = [
         for m in [2000, 5000]
     ],
     *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *([] if not _HAS_CUTE_GROUPED else [
+        ("cute_grouped", {"mma_tile": 3}),
+        ("cute_grouped", {"mma_tile": 0}),
+        ("cute_grouped", {"mma_tile": 1}),
+    ]),
 ]
 
 _BENCHMARK_FORWARD_RESULTS: Dict[
@@ -122,9 +152,11 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
+    CUTE_IMPLICIT_GEMM = "cute_implicit_gemm"
     EXPLICIT_GEMM_GROUPED = "explicit_gemm_grouped"
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
+    CUTE_GROUPED = "cute_grouped"
     AUTO = "auto"  # Benchmark and select the best algorithm
 
 
@@ -132,9 +164,11 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     EXPLICIT_GEMM = "explicit_gemm"
     IMPLICIT_GEMM = "implicit_gemm"
     CUTLASS_IMPLICIT_GEMM = "cutlass_implicit_gemm"
+    CUTE_IMPLICIT_GEMM = "cute_implicit_gemm"
     EXPLICIT_GEMM_GROUPED = "explicit_gemm_grouped"
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
+    CUTE_GROUPED = "cute_grouped"
     AUTO = "auto"  # Benchmark and select the best algorithm
 
 
@@ -328,6 +362,17 @@ def _run_forward_benchmarks(
                 fwd_block_size=params_config.get("fwd_block_size", 16),
                 saturation_m=params_config.get("saturation_m", 5000),
             )
+        elif algo_mode == "cute_implicit_gemm":
+            if not _HAS_CUTE_BACKEND:
+                return -1
+            status = _cute_implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+            )
+            if isinstance(status, int) and status != 0:
+                return status
         elif algo_mode == "cutlass_grouped_hybrid":
             status = _cutlass_implicit_gemm_forward_grouped(
                 in_features,
@@ -336,6 +381,18 @@ def _run_forward_benchmarks(
                 num_out_coords,
                 accumulator_type=params_config.get("accumulator_type", torch.float32),
                 saturation_m=params_config.get("saturation_m", 5000),
+            )
+            if isinstance(status, int) and status != 0:
+                return status
+        elif algo_mode == "cute_grouped":
+            if not _HAS_CUTE_GROUPED:
+                return -1
+            status = _cute_grouped_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                mma_tile=params_config.get("mma_tile", 3),
             )
             if isinstance(status, int) and status != 0:
                 return status
@@ -368,10 +425,14 @@ def _run_forward_benchmarks(
     for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         # Warmup runs
         status = None
-        for _ in range(warmup_iters):
-            status = _execute_single_fwd_pass(algo_mode, params_config)
-            if isinstance(status, int) and status != 0:
-                break
+        try:
+            for _ in range(warmup_iters):
+                status = _execute_single_fwd_pass(algo_mode, params_config)
+                if isinstance(status, int) and status != 0:
+                    break
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            continue
 
         if isinstance(status, int) and status != 0:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
@@ -380,10 +441,14 @@ def _run_forward_benchmarks(
         # Benchmark runs
         current_algo_min_time_ms = float("inf")
 
-        for _ in range(benchmark_iters):
-            with timer:
-                _execute_single_fwd_pass(algo_mode, params_config)
-            current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+        try:
+            for _ in range(benchmark_iters):
+                with timer:
+                    _execute_single_fwd_pass(algo_mode, params_config)
+                current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})")
+            continue
 
         if current_algo_min_time_ms != float("inf"):
             all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
@@ -472,6 +537,18 @@ def _run_backward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
+        elif algo_mode == "cute_implicit_gemm":
+            if not _HAS_CUTE_BACKEND:
+                return -1
+            result = _cute_implicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                device=device,
+            )
+            if isinstance(result[0], int) and result[0] != 0:
+                return result[0]
         elif algo_mode == "explicit_gemm_grouped":
             _, _ = _explicit_gemm_backward_grouped(
                 grad_output,
@@ -507,6 +584,20 @@ def _run_backward_benchmarks(
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
+        elif algo_mode == "cute_grouped":
+            if not _HAS_CUTE_GROUPED:
+                return -1
+            result = _cute_grouped_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(True, True),
+                device=device,
+                mma_tile=params_config.get("mma_tile", 3),
+            )
+            if isinstance(result[0], int) and result[0] != 0:
+                return result[0]
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
 
@@ -535,10 +626,14 @@ def _run_backward_benchmarks(
 
     for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         status = None
-        for _ in range(warmup_iters):
-            status = _execute_single_bwd_pass(algo_mode, params_config)
-            if isinstance(status, int) and status != 0:
-                break
+        try:
+            for _ in range(warmup_iters):
+                status = _execute_single_bwd_pass(algo_mode, params_config)
+                if isinstance(status, int) and status != 0:
+                    break
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            continue
 
         if isinstance(status, int) and status != 0:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
@@ -551,10 +646,14 @@ def _run_backward_benchmarks(
             if warmup_iters == 0:
                 continue
         else:
-            for _ in range(benchmark_iters):
-                with timer:
-                    _execute_single_bwd_pass(algo_mode, params_config)
-                current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+            try:
+                for _ in range(benchmark_iters):
+                    with timer:
+                        _execute_single_bwd_pass(algo_mode, params_config)
+                    current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+            except (RuntimeError, Exception) as e:
+                logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})")
+                continue
 
         if current_algo_min_time_ms != float("inf"):
             all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
@@ -711,75 +810,88 @@ class UnifiedSpatiallySparseConvFunction(Function):
             chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
 
         # Step 5: Execute with optimal algorithm and parameters
-        if chosen_fwd_algo == "explicit_gemm":
-            output_feature_tensor = _explicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-            )
-        elif chosen_fwd_algo == "implicit_gemm":
-            current_fwd_block_size = chosen_fwd_params.get("fwd_block_size")
-            if current_fwd_block_size is None:  # Fallback if somehow not set
-                current_fwd_block_size = fwd_block_size if fwd_block_size is not None else 16
-                logger.warning(
-                    f"fwd_block_size not found in chosen_fwd_params for IMPLICIT_GEMM, using fallback {current_fwd_block_size}"
+        def _execute_chosen_fwd(algo, params):
+            if algo == "explicit_gemm":
+                return _explicit_gemm_forward_logic(
+                    in_features, weight, kernel_map, num_out_coords, compute_dtype,
                 )
-            output_feature_tensor = _implicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                current_fwd_block_size,
-            )
-        elif chosen_fwd_algo == "cutlass_implicit_gemm":
-            output_feature_tensor = _cutlass_implicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                accumulator_type=chosen_fwd_params.get("accumulator_type", torch.float32),
-            )
-            if isinstance(output_feature_tensor, int) and output_feature_tensor != 0:
-                raise RuntimeError(
-                    f"Error in _cutlass_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
+            elif algo == "implicit_gemm":
+                current_fwd_block_size = params.get("fwd_block_size")
+                if current_fwd_block_size is None:
+                    current_fwd_block_size = fwd_block_size if fwd_block_size is not None else 16
+                    logger.warning(
+                        f"fwd_block_size not found in chosen_fwd_params for IMPLICIT_GEMM, using fallback {current_fwd_block_size}"
+                    )
+                return _implicit_gemm_forward_logic(
+                    in_features, weight, kernel_map, num_out_coords,
+                    compute_dtype, current_fwd_block_size,
                 )
-        elif chosen_fwd_algo == "explicit_gemm_grouped":
-            output_feature_tensor = _explicit_gemm_forward_grouped(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                saturation_m=chosen_fwd_params.get("saturation_m", 5000),
-            )
-        elif chosen_fwd_algo == "implicit_gemm_grouped":
-            output_feature_tensor = _implicit_gemm_forward_grouped(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                fwd_block_size=chosen_fwd_params.get("fwd_block_size", 16),
-                saturation_m=chosen_fwd_params.get("saturation_m", 5000),
-            )
-        elif chosen_fwd_algo == "cutlass_grouped_hybrid":
-            output_feature_tensor = _cutlass_implicit_gemm_forward_grouped(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                accumulator_type=chosen_fwd_params.get("accumulator_type", torch.float32),
-                saturation_m=chosen_fwd_params.get("saturation_m", 5000),
-            )
-            if isinstance(output_feature_tensor, int) and output_feature_tensor != 0:
-                raise RuntimeError(
-                    f"Error in _cutlass_implicit_gemm_forward_grouped: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(output_feature_tensor))}"
+            elif algo == "cutlass_implicit_gemm":
+                result = _cutlass_implicit_gemm_forward_logic(
+                    in_features, weight, kernel_map, num_out_coords,
+                    accumulator_type=params.get("accumulator_type", torch.float32),
                 )
-        else:
-            raise ValueError(f"Unsupported forward algorithm: {chosen_fwd_algo}")
+                if isinstance(result, int) and result != 0:
+                    raise RuntimeError(
+                        f"Error in _cutlass_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
+                    )
+                return result
+            elif algo == "cute_implicit_gemm":
+                result = _cute_implicit_gemm_forward_logic(
+                    in_features, weight, kernel_map, num_out_coords,
+                )
+                if isinstance(result, int) and result != 0:
+                    raise RuntimeError(
+                        f"Error in _cute_implicit_gemm_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
+                    )
+                return result
+            elif algo == "cute_grouped":
+                result = _cute_grouped_forward_logic(
+                    in_features, weight, kernel_map, num_out_coords,
+                    mma_tile=params.get("mma_tile", 3),
+                )
+                if isinstance(result, int) and result != 0:
+                    raise RuntimeError(
+                        f"Error in _cute_grouped_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
+                    )
+                return result
+            elif algo == "explicit_gemm_grouped":
+                return _explicit_gemm_forward_grouped(
+                    in_features, weight, kernel_map, num_out_coords,
+                    compute_dtype, saturation_m=params.get("saturation_m", 5000),
+                )
+            elif algo == "implicit_gemm_grouped":
+                return _implicit_gemm_forward_grouped(
+                    in_features, weight, kernel_map, num_out_coords,
+                    compute_dtype, fwd_block_size=params.get("fwd_block_size", 16),
+                    saturation_m=params.get("saturation_m", 5000),
+                )
+            elif algo == "cutlass_grouped_hybrid":
+                result = _cutlass_implicit_gemm_forward_grouped(
+                    in_features, weight, kernel_map, num_out_coords,
+                    accumulator_type=params.get("accumulator_type", torch.float32),
+                    saturation_m=params.get("saturation_m", 5000),
+                )
+                if isinstance(result, int) and result != 0:
+                    raise RuntimeError(
+                        f"Error in _cutlass_implicit_gemm_forward_grouped: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
+                    )
+                return result
+            else:
+                raise ValueError(f"Unsupported forward algorithm: {algo}")
+
+        try:
+            output_feature_tensor = _execute_chosen_fwd(chosen_fwd_algo, chosen_fwd_params)
+        except (RuntimeError, Exception) as e:
+            if chosen_fwd_algo == "explicit_gemm":
+                raise  # No fallback for the fallback
+            logger.warning(
+                f"Forward algorithm '{chosen_fwd_algo}' failed at execution: {e}. "
+                f"Falling back to explicit_gemm."
+            )
+            # Invalidate the cached result for this config
+            _BENCHMARK_FORWARD_RESULTS.pop(config, None)
+            output_feature_tensor = _execute_chosen_fwd("explicit_gemm", {})
 
         ctx.save_for_backward(in_features, weight)
         ctx.kernel_map = kernel_map
@@ -957,79 +1069,94 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
             chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]
 
-        if chosen_bwd_algo == "explicit_gemm":
-            grad_in_features, grad_weight = _explicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                compute_dtype,
-                device,
-            )
-        elif chosen_bwd_algo == "implicit_gemm":
-            grad_in_features, grad_weight = _implicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                gemm_block_size=chosen_bwd_params.get("bwd_block_size", 16),
-                split_k_threads_per_block=chosen_bwd_params.get("split_k_threads_per_block", 256),
-                split_k_factor=chosen_bwd_params.get("split_k_factor", 4),
-                compute_dtype=compute_dtype,
-            )
-        elif chosen_bwd_algo == "cutlass_implicit_gemm":
-            grad_in_features, grad_weight = _cutlass_implicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                accumulator_type=chosen_bwd_params.get("accumulator_type", torch.float32),
-                device=device,
-            )
-            if isinstance(grad_in_features, int) and grad_in_features != 0:
-                raise RuntimeError(
-                    f"Error in _cutlass_implicit_gemm_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
+        def _execute_chosen_bwd(algo, params):
+            if algo == "explicit_gemm":
+                return _explicit_gemm_backward_logic(
+                    grad_output, in_features, weight, kernel_map, compute_dtype, device,
                 )
-        elif chosen_bwd_algo == "explicit_gemm_grouped":
-            grad_in_features, grad_weight = _explicit_gemm_backward_grouped(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                compute_dtype,
-                device,
-                saturation_m=chosen_bwd_params.get("saturation_m", 5000),
-            )
-        elif chosen_bwd_algo == "implicit_gemm_grouped":
-            grad_in_features, grad_weight = _implicit_gemm_backward_grouped(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                gemm_block_size=chosen_bwd_params.get("gemm_block_size", 16),
-                split_k_threads_per_block=chosen_bwd_params.get("split_k_threads_per_block", 256),
-                split_k_factor=chosen_bwd_params.get("split_k_factor", 4),
-                compute_dtype=compute_dtype,
-                saturation_m=chosen_bwd_params.get("saturation_m", 5000),
-            )
-        elif chosen_bwd_algo == "cutlass_grouped_hybrid":
-            grad_in_features, grad_weight = _cutlass_implicit_gemm_backward_grouped(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                accumulator_type=chosen_bwd_params.get("accumulator_type", torch.float32),
-                device=device,
-                saturation_m=chosen_bwd_params.get("saturation_m", 5000),
-            )
-            if isinstance(grad_in_features, int) and grad_in_features != 0:
-                raise RuntimeError(
-                    f"Error in _cutlass_implicit_gemm_backward_grouped: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(grad_in_features))}"
+            elif algo == "implicit_gemm":
+                return _implicit_gemm_backward_logic(
+                    grad_output, in_features, weight, kernel_map, num_out_coords,
+                    gemm_block_size=params.get("bwd_block_size", 16),
+                    split_k_threads_per_block=params.get("split_k_threads_per_block", 256),
+                    split_k_factor=params.get("split_k_factor", 4),
+                    compute_dtype=compute_dtype,
                 )
-        else:
-            raise ValueError(f"Unsupported backward algorithm: {chosen_bwd_algo}")
+            elif algo == "cutlass_implicit_gemm":
+                result = _cutlass_implicit_gemm_backward_logic(
+                    grad_output, in_features, weight, kernel_map,
+                    accumulator_type=params.get("accumulator_type", torch.float32),
+                    device=device,
+                )
+                if isinstance(result[0], int) and result[0] != 0:
+                    raise RuntimeError(
+                        f"Error in _cutlass_implicit_gemm_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
+                    )
+                return result
+            elif algo == "cute_implicit_gemm":
+                result = _cute_implicit_gemm_backward_logic(
+                    grad_output, in_features, weight, kernel_map,
+                    requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
+                    device=device,
+                )
+                if isinstance(result[0], int) and result[0] != 0:
+                    raise RuntimeError(
+                        f"Error in _cute_implicit_gemm_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
+                    )
+                return result
+            elif algo == "explicit_gemm_grouped":
+                return _explicit_gemm_backward_grouped(
+                    grad_output, in_features, weight, kernel_map,
+                    compute_dtype, device,
+                    saturation_m=params.get("saturation_m", 5000),
+                )
+            elif algo == "implicit_gemm_grouped":
+                return _implicit_gemm_backward_grouped(
+                    grad_output, in_features, weight, kernel_map, num_out_coords,
+                    gemm_block_size=params.get("gemm_block_size", 16),
+                    split_k_threads_per_block=params.get("split_k_threads_per_block", 256),
+                    split_k_factor=params.get("split_k_factor", 4),
+                    compute_dtype=compute_dtype,
+                    saturation_m=params.get("saturation_m", 5000),
+                )
+            elif algo == "cutlass_grouped_hybrid":
+                result = _cutlass_implicit_gemm_backward_grouped(
+                    grad_output, in_features, weight, kernel_map,
+                    accumulator_type=params.get("accumulator_type", torch.float32),
+                    device=device,
+                    saturation_m=params.get("saturation_m", 5000),
+                )
+                if isinstance(result[0], int) and result[0] != 0:
+                    raise RuntimeError(
+                        f"Error in _cutlass_implicit_gemm_backward_grouped: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
+                    )
+                return result
+            elif algo == "cute_grouped":
+                result = _cute_grouped_backward_logic(
+                    grad_output, in_features, weight, kernel_map,
+                    requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
+                    device=device,
+                    mma_tile=params.get("mma_tile", 3),
+                )
+                if isinstance(result[0], int) and result[0] != 0:
+                    raise RuntimeError(
+                        f"Error in _cute_grouped_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
+                    )
+                return result
+            else:
+                raise ValueError(f"Unsupported backward algorithm: {algo}")
+
+        try:
+            grad_in_features, grad_weight = _execute_chosen_bwd(chosen_bwd_algo, chosen_bwd_params)
+        except (RuntimeError, Exception) as e:
+            if chosen_bwd_algo == "explicit_gemm":
+                raise
+            logger.warning(
+                f"Backward algorithm '{chosen_bwd_algo}' failed at execution: {e}. "
+                f"Falling back to explicit_gemm."
+            )
+            _BENCHMARK_BACKWARD_RESULTS.pop(config, None)
+            grad_in_features, grad_weight = _execute_chosen_bwd("explicit_gemm", {})
 
         if not ctx.needs_input_grad[0]:
             grad_in_features = None

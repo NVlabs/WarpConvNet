@@ -1,4 +1,6 @@
 // Return codes for GEMM operations
+#pragma once
+
 namespace warpconvnet {
 namespace gemm {
 
