@@ -56,7 +56,7 @@ Below is an excerpt from a real run inspecting the `sparse_conv_forward` namespa
 
 ```text
 Loading benchmark cache...
-Cache file location: /home/<user>/.cache/warpconvnet/benchmark_cache_generic.pkl
+Cache file location: /home/<user>/.cache/warpconvnet/benchmark_cache_generic.msgpack
 Cache file size: 44,320 bytes
 Last modified: 2025-09-08 13:33:35
 

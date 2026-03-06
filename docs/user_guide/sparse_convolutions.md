@@ -48,7 +48,7 @@ On the first forward (or backward) pass for a new problem shape, WarpConvNet:
 3. Picks the fastest and caches the result keyed by `(log2(N_in), log2(N_out), C_in, C_out, kernel_volume, dtype)`
 4. Subsequent calls with the same shape hit the cache instantly
 
-Results are persisted to `~/.cache/warpconvnet/benchmark_cache_generic.pkl` and survive across Python sessions.
+Results are persisted to `~/.cache/warpconvnet/benchmark_cache_generic.msgpack` and survive across Python sessions.
 
 ### Adaptive Candidate Selection
 

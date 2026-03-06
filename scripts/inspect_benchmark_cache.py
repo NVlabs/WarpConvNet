@@ -19,7 +19,7 @@ Examples:
     python inspect_benchmark_cache.py namespace=sparse_conv_backward --top-k 3
 
 The script loads benchmark results from the generic cache
-(~/.cache/warpconvnet/benchmark_cache_generic.pkl) and formats them
+(~/.cache/warpconvnet/benchmark_cache_generic.msgpack) and formats them
 for human-readable inspection.
 """
 

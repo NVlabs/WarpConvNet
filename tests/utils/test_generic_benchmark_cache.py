@@ -111,7 +111,7 @@ def test_rank_gating_does_not_write_on_non_zero_rank(
     cache.save_cache({"ns": {(8, 8, 8): {"p": 8}}}, force=True)
 
     # No file should be created when rank != 0
-    cache_file = tmp_cache_dir / "benchmark_cache_generic.pkl"
+    cache_file = tmp_cache_dir / "benchmark_cache_generic.msgpack"
     assert not cache_file.exists()
 
     # Cleanup
