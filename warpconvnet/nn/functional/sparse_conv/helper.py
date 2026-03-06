@@ -395,33 +395,41 @@ def generate_output_coords_and_kernel_map(
 
     # Kernel map generation
     if transposed and not generative:
-        if input_sparse_tensor.cache is not None:
-            # Check if the kernel map for non transposed case exists
-            kernel_map_cache_key_non_transposed = IntSearchCacheKey(
-                kernel_size=kernel_size,
-                kernel_dilation=kernel_dilation,
-                transposed=False,
-                generative=generative,
-                stride_mode=str(stride_mode),
-                skip_symmetric_kernel_map=False,
-                in_offsets=out_offsets,
-                out_offsets=input_sparse_tensor.offsets,
-            )
-            kernel_map_non_transposed = input_sparse_tensor.cache.get(
-                kernel_map_cache_key_non_transposed
-            )
-            if kernel_map_non_transposed is not None:
-                # Swap in and out maps for transposed kernel map generation and swap it back
-                kernel_map = IntSearchResult(
-                    in_maps=kernel_map_non_transposed.out_maps,
-                    out_maps=kernel_map_non_transposed.in_maps,
-                    offsets=kernel_map_non_transposed.offsets,
+        # Look for the forward (non-transposed) kernel map to reverse.
+        # The forward kernel map has in_offsets=out_offsets (higher-res) and
+        # out_offsets=input.offsets (lower-res). It may be cached on:
+        #   1. input_sparse_tensor.cache (decoder features)
+        #   2. output_spatially_sparse_tensor.cache (encoder skip connection)
+        # The encoder's forward conv stored it on the encoder input's cache,
+        # which propagates to the output via replace(). So checking the
+        # output_spatially_sparse_tensor's cache is the most reliable path.
+        kernel_map_cache_key_non_transposed = IntSearchCacheKey(
+            kernel_size=kernel_size,
+            kernel_dilation=kernel_dilation,
+            transposed=False,
+            generative=generative,
+            stride_mode=str(stride_mode),
+            skip_symmetric_kernel_map=False,
+            in_offsets=out_offsets,
+            out_offsets=input_sparse_tensor.offsets,
+        )
+        kernel_map_non_transposed = None
+        # Check caches in order: input, then output_spatially_sparse_tensor
+        for cache_source in [input_sparse_tensor, output_spatially_sparse_tensor]:
+            if cache_source is not None and cache_source.cache is not None:
+                kernel_map_non_transposed = cache_source.cache.get(
+                    kernel_map_cache_key_non_transposed
                 )
-                return batch_indexed_out_coords, out_offsets, kernel_map
-            else:
-                logger.warning(
-                    "No kernel map found for non-transposed case. Generating new kernel map."
-                )
+                if kernel_map_non_transposed is not None:
+                    break
+        if kernel_map_non_transposed is not None:
+            # Swap in and out maps for transposed kernel map
+            kernel_map = IntSearchResult(
+                in_maps=kernel_map_non_transposed.out_maps,
+                out_maps=kernel_map_non_transposed.in_maps,
+                offsets=kernel_map_non_transposed.offsets,
+            )
+            return batch_indexed_out_coords, out_offsets, kernel_map
 
         # Swap in and out maps for transposed kernel map generation and swap it back
         kernel_map = generate_kernel_map(
