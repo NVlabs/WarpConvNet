@@ -198,6 +198,16 @@ int run_cute_gemm_grouped_ad_gather_scatter_staged(const void *a,
                                                    float alpha,
                                                    int num_stages,
                                                    bool use_cp_async);
+
+template <typename ElementInput, typename TileTag, typename ElementOutput>
+int run_cute_gemm_grouped_trAB_gather(const void *a,
+                                      const void *b,
+                                      const int *idx_a,
+                                      const int *idx_b,
+                                      const GroupedTrABGemmParams &params,
+                                      int K_dim,
+                                      int N,
+                                      float alpha);
 }  // namespace cute_gemm
 
 }  // namespace warpconvnet
@@ -1904,6 +1914,168 @@ int cute_gemm_grouped_AD_gather_scatter(
   return status;
 }
 
+// ------------------- CuTe Grouped TrAB dispatch -------------------
+
+#define CUTE_GROUPED_TRAB_CASE(TILE_ENUM, TILE_TAG)                     \
+  case warpconvnet::gemm::MMATile::TILE_ENUM:                           \
+    return ::warpconvnet::cute_gemm::run_cute_gemm_grouped_trAB_gather< \
+        ElementInput,                                                   \
+        warpconvnet::gemm::TILE_TAG,                                    \
+        ElementOutput>(ptr_A, ptr_B, idx_a, idx_b, params, K_dim, N, alpha);
+
+template <torch::ScalarType SA, torch::ScalarType SC>
+static int dispatch_cute_gemm_grouped_trAB_gather(
+    const void *ptr_A,
+    const void *ptr_B,
+    const int *idx_a,
+    const int *idx_b,
+    const warpconvnet::cute_gemm::GroupedTrABGemmParams &params,
+    int K_dim,
+    int N,
+    float alpha,
+    int mma_tile) {
+  using ElementInput = typename torch_to_cutlass<SA>::type;
+  using ElementOutput = typename torch_to_cutlass<SC>::type;
+  auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
+  switch (tile) {
+    CUTE_GROUPED_TRAB_CASE(Tile128x128x32, Tile128x128x32)
+    CUTE_GROUPED_TRAB_CASE(Tile128x64x32, Tile128x64x32)
+    CUTE_GROUPED_TRAB_CASE(Tile64x128x32, Tile64x128x32)
+    CUTE_GROUPED_TRAB_CASE(Tile64x64x32, Tile64x64x32)
+    CUTE_GROUPED_TRAB_CASE(Tile64x64x64, Tile64x64x64)
+    CUTE_GROUPED_TRAB_CASE(Tile128x64x64, Tile128x64x64)
+    CUTE_GROUPED_TRAB_CASE(Tile64x128x64, Tile64x128x64)
+    CUTE_GROUPED_TRAB_CASE(Tile128x128x64, Tile128x128x64)
+    CUTE_GROUPED_TRAB_CASE(Tile256x64x32, Tile256x64x32)
+    CUTE_GROUPED_TRAB_CASE(Tile64x256x32, Tile64x256x32)
+    default:
+      TORCH_CHECK(false, "Unsupported mma_tile value for grouped TrAB GEMM");
+  }
+}
+#undef CUTE_GROUPED_TRAB_CASE
+
+int cute_gemm_grouped_trAB_gather(
+    torch::Tensor tensor_a,      // [N_pts, C_in] input features
+    torch::Tensor tensor_b,      // [M_pts, C_out] grad_output
+    torch::Tensor in_map,        // [L] int32 concatenated gather indices for A
+    torch::Tensor out_map,       // [L] int32 concatenated gather indices for B
+    torch::Tensor output_ptrs,   // [num_groups] int64 device pointers to output slices
+    torch::Tensor gather_sizes,  // [num_groups] int32 gather_size per group
+    torch::Tensor map_offsets,   // [num_groups] int32 offsets into in_map/out_map
+    int K_dim,                   // C_in (output rows)
+    int N,                       // C_out (output cols)
+    int mma_tile,
+    float alpha,
+    int output_scalar_type) {  // torch::ScalarType as int
+  TORCH_CHECK(tensor_a.is_cuda() && tensor_b.is_cuda(), "Tensors must be on CUDA");
+  TORCH_CHECK(in_map.is_cuda() && out_map.is_cuda(), "Maps must be on CUDA");
+  TORCH_CHECK(output_ptrs.is_cuda() && gather_sizes.is_cuda() && map_offsets.is_cuda(),
+              "Group params must be on CUDA");
+  TORCH_CHECK(in_map.scalar_type() == torch::kInt32, "in_map must be int32");
+  TORCH_CHECK(out_map.scalar_type() == torch::kInt32, "out_map must be int32");
+  TORCH_CHECK(output_ptrs.scalar_type() == torch::kInt64, "output_ptrs must be int64");
+  TORCH_CHECK(gather_sizes.scalar_type() == torch::kInt32, "gather_sizes must be int32");
+  TORCH_CHECK(map_offsets.scalar_type() == torch::kInt32, "map_offsets must be int32");
+
+  tensor_a = tensor_a.contiguous();
+  tensor_b = tensor_b.contiguous();
+  in_map = in_map.contiguous();
+  out_map = out_map.contiguous();
+
+  int num_groups = gather_sizes.size(0);
+  if (num_groups == 0) {
+    return static_cast<int>(warpconvnet::gemm::GemmStatus::kSuccess);
+  }
+
+  // Alignment check
+  int elem_size = (tensor_a.scalar_type() == torch::kFloat32) ? 2 : tensor_a.element_size();
+  int vec_width = 16 / elem_size;
+  if (K_dim % vec_width != 0 || N % vec_width != 0) {
+    return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
+  }
+
+  // Build GroupedTrABGemmParams
+  warpconvnet::cute_gemm::GroupedTrABGemmParams params;
+  params.num_groups = num_groups;
+  params.gather_sizes = gather_sizes.data_ptr<int>();
+  params.map_offsets = map_offsets.data_ptr<int>();
+  params.ptr_D_array = reinterpret_cast<void *const *>(output_ptrs.data_ptr<int64_t>());
+
+  auto scalar_a = tensor_a.scalar_type();
+  auto scalar_d = static_cast<torch::ScalarType>(output_scalar_type);
+
+  // Downcast float32 inputs to float16 for compute
+  if (scalar_a == torch::kFloat32) {
+    tensor_a = tensor_a.to(torch::kFloat16);
+    tensor_b = tensor_b.to(torch::kFloat16);
+    scalar_a = torch::kFloat16;
+  }
+
+  int status = 0;
+  bool handled = false;
+
+  if (scalar_a == torch::kFloat16 && scalar_d == torch::kFloat32) {
+    handled = true;
+    status = dispatch_cute_gemm_grouped_trAB_gather<torch::kFloat16, torch::kFloat32>(
+        tensor_a.data_ptr(),
+        tensor_b.data_ptr(),
+        in_map.data_ptr<int>(),
+        out_map.data_ptr<int>(),
+        params,
+        K_dim,
+        N,
+        alpha,
+        mma_tile);
+  } else if (scalar_a == torch::kFloat16 && scalar_d == torch::kFloat16) {
+    handled = true;
+    status = dispatch_cute_gemm_grouped_trAB_gather<torch::kFloat16, torch::kFloat16>(
+        tensor_a.data_ptr(),
+        tensor_b.data_ptr(),
+        in_map.data_ptr<int>(),
+        out_map.data_ptr<int>(),
+        params,
+        K_dim,
+        N,
+        alpha,
+        mma_tile);
+  }
+#ifndef DISABLE_BFLOAT16
+  else if (scalar_a == torch::kBFloat16 && scalar_d == torch::kFloat32) {
+    handled = true;
+    status = dispatch_cute_gemm_grouped_trAB_gather<torch::kBFloat16, torch::kFloat32>(
+        tensor_a.data_ptr(),
+        tensor_b.data_ptr(),
+        in_map.data_ptr<int>(),
+        out_map.data_ptr<int>(),
+        params,
+        K_dim,
+        N,
+        alpha,
+        mma_tile);
+  } else if (scalar_a == torch::kBFloat16 && scalar_d == torch::kBFloat16) {
+    handled = true;
+    status = dispatch_cute_gemm_grouped_trAB_gather<torch::kBFloat16, torch::kBFloat16>(
+        tensor_a.data_ptr(),
+        tensor_b.data_ptr(),
+        in_map.data_ptr<int>(),
+        out_map.data_ptr<int>(),
+        params,
+        K_dim,
+        N,
+        alpha,
+        mma_tile);
+  }
+#endif
+
+  TORCH_CHECK(handled,
+              "CuTe grouped TrAB GEMM: unsupported dtype combination (",
+              tensor_a.scalar_type(),
+              " input, ",
+              scalar_d,
+              " output)");
+  return status;
+}
+
 void register_gemm(py::module_ &m) {
   py::module_ gemm = m.def_submodule(
       "gemm", "CUTLASS GEMM with gather/scatter operations supporting multiple precisions");
@@ -1992,6 +2164,21 @@ void register_gemm(py::module_ &m) {
            py::arg("total_m_tiles"),
            py::arg("mma_tile") = 0,
            py::arg("alpha") = 1.0f);
+
+  gemm.def("cute_gemm_grouped_trAB_gather",
+           &cute_gemm_grouped_trAB_gather,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("output_ptrs"),
+           py::arg("gather_sizes"),
+           py::arg("map_offsets"),
+           py::arg("K_dim"),
+           py::arg("N"),
+           py::arg("mma_tile") = 0,
+           py::arg("alpha") = 1.0f,
+           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
 
   gemm.def("cute_gemm_AD_gather_scatter_staged",
            &cute_gemm_AD_gather_scatter_staged,
