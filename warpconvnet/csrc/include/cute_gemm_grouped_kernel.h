@@ -24,11 +24,11 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
-#include "cute/tensor.hpp"
 #include "cute/algorithm/copy.hpp"
 #include "cute/arch/copy_sm80.hpp"
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
+#include "cute/tensor.hpp"
 #include "cute_gemm_config.h"
 #include "grouped_gemm_params.h"
 
@@ -88,10 +88,12 @@ struct CuteGemmGroupedKernel {
   static constexpr int NumStages = TileConfig::NumStages;
   static constexpr bool UseCpAsyncGatherA = TileConfig::UseCpAsyncGatherA;
 
-  using SmemLayoutA = decltype(cute::tile_to_shape(SmemLayoutAtomA{},
-                                             cute::make_shape(cute::Int<tM>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
-  using SmemLayoutB = decltype(cute::tile_to_shape(SmemLayoutAtomB{},
-                                             cute::make_shape(cute::Int<tN>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
+  using SmemLayoutA = decltype(cute::tile_to_shape(
+      SmemLayoutAtomA{},
+      cute::make_shape(cute::Int<tM>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
+  using SmemLayoutB = decltype(cute::tile_to_shape(
+      SmemLayoutAtomB{},
+      cute::make_shape(cute::Int<tN>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
 
   struct SharedStorage {
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
@@ -375,6 +377,274 @@ __global__ __launch_bounds__(Kernel::MaxThreadsPerBlock) void cute_gemm_grouped_
     float alpha) {
   extern __shared__ char smem[];
   Kernel{}(ptr_A, ptr_D, in_map, out_map, params, N, K_dim, alpha, smem);
+}
+
+// ===========================================================================
+// Grouped TrAB Gather Kernel
+//
+// Fuses all kernel offsets into a single launch for the weight gradient:
+//   D_g[k,n] = alpha * A[idx_a_g]^T @ B[idx_b_g]    for each group g
+//
+// Grid: (K_tiles, N_tiles, num_groups)
+// Each threadblock picks its group from blockIdx.z and runs a standard
+// TrAB mainloop with that group's gather indices and output pointer.
+// No atomicAdd — each group writes to its own output matrix.
+// ===========================================================================
+
+template <class TileConfig, typename ElementOutput_ = float>
+struct CuteGemmGroupedTrABKernel {
+  using TileShape = typename TileConfig::TileShape;
+  using TiledMma = typename TileConfig::TiledMma;
+  using ElementInput = typename TileConfig::ElementInput;
+  using ElementOutput = ElementOutput_;
+
+  using SmemLayoutAtomA = typename TileConfig::SmemLayoutAtomA;
+  using SmemLayoutAtomB = typename TileConfig::SmemLayoutAtomB;
+  using SmemCopyAtomA = typename TileConfig::SmemCopyAtomA;
+  using SmemCopyAtomB = typename TileConfig::SmemCopyAtomB;
+
+  static constexpr int MaxThreadsPerBlock = cute::size(TiledMma{});
+  static constexpr int MinBlocksPerMultiprocessor = 1;
+
+  static constexpr int tM = cute::size<0>(TileShape{});  // tiles K_dim
+  static constexpr int tN = cute::size<1>(TileShape{});  // tiles N
+  static constexpr int tK = cute::size<2>(TileShape{});  // tiles gathered indices
+  static constexpr int NumStages = TileConfig::NumStages;
+
+  using SmemLayoutA = decltype(cute::tile_to_shape(
+      SmemLayoutAtomA{},
+      cute::make_shape(cute::Int<tM>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
+  using SmemLayoutB = decltype(cute::tile_to_shape(
+      SmemLayoutAtomB{},
+      cute::make_shape(cute::Int<tN>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
+
+  struct SharedStorage {
+    cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
+    cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutB>> smem_b;
+  };
+
+  static constexpr size_t SharedStorageSize = sizeof(SharedStorage);
+  static constexpr int kVec = 16 / sizeof(ElementInput);  // 8 for fp16/bf16
+
+  __device__ void operator()(const ElementInput *ptr_A,
+                             const ElementInput *ptr_B,
+                             const int *idx_a,
+                             const int *idx_b,
+                             GroupedTrABGemmParams params,
+                             int K_dim,
+                             int N,
+                             float alpha,
+                             char *smem_buf) const {
+    using namespace cute;
+    // --- Group dispatch ---
+    int g = int(blockIdx.z);
+    int k_tile = int(blockIdx.x);  // tiles K_dim
+    int n_tile = int(blockIdx.y);  // tiles N
+    int k_start = k_tile * tM;
+    int n_start = n_tile * tN;
+
+    int gather_size_g = params.gather_sizes[g];
+    int map_offset_g = params.map_offsets[g];
+    ElementOutput *ptr_D_g = reinterpret_cast<ElementOutput *>(params.ptr_D_array[g]);
+    const int *idx_a_g = idx_a + map_offset_g;
+    const int *idx_b_g = idx_b + map_offset_g;
+
+    // --- Standard TrAB mainloop ---
+    SharedStorage &storage = *reinterpret_cast<SharedStorage *>(smem_buf);
+    Tensor sA = make_tensor(make_smem_ptr(storage.smem_a.data()), SmemLayoutA{});
+    Tensor sB = make_tensor(make_smem_ptr(storage.smem_b.data()), SmemLayoutB{});
+
+    TiledMma tiled_mma;
+    auto thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
+    Tensor accum = partition_fragment_C(tiled_mma, make_shape(Int<tM>{}, Int<tN>{}));
+    clear(accum);
+
+    Tensor tCrA = thr_mma.partition_fragment_A(sA(_, _, 0));
+    Tensor tCrB = thr_mma.partition_fragment_B(sB(_, _, 0));
+
+    auto smem_tiled_copy_A = make_tiled_copy_A(SmemCopyAtomA{}, tiled_mma);
+    auto smem_thr_copy_A = smem_tiled_copy_A.get_slice(threadIdx.x);
+    Tensor tCsA = smem_thr_copy_A.partition_S(sA);
+    Tensor tCrA_copy_view = smem_thr_copy_A.retile_D(tCrA);
+
+    auto smem_tiled_copy_B = make_tiled_copy_B(SmemCopyAtomB{}, tiled_mma);
+    auto smem_thr_copy_B = smem_tiled_copy_B.get_slice(threadIdx.x);
+    Tensor tCsB = smem_thr_copy_B.partition_S(sB);
+    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
+
+    int num_g_tiles = (gather_size_g + tK - 1) / tK;
+    auto K_BLOCK_MAX = size<2>(tCrA);
+
+    if (num_g_tiles == 0) {
+      _epilogue_trAB(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+      return;
+    }
+
+    // Prolog: load g_tile=0 into stage[0]
+    _load_A_trAB(ptr_A, idx_a_g, sA(_, _, 0), k_start, 0, K_dim, gather_size_g);
+    _load_B_trAB(ptr_B, idx_b_g, sB(_, _, 0), n_start, 0, N, gather_size_g);
+    cute::cp_async_fence();
+    cute::cp_async_wait<0>();
+    __syncthreads();
+
+    // Mainloop
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (int g_tile = 1; g_tile < num_g_tiles; ++g_tile) {
+      int curr_stage = (g_tile - 1) % NumStages;
+      int next_stage = g_tile % NumStages;
+      int g_start = g_tile * tK;
+
+      _load_A_trAB(ptr_A, idx_a_g, sA(_, _, next_stage), k_start, g_start, K_dim, gather_size_g);
+      _load_B_trAB(ptr_B, idx_b_g, sB(_, _, next_stage), n_start, g_start, N, gather_size_g);
+      cute::cp_async_fence();
+
+      CUTLASS_PRAGMA_UNROLL
+      for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
+        copy(smem_tiled_copy_A, tCsA(_, _, k_block, curr_stage), tCrA_copy_view(_, _, k_block));
+        copy(smem_tiled_copy_B, tCsB(_, _, k_block, curr_stage), tCrB_copy_view(_, _, k_block));
+        cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
+      }
+
+      cute::cp_async_wait<NumStages - 2>();
+      __syncthreads();
+    }
+
+    // Epilog: compute last g_tile
+    {
+      int last_stage = (num_g_tiles - 1) % NumStages;
+      CUTLASS_PRAGMA_UNROLL
+      for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
+        copy(smem_tiled_copy_A, tCsA(_, _, k_block, last_stage), tCrA_copy_view(_, _, k_block));
+        copy(smem_tiled_copy_B, tCsB(_, _, k_block, last_stage), tCrB_copy_view(_, _, k_block));
+        cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
+      }
+    }
+
+    _epilogue_trAB(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+  }
+
+private:
+  /// Load A^T tile: vectorized LDG along K, scatter-store (transpose) to smem.
+  template <class SmemTensor>
+  __device__ void _load_A_trAB(const ElementInput *ptr_A,
+                               const int *idx_a,
+                               SmemTensor smem_tile,
+                               int k_start,
+                               int g_start,
+                               int K_dim,
+                               int gather_size) const {
+    static_assert(tM % kVec == 0, "tM must be a multiple of vector width");
+    constexpr int k_vecs = tM / kVec;
+    constexpr int total_vecs = tK * k_vecs;
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
+      int g_local = idx / k_vecs;
+      int kv = idx % k_vecs;
+      int k_local = kv * kVec;
+      int g_global = g_start + g_local;
+      int k_global = k_start + k_local;
+
+      uint4 vec_data = make_uint4(0, 0, 0, 0);
+      if (g_global < gather_size) {
+        int phys_row = idx_a[g_global];
+        if (k_global + kVec <= K_dim) {
+          vec_data = *reinterpret_cast<const uint4 *>(&ptr_A[phys_row * K_dim + k_global]);
+        } else {
+          auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
+          for (int v = 0; v < kVec; ++v) {
+            if (k_global + v < K_dim) elems[v] = ptr_A[phys_row * K_dim + k_global + v];
+          }
+        }
+      }
+      auto *elems = reinterpret_cast<const ElementInput *>(&vec_data);
+      CUTLASS_PRAGMA_UNROLL
+      for (int v = 0; v < kVec; ++v) {
+        smem_tile(k_local + v, g_local) = elems[v];
+      }
+    }
+  }
+
+  /// Load B tile: vectorized LDG along N, vectorized STS to N-contiguous smem.
+  template <class SmemTensor>
+  __device__ void _load_B_trAB(const ElementInput *ptr_B,
+                               const int *idx_b,
+                               SmemTensor smem_tile,
+                               int n_start,
+                               int g_start,
+                               int N,
+                               int gather_size) const {
+    static_assert(tN % kVec == 0, "tN must be a multiple of vector width");
+    constexpr int n_vecs = tN / kVec;
+    constexpr int total_vecs = tK * n_vecs;
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
+      int g_local = idx / n_vecs;
+      int nv = idx % n_vecs;
+      int n_local = nv * kVec;
+      int g_global = g_start + g_local;
+      int n_global = n_start + n_local;
+
+      uint4 vec_data = make_uint4(0, 0, 0, 0);
+      if (g_global < gather_size) {
+        int phys_row = idx_b[g_global];
+        if (n_global + kVec <= N) {
+          vec_data = *reinterpret_cast<const uint4 *>(&ptr_B[phys_row * N + n_global]);
+        } else {
+          auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
+          for (int v = 0; v < kVec; ++v) {
+            if (n_global + v < N) elems[v] = ptr_B[phys_row * N + n_global + v];
+          }
+        }
+      }
+      *reinterpret_cast<uint4 *>(&smem_tile(n_local, g_local)) = vec_data;
+    }
+  }
+
+  /// Dense epilogue: D_g[k, n] = alpha * accum (no beta, no C)
+  template <class Accumulator, class TiledMma_>
+  __device__ void _epilogue_trAB(Accumulator &accum,
+                                 ElementOutput *ptr_D,
+                                 int k_start,
+                                 int n_start,
+                                 int K_dim,
+                                 int N,
+                                 float alpha,
+                                 TiledMma_ &tiled_mma) const {
+    using namespace cute;
+    auto thr_mma = tiled_mma.get_slice(threadIdx.x);
+    Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
+
+    CUTE_UNROLL
+    for (int i = 0; i < size(accum); ++i) {
+      auto coord = tCrC(i);
+      int k_local = get<0>(coord);
+      int n_local = get<1>(coord);
+      int k_global = k_start + k_local;
+      int n_global = n_start + n_local;
+
+      if (k_global < K_dim && n_global < N) {
+        float result = alpha * float(accum(i));
+        ptr_D[k_global * N + n_global] = static_cast<ElementOutput>(result);
+      }
+    }
+  }
+};
+
+/// Global kernel entry point for grouped TrAB gather
+template <class Kernel>
+__global__ __launch_bounds__(Kernel::MaxThreadsPerBlock) void cute_gemm_grouped_trAB_kernel_entry(
+    const typename Kernel::ElementInput *ptr_A,
+    const typename Kernel::ElementInput *ptr_B,
+    const int *idx_a,
+    const int *idx_b,
+    GroupedTrABGemmParams params,
+    int K_dim,
+    int N,
+    float alpha) {
+  extern __shared__ char smem[];
+  Kernel{}(ptr_A, ptr_B, idx_a, idx_b, params, K_dim, N, alpha, smem);
 }
 
 }  // namespace cute_gemm
