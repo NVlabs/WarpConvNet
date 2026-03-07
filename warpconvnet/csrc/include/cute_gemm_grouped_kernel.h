@@ -24,11 +24,11 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include "cute/tensor.hpp"  // MUST come first
 #include "cute/algorithm/copy.hpp"
 #include "cute/arch/copy_sm80.hpp"
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
-#include "cute/tensor.hpp"
 #include "cute_gemm_config.h"
 #include "grouped_gemm_params.h"
 
