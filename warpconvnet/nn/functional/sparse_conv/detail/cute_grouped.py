@@ -114,6 +114,13 @@ def _cute_grouped_forward_logic(
         else torch.float32
     )
 
+    # The C++ binding downcasts float32 inputs to float16 for the CuTe kernel.
+    # Weight data is passed as raw device pointers, so we must cast weights
+    # to the same compute dtype here to avoid type mismatch (root cause of
+    # garbage output / NaN with float32 inputs).
+    compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
+    _weight_compute = _weight.to(dtype=compute_dtype).contiguous()
+
     # Initialize output
     if iden_idx is not None:
         output = torch.matmul(_in_features, _weight[iden_idx]).to(dtype=out_dtype)
@@ -124,7 +131,7 @@ def _cute_grouped_forward_logic(
 
     tile_m = _TILE_M_SIZES.get(mma_tile, 64)
     params = _prepare_grouped_params(
-        kernel_map, _weight, iden_idx, tile_m, device
+        kernel_map, _weight_compute, iden_idx, tile_m, device
     )
 
     if params is None:
@@ -186,6 +193,9 @@ def _cute_grouped_backward_logic(
         else torch.float32
     )
 
+    # Match the C++ binding's float32→float16 downcast for weight pointers
+    compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
+
     iden_idx = kernel_map.identity_map_index
     grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
 
@@ -204,8 +214,8 @@ def _cute_grouped_backward_logic(
             )
 
         # For input grad: A=grad_output gathered by out_map, B=weight.T, scatter to in_map
-        # We need transposed weights
-        weight_t = _weight.transpose(-1, -2).contiguous()  # [K, C_out, C_in]
+        # We need transposed weights in compute dtype
+        weight_t = _weight.to(dtype=compute_dtype).transpose(-1, -2).contiguous()  # [K, C_out, C_in]
 
         tile_m = _TILE_M_SIZES.get(mma_tile, 64)
         params = _prepare_grouped_params(
