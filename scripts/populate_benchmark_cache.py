@@ -89,8 +89,8 @@ CHANNEL_PAIRS_COMMON = [
 # (nuScenes/Waymo ~100K-2M) point clouds. Values are chosen so that
 # ceil(log2(N)) covers the range [15..21] which is the log-N cache bucket space.
 NUM_VOXELS_DEFAULT = [
-    30_000,   # log2 ~ 15
-    65_000,   # log2 ~ 16
+    30_000,  # log2 ~ 15
+    65_000,  # log2 ~ 16
     130_000,  # log2 ~ 17
     260_000,  # log2 ~ 18
     500_000,  # log2 ~ 19
@@ -198,7 +198,7 @@ def _parse_dtype(s: str) -> torch.dtype:
     return {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[s]
 
 
-def _parse_channel_pair(s: str) -> Tuple[int, int]:
+def _parse_channel_pair(s: str) -> tuple[int, int]:
     parts = s.split(",")
     if len(parts) != 2:
         raise argparse.ArgumentTypeError(f"Expected C_in,C_out, got '{s}'")
@@ -209,13 +209,14 @@ def _parse_channel_pair(s: str) -> Tuple[int, int]:
 # Voxel generation
 # ---------------------------------------------------------------------------
 
+
 def make_voxels(
     num_voxels: int,
     num_channels: int,
     dtype: torch.dtype,
     device: str,
     batch_size: int = 1,
-) -> "Voxels":
+) -> Voxels:
     """Create a Voxels object with approximately `num_voxels` unique voxels."""
     from warpconvnet.geometry.types.voxels import Voxels
 
@@ -241,6 +242,7 @@ def make_voxels(
 # ---------------------------------------------------------------------------
 # Cache check helpers
 # ---------------------------------------------------------------------------
+
 
 def _config_is_cached(
     namespace: str,
@@ -274,6 +276,7 @@ def _config_is_cached(
 # Main benchmark loop
 # ---------------------------------------------------------------------------
 
+
 def run_single_config(
     num_voxels: int,
     c_in: int,
@@ -286,12 +289,33 @@ def run_single_config(
     do_forward: bool,
     do_backward: bool,
     resume: bool,
-) -> Dict[str, Optional[float]]:
-    """Run forward and/or backward for one configuration, returning timing info."""
-    from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
+) -> dict[str, float | None]:
+    """Run forward and/or backward for one configuration, returning timing info.
 
-    kernel_volume = kernel_size ** 3
-    result: Dict[str, Optional[float]] = {"forward_ms": None, "backward_ms": None}
+    Returns dict with keys: forward_ms, backward_ms (inference time after
+    auto-tuning), fwd_autotune_ms, bwd_autotune_ms, fwd_algo, bwd_algo,
+    fwd_candidates, bwd_candidates.
+    """
+    from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
+    from warpconvnet.nn.functional.sparse_conv.detail.unified import (
+        _BENCHMARK_FORWARD_RESULTS,
+        _BENCHMARK_BACKWARD_RESULTS,
+        _get_adaptive_forward_params,
+        _BENCHMARK_BACKWARD_PARAMS,
+        SpatiallySparseConvConfig,
+    )
+
+    kernel_volume = kernel_size**3
+    result: dict[str, float | None] = {
+        "forward_ms": None,
+        "backward_ms": None,
+        "fwd_autotune_ms": None,
+        "bwd_autotune_ms": None,
+        "fwd_algo": None,
+        "bwd_algo": None,
+        "fwd_candidates": None,
+        "bwd_candidates": None,
+    }
 
     # Check cache for resume mode
     if resume:
@@ -306,6 +330,7 @@ def run_single_config(
 
     # Generate voxels with c_in features
     voxels = make_voxels(num_voxels, c_in, dtype, device, batch_size)
+    actual_n = voxels.feature_tensor.shape[0]
 
     # Build conv layer
     conv = SpatiallySparseConv(
@@ -317,25 +342,87 @@ def run_single_config(
         bwd_algo=algo_mode,
     ).to(device=device, dtype=dtype)
 
-    # Forward
+    # Forward: first call triggers auto-tuning, second measures inference
     if do_forward:
+        fwd_config = SpatiallySparseConvConfig(
+            num_in_coords=actual_n,
+            num_out_coords=actual_n,
+            in_channels=c_in,
+            out_channels=c_out,
+            kernel_volume=kernel_volume,
+            in_dtype=dtype,
+        )
+        had_cache = fwd_config in _BENCHMARK_FORWARD_RESULTS
+        num_fwd_candidates = len(_get_adaptive_forward_params(c_in, c_out, kernel_volume))
+
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        out = conv(voxels)
+        torch.cuda.synchronize(device)
+        first_call_ms = (time.perf_counter() - t0) * 1000
+
+        # Extract chosen algo from cache
+        fwd_results = _BENCHMARK_FORWARD_RESULTS.get(fwd_config)
+        if fwd_results:
+            best = fwd_results if isinstance(fwd_results, tuple) else fwd_results[0]
+            best_algo, best_params, _ = best
+            _param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
+            result["fwd_algo"] = best_algo + (f" ({_param_str})" if _param_str else "")
+        result["fwd_candidates"] = num_fwd_candidates
+
+        # Measure steady-state inference (second call, no auto-tune)
         torch.cuda.synchronize(device)
         t0 = time.perf_counter()
         out = conv(voxels)
         torch.cuda.synchronize(device)
         result["forward_ms"] = (time.perf_counter() - t0) * 1000
 
-    # Backward
+        if not had_cache:
+            result["fwd_autotune_ms"] = first_call_ms - result["forward_ms"]
+
+    # Backward: first call triggers auto-tuning, second measures inference
     if do_backward and not (do_forward is False):
         if result["forward_ms"] is None:
-            # Need to run forward first to get output for backward
             out = conv(voxels)
+
+        bwd_config = SpatiallySparseConvConfig(
+            num_in_coords=actual_n,
+            num_out_coords=actual_n,
+            in_channels=c_in,
+            out_channels=c_out,
+            kernel_volume=kernel_volume,
+            in_dtype=dtype,
+        )
+        had_bwd_cache = bwd_config in _BENCHMARK_BACKWARD_RESULTS
+        num_bwd_candidates = len(_BENCHMARK_BACKWARD_PARAMS)
+
         loss = out.feature_tensor.sum()
         torch.cuda.synchronize(device)
         t0 = time.perf_counter()
         loss.backward()
         torch.cuda.synchronize(device)
+        first_bwd_ms = (time.perf_counter() - t0) * 1000
+
+        # Extract chosen algo from cache
+        bwd_results = _BENCHMARK_BACKWARD_RESULTS.get(bwd_config)
+        if bwd_results:
+            best = bwd_results if isinstance(bwd_results, tuple) else bwd_results[0]
+            best_algo, best_params, _ = best
+            _param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
+            result["bwd_algo"] = best_algo + (f" ({_param_str})" if _param_str else "")
+        result["bwd_candidates"] = num_bwd_candidates
+
+        # Measure steady-state backward
+        out2 = conv(voxels)
+        loss2 = out2.feature_tensor.sum()
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        loss2.backward()
+        torch.cuda.synchronize(device)
         result["backward_ms"] = (time.perf_counter() - t0) * 1000
+
+        if not had_bwd_cache:
+            result["bwd_autotune_ms"] = first_bwd_ms - result["backward_ms"]
 
     return result
 
@@ -377,7 +464,7 @@ def main():
         os.environ["WARPCONVNET_BWD_ALGO_MODE"] = args.algo_mode
 
     # Build config grid
-    configs: List[Tuple[int, int, int, int, torch.dtype]] = []
+    configs: list[tuple[int, int, int, int, torch.dtype]] = []
     for nv, (c_in, c_out), ks, dt in itertools.product(
         num_voxels_list, channel_pairs, kernel_sizes, dtypes
     ):
@@ -388,7 +475,7 @@ def main():
     unique_configs = []
     for nv, c_in, c_out, ks, dt in configs:
         log_n = math.ceil(math.log2(nv)) if nv > 0 else 0
-        kv = ks ** 3
+        kv = ks**3
         key = (log_n, c_in, c_out, kv, dt)
         if key not in seen:
             seen.add(key)
@@ -403,19 +490,45 @@ def main():
     print(f"Algo mode: {args.algo_mode}")
     print(f"Directions: {'fwd' if do_forward else ''}{'+bwd' if do_backward else ''}")
     print(f"Configs: {len(configs)} unique (after log2-dedup)")
-    print(f"  Voxel counts: {sorted(set(nv for nv, *_ in configs))}")
-    print(f"  Channel pairs: {sorted(set((c, co) for _, c, co, *_ in configs))}")
-    print(f"  Kernel sizes: {sorted(set(ks for *_, ks, _ in configs))}")
-    print(f"  Dtypes: {sorted(set(str(dt) for *_, dt in configs))}")
+    print(f"  Voxel counts: {sorted({nv for nv, *_ in configs})}")
+    print(f"  Channel pairs: {sorted({(c, co) for _, c, co, *_ in configs})}")
+    print(f"  Kernel sizes: {sorted({ks for *_, ks, _ in configs})}")
+    print(f"  Dtypes: {sorted({str(dt) for *_, dt in configs})}")
     print()
 
     if args.dry_run:
         print("Dry run -- listing all configurations:")
         for i, (nv, c_in, c_out, ks, dt) in enumerate(configs, 1):
             log_n = math.ceil(math.log2(nv)) if nv > 0 else 0
-            print(f"  [{i:4d}] N={nv:>9,d} (log2={log_n:2d})  "
-                  f"C={c_in:3d}->{c_out:3d}  ks={ks}  dtype={dt}")
+            print(
+                f"  [{i:4d}] N={nv:>9,d} (log2={log_n:2d})  "
+                f"C={c_in:3d}->{c_out:3d}  ks={ks}  dtype={dt}"
+            )
         return
+
+    # CUDA warmup: pay one-time init cost (cuBLAS handle, CUTLASS JIT) before
+    # benchmarking so the first config doesn't absorb cold-start overhead.
+    print("Warming up CUDA...", end=" ", flush=True)
+    _warmup_a = torch.randn(64, 16, device=dev, dtype=torch.float16)
+    _warmup_b = torch.randn(16, 64, device=dev, dtype=torch.float16)
+    torch.matmul(_warmup_a, _warmup_b)
+    # Warm up CUTLASS/CuTe kernels via a tiny sparse conv
+    try:
+        from warpconvnet.geometry.types.voxels import Voxels
+        from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
+
+        _wc = torch.randint(0, 10, (50, 3), dtype=torch.int32)
+        _wf = torch.randn(50, 16, dtype=torch.float16)
+        _wv = Voxels([_wc], [_wf], device=str(dev)).unique()
+        _wconv = SpatiallySparseConv(16, 16, 3, bias=False).to(dev, torch.float16)
+        _wconv(_wv)
+    except Exception:
+        pass  # Non-critical — just a warmup
+    torch.cuda.synchronize(dev)
+    del _warmup_a, _warmup_b
+    torch.cuda.empty_cache()
+    print("done.")
+    print()
 
     # Run benchmarks
     total = len(configs)
@@ -425,8 +538,10 @@ def main():
 
     for i, (nv, c_in, c_out, ks, dt) in enumerate(configs, 1):
         log_n = math.ceil(math.log2(nv)) if nv > 0 else 0
-        tag = (f"[{i:4d}/{total}] N={nv:>9,d} (log2={log_n:2d}) "
-               f"C={c_in:3d}->{c_out:3d} ks={ks} {dt}")
+        tag = (
+            f"[{i:4d}/{total}] N={nv:>9,d} (log2={log_n:2d}) "
+            f"C={c_in:3d}->{c_out:3d} ks={ks} {dt}"
+        )
 
         try:
             result = run_single_config(
@@ -451,10 +566,36 @@ def main():
 
             parts = []
             if result["forward_ms"] is not None:
-                parts.append(f"fwd={result['forward_ms']:8.2f}ms")
+                parts.append(f"fwd={result['forward_ms']:7.2f}ms")
             if result["backward_ms"] is not None:
-                parts.append(f"bwd={result['backward_ms']:8.2f}ms")
-            print(f"{tag}  {'  '.join(parts)}")
+                parts.append(f"bwd={result['backward_ms']:7.2f}ms")
+
+            # Auto-tune details
+            tune_parts = []
+            if result.get("fwd_autotune_ms") is not None:
+                tune_parts.append(
+                    f"fwd_tune={result['fwd_autotune_ms']:7.0f}ms"
+                    f"/{result['fwd_candidates']}algo"
+                )
+            if result.get("bwd_autotune_ms") is not None:
+                tune_parts.append(
+                    f"bwd_tune={result['bwd_autotune_ms']:7.0f}ms"
+                    f"/{result['bwd_candidates']}algo"
+                )
+
+            # Chosen algorithms
+            algo_parts = []
+            if result.get("fwd_algo"):
+                algo_parts.append(f"fwd_best={result['fwd_algo']}")
+            if result.get("bwd_algo"):
+                algo_parts.append(f"bwd_best={result['bwd_algo']}")
+
+            line = f"{tag}  {'  '.join(parts)}"
+            if tune_parts:
+                line += f"  | tune: {'  '.join(tune_parts)}"
+            if algo_parts:
+                line += f"  | {'  '.join(algo_parts)}"
+            print(line)
             num_done += 1
 
         except Exception as e:
@@ -465,11 +606,14 @@ def main():
 
     elapsed = time.time() - start_time
     print()
-    print(f"Done: {num_done} benchmarked, {num_skipped} skipped "
-          f"(resume={args.resume}) in {elapsed:.1f}s")
+    print(
+        f"Done: {num_done} benchmarked, {num_skipped} skipped "
+        f"(resume={args.resume}) in {elapsed:.1f}s"
+    )
 
     # Print cache location
     from warpconvnet.constants import WARPCONVNET_BENCHMARK_CACHE_DIR
+
     cache_dir = os.path.expanduser(WARPCONVNET_BENCHMARK_CACHE_DIR)
     cache_file = os.path.join(cache_dir, "benchmark_cache_generic.msgpack")
     if os.path.exists(cache_file):
