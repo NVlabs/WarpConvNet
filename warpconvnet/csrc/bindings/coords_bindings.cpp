@@ -143,6 +143,25 @@ void coords_radius_search_write(torch::Tensor points,
                                 int table_capacity,
                                 int hash_method);
 
+// Forward declarations: window grouping (counting sort)
+void coords_window_group_histogram(torch::Tensor grid_coord,
+                                   torch::Tensor batch_offsets,
+                                   torch::Tensor coord_offset,
+                                   torch::Tensor min_coord,
+                                   torch::Tensor window_size,
+                                   torch::Tensor grid_shape,
+                                   torch::Tensor codes,
+                                   torch::Tensor histogram,
+                                   int N,
+                                   int B,
+                                   int W);
+void coords_window_group_scatter(torch::Tensor codes,
+                                 torch::Tensor window_offsets_dense,
+                                 torch::Tensor scatter_counters,
+                                 torch::Tensor perm,
+                                 torch::Tensor inverse_perm,
+                                 int N);
+
 namespace warpconvnet {
 namespace bindings {
 
@@ -338,6 +357,28 @@ void register_coords(py::module_ &m) {
              py::arg("cell_size"),
              py::arg("table_capacity"),
              py::arg("hash_method"));
+  // --- Window grouping (counting sort) ---
+  coords.def("window_group_histogram",
+             &coords_window_group_histogram,
+             py::arg("grid_coord"),
+             py::arg("batch_offsets"),
+             py::arg("coord_offset"),
+             py::arg("min_coord"),
+             py::arg("window_size"),
+             py::arg("grid_shape"),
+             py::arg("codes"),
+             py::arg("histogram"),
+             py::arg("N"),
+             py::arg("B"),
+             py::arg("W"));
+  coords.def("window_group_scatter",
+             &coords_window_group_scatter,
+             py::arg("codes"),
+             py::arg("window_offsets_dense"),
+             py::arg("scatter_counters"),
+             py::arg("perm"),
+             py::arg("inverse_perm"),
+             py::arg("N"));
 }
 
 }  // namespace bindings

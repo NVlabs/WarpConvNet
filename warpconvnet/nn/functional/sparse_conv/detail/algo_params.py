@@ -86,7 +86,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
 #   cutlass_grouped_hybrid:  2.0ms  — competitive everywhere but rarely unique
 #   cute_implicit_gemm    :  0.5ms  — marginal, only small N + small channels
 #   explicit_gemm         :  0.0ms  — never uniquely fastest (always tied)
-#   explicit_gemm_grouped :  0.0ms  — never wins forward
+#   explicit_gemm_grouped :  1.25ms — wins at xlarge N, asymmetric channels
 #
 # Greedy set cover order:
 #   1. cutlass_implicit_gemm (base regret 4.4%)
@@ -127,6 +127,9 @@ _FWD_IMPLICIT_GEMM_GROUPED = [
 ]
 _FWD_CUTE_IMPLICIT = [] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]
 _FWD_EXPLICIT = [("explicit_gemm", {})]
+_FWD_EXPLICIT_GROUPED = [
+    ("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]
+]
 
 
 import math as _math
@@ -197,6 +200,9 @@ def _get_adaptive_forward_params(
         params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
         params.extend(_FWD_IMPLICIT_GEMM_32)
         params.extend(_FWD_CUTE_IMPLICIT)
+    if log_n > 19:
+        # explicit_gemm_grouped: 1.25ms removal impact at xlarge N, asymmetric channels
+        params.extend(_FWD_EXPLICIT_GROUPED)
     if log_n <= 19 or log_n == 0:
         # cute_grouped still contributes up to ~512K
         params.extend(_FWD_CUTE_GROUPED)
@@ -416,6 +422,7 @@ _BENCHMARK_FORWARD_PARAMS_ALL_AUTO = [
     *_FWD_IMPLICIT_GEMM_GROUPED,
     *_FWD_CUTE_IMPLICIT,
     *_FWD_EXPLICIT,
+    *_FWD_EXPLICIT_GROUPED,
 ]
 
 

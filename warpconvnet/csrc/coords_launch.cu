@@ -879,3 +879,74 @@ void coords_radius_search_write(torch::Tensor points,
       TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
   }
 }
+
+// ============================================================================
+// Window grouping kernels (counting sort)
+// ============================================================================
+
+extern "C" __global__ void window_group_histogram_kernel(
+    const int* __restrict__ grid_coord,
+    const int* __restrict__ batch_offsets,
+    const int* __restrict__ coord_offset,
+    const int* __restrict__ min_coord,
+    const int* __restrict__ window_size,
+    const int* __restrict__ grid_shape,
+    int64_t* __restrict__ codes,
+    int* __restrict__ histogram,
+    int N,
+    int B,
+    int W);
+
+extern "C" __global__ void window_group_scatter_kernel(
+    const int64_t* __restrict__ codes,
+    const int* __restrict__ window_offsets_dense,
+    int* __restrict__ scatter_counters,
+    int64_t* __restrict__ perm,
+    int64_t* __restrict__ inverse_perm,
+    int N);
+
+void coords_window_group_histogram(torch::Tensor grid_coord,
+                                   torch::Tensor batch_offsets,
+                                   torch::Tensor coord_offset,
+                                   torch::Tensor min_coord,
+                                   torch::Tensor window_size,
+                                   torch::Tensor grid_shape,
+                                   torch::Tensor codes,
+                                   torch::Tensor histogram,
+                                   int N,
+                                   int B,
+                                   int W) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  int threads = 256;
+  int blocks = (N + threads - 1) / threads;
+  window_group_histogram_kernel<<<blocks, threads, 0, stream>>>(
+      grid_coord.data_ptr<int>(),
+      batch_offsets.data_ptr<int>(),
+      coord_offset.data_ptr<int>(),
+      min_coord.data_ptr<int>(),
+      window_size.data_ptr<int>(),
+      grid_shape.data_ptr<int>(),
+      codes.data_ptr<int64_t>(),
+      histogram.data_ptr<int>(),
+      N,
+      B,
+      W);
+}
+
+void coords_window_group_scatter(torch::Tensor codes,
+                                 torch::Tensor window_offsets_dense,
+                                 torch::Tensor scatter_counters,
+                                 torch::Tensor perm,
+                                 torch::Tensor inverse_perm,
+                                 int N) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  int threads = 256;
+  int blocks = (N + threads - 1) / threads;
+  window_group_scatter_kernel<<<blocks, threads, 0, stream>>>(
+      codes.data_ptr<int64_t>(),
+      window_offsets_dense.data_ptr<int>(),
+      scatter_counters.data_ptr<int>(),
+      perm.data_ptr<int64_t>(),
+      inverse_perm.data_ptr<int64_t>(),
+      N);
+}
