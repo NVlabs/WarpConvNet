@@ -278,6 +278,7 @@ def spatially_sparse_conv(
         effective_compute_dtype,
         implicit_matmul_fwd_block_size,
         implicit_matmul_bwd_block_size,
+        in_tensor_stride,
     )
 
     if bias is not None:

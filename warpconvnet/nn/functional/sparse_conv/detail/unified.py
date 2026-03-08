@@ -42,13 +42,11 @@ from .algo_params import (
     SPARSE_CONV_BWD_ALGO_MODE,
     _HAS_CUTE_BACKEND,
     _HAS_CUTE_GROUPED,
-    _BENCHMARK_FORWARD_PARAMS_BASE,
-    _BENCHMARK_FORWARD_PARAMS_SMALL_CH,
-    _BENCHMARK_FORWARD_PARAMS_GROUPED,
     _BENCHMARK_BACKWARD_PARAMS,
     _ALL_BENCHMARK_FORWARD_PARAMS,
     _ALL_BENCHMARK_BACKWARD_PARAMS,
     _get_adaptive_forward_params,
+    _get_adaptive_backward_params,
     _get_filtered_forward_params,
     _get_filtered_backward_params,
     _filter_benchmark_params_by_env_config,
@@ -96,6 +94,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         compute_dtype: Optional[torch.dtype],
         fwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
+        voxel_size: Optional[Tuple[int, ...]] = None,
     ) -> Float[Tensor, "M C_out"]:
         global _BENCHMARK_FORWARD_RESULTS  # noqa: F824
         output_feature_tensor = None
@@ -125,7 +124,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         C_in = in_features.shape[1]
         C_out = weight.shape[2]
         kv = weight.shape[0]
-        adaptive_fwd_params = _get_adaptive_forward_params(C_in, C_out, kv)
+        adaptive_fwd_params = _get_adaptive_forward_params(
+            C_in,
+            C_out,
+            kv,
+            num_in_coords=in_features.shape[0],
+            voxel_size=voxel_size,
+        )
 
         config = SpatiallySparseConvConfig(
             num_in_coords=in_features.shape[0],
@@ -279,6 +284,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
         None,
+        None,
     ]:
         global _BENCHMARK_BACKWARD_RESULTS  # noqa: F824
         in_features, weight = ctx.saved_tensors
@@ -305,7 +311,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return _pad_tuple(None, None, 9)
+            return _pad_tuple(None, None, 10)
 
         N_in, C_in = in_features.shape
         K, _, C_out = weight.shape
@@ -319,7 +325,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            return _pad_tuple(grad_in_final, grad_weight_final, 9)
+            return _pad_tuple(grad_in_final, grad_weight_final, 10)
 
         # UNIFIED APPROACH: Always benchmark within filtered algorithm space
         # Step 1: Determine algorithm filter set
@@ -333,13 +339,25 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         # Step 2: Generate configuration for caching
         config_params = ctx.config_params_for_bwd
+        C_in_bwd = config_params["in_channels"]
+        C_out_bwd = config_params["out_channels"]
+        kv_bwd = config_params["kernel_volume"]
+        N_in_bwd = config_params["num_in_coords"]
         config = SpatiallySparseConvConfig(
-            num_in_coords=config_params["num_in_coords"],
+            num_in_coords=N_in_bwd,
             num_out_coords=config_params["num_out_coords"],
-            in_channels=config_params["in_channels"],
-            out_channels=config_params["out_channels"],
-            kernel_volume=config_params["kernel_volume"],
+            in_channels=C_in_bwd,
+            out_channels=C_out_bwd,
+            kernel_volume=kv_bwd,
             in_dtype=grad_output.dtype,
+        )
+
+        # Get adaptive backward params based on dimensions
+        adaptive_bwd_params = _get_adaptive_backward_params(
+            C_in_bwd,
+            C_out_bwd,
+            kv_bwd,
+            num_in_coords=N_in_bwd,
         )
 
         # Step 3: Check cache first
@@ -361,7 +379,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     chosen_bwd_algo, chosen_bwd_params, _ = filtered_cached_results[0]
                 else:
                     filtered_params = _filter_benchmark_params_by_env_config(
-                        _BENCHMARK_BACKWARD_PARAMS, algorithm_filter, is_forward=False
+                        adaptive_bwd_params, algorithm_filter, is_forward=False
                     )
                     if not filtered_params and "explicit_gemm" in algorithm_filter:
                         chosen_bwd_algo, chosen_bwd_params = (
@@ -390,14 +408,14 @@ class UnifiedSpatiallySparseConvFunction(Function):
         else:
             # Step 4: No cache - always benchmark within filtered space
             if algorithm_filter in ("auto", "all"):
-                # Benchmark algorithms - "auto" uses reduced set, "all" uses exhaustive set
+                # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
                 filtered_params = _filter_benchmark_params_by_env_config(
-                    _BENCHMARK_BACKWARD_PARAMS, algorithm_filter, is_forward=False
+                    adaptive_bwd_params, algorithm_filter, is_forward=False
                 )
             else:
                 # Filter benchmark parameters to only include algorithms in filter set
                 filtered_params = _filter_benchmark_params_by_env_config(
-                    _BENCHMARK_BACKWARD_PARAMS, algorithm_filter, is_forward=False
+                    adaptive_bwd_params, algorithm_filter, is_forward=False
                 )
 
             # Always run benchmarks to find optimal parameters
@@ -460,7 +478,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         if not ctx.needs_input_grad[1]:
             grad_weight = None
 
-        return _pad_tuple(grad_in_features, grad_weight, 9)
+        return _pad_tuple(grad_in_features, grad_weight, 10)
 
 
 # ---------------------------------------------------------------------------
