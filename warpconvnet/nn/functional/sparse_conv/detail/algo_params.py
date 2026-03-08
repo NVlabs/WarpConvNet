@@ -74,56 +74,132 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
 # ---------------------------------------------------------------------------
 # Forward benchmark candidate lists
 # ---------------------------------------------------------------------------
+#
+# Time-weighted cache analysis of 465 forward configs (fp16/bf16/fp32, SM 8.9):
+# Total optimal time: 896.6ms across all configs.
+#
+# Removal impact (ms lost if algo removed from full set):
+#   cutlass_implicit_gemm : 27.3ms  — dominates large N, large channels, kv=27
+#   implicit_gemm_grouped : 15.0ms  — critical for small channels (<=32), all N
+#   cute_grouped          :  9.9ms  — best at small-medium N, medium channels
+#   implicit_gemm         :  6.1ms  — wins small channels and small N
+#   cutlass_grouped_hybrid:  2.0ms  — competitive everywhere but rarely unique
+#   cute_implicit_gemm    :  0.5ms  — marginal, only small N + small channels
+#   explicit_gemm         :  0.0ms  — never uniquely fastest (always tied)
+#   explicit_gemm_grouped :  0.0ms  — never wins forward
+#
+# Greedy set cover order:
+#   1. cutlass_implicit_gemm (base regret 4.4%)
+#   2. cute_grouped          (+35.3ms saved, regret 0.5%)
+#   3. cutlass_grouped_hybrid(+2.1ms, regret 0.2%)
+#   4. implicit_gemm         (+1.7ms, regret 1.8%)
+#   5. implicit_gemm_grouped (+15.0ms, regret 0.1%)
+#   6. explicit_gemm         (+0.5ms, regret 0.1%)
+#   7. cute_implicit_gemm    (+0.5ms, regret 0.0%)
+#
+# Cross-axis findings (N bucket × channel bucket):
+#   - N<=4K: cute_grouped + implicit_gemm dominate; cutlass barely participates
+#   - 4K<N<=64K, ch<=64: implicit_gemm_grouped most valuable (3.5ms removal)
+#   - 4K<N<=64K, ch>64: cute_grouped most valuable (3.7ms removal)
+#   - N>64K, ch>64: cutlass_implicit_gemm dominates; cute_grouped drops off
+#   - N>64K, ch<=64: implicit_gemm_grouped critical (10.7ms removal at 64K-512K)
+#   - kv=125: only implicit_gemm and implicit_gemm_grouped win
 
-# Base forward benchmark candidates shared across all channel sizes.
-_BENCHMARK_FORWARD_PARAMS_BASE = [
-    ("cutlass_implicit_gemm", {}),
-    ("cutlass_grouped_hybrid", {"saturation_m": 2000}),
-    *(
-        []
-        if not _HAS_CUTE_GROUPED
-        else [
-            ("cute_grouped", {"mma_tile": 3}),
-            ("cute_grouped", {"mma_tile": 0}),
-            ("cute_grouped", {"mma_tile": 1}),
-        ]
-    ),
+# Algo building blocks (assembled conditionally by _get_adaptive_forward_params)
+_FWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})]
+_FWD_CUTLASS_GROUPED = [
+    ("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]
 ]
-
-# Additional candidates for small channels (max(C_in, C_out) <= 64).
-# implicit_gemm wins 14/38 at 32->32, 11/28 at 64->64 but never wins at C>=96.
-# cute_implicit_gemm wins 9 times total, all at small channels / small N.
-_BENCHMARK_FORWARD_PARAMS_SMALL_CH = [
-    *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [16, 32]],
-    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
-]
-
-# Additional candidates for small channels (max <= 64).
-# implicit_gemm_grouped wins 10/292 overall (3.4%), all at small channels:
-# 5 wins at 3->32 kv=125, 5 wins at 32->64/32->32/7->13 kv=8/27.
-# Margins vs implicit_gemm are tiny (0.1%-4.9%) so these are only needed
-# when implicit_gemm is already a candidate (i.e., small channels).
-_BENCHMARK_FORWARD_PARAMS_GROUPED = [
+_FWD_IMPLICIT_GEMM_16 = [("implicit_gemm", {"fwd_block_size": 16})]
+_FWD_IMPLICIT_GEMM_32 = [("implicit_gemm", {"fwd_block_size": 32})]
+_FWD_CUTE_GROUPED = (
+    []
+    if not _HAS_CUTE_GROUPED
+    else [
+        ("cute_grouped", {"mma_tile": 3}),
+        ("cute_grouped", {"mma_tile": 0}),
+        ("cute_grouped", {"mma_tile": 1}),
+    ]
+)
+_FWD_IMPLICIT_GEMM_GROUPED = [
     ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 2000}),
     ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 5000}),
 ]
+_FWD_CUTE_IMPLICIT = [] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]
+_FWD_EXPLICIT = [("explicit_gemm", {})]
+
+
+import math as _math
 
 
 def _get_adaptive_forward_params(
-    in_channels: int, out_channels: int, kernel_volume: int
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+    voxel_size: Union[Tuple[int, ...], None] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get forward benchmark candidates adapted to the convolution dimensions.
 
-    Based on cache analysis of 292 configs:
-    - Small channels (max(C_in,C_out) <= 64): implicit_gemm wins ~30%,
-      implicit_gemm_grouped wins ~3.4% (all at small channels)
-    - Large channels (max >= 96): implicit_gemm/grouped never win forward
+    Uses N (num_in_coords), max(C_in,C_out), and kernel_volume to select only
+    algorithms that have non-trivial removal impact in that region, based on
+    time-weighted analysis of 465 configs.
+
+    Args:
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        kernel_volume: Product of kernel dimensions (e.g. 27 for 3x3x3).
+        num_in_coords: Number of input voxels (0 = unknown).
+        voxel_size: Tensor stride / voxel size tuple (None = unknown).
     """
     max_ch = max(in_channels, out_channels)
-    params = list(_BENCHMARK_FORWARD_PARAMS_BASE)
+    log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
+
+    # kv=125 (5x5x5): only implicit_gemm variants win
+    if kernel_volume >= 64:
+        params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_FWD_IMPLICIT_GEMM_16)
+        params.extend(_FWD_IMPLICIT_GEMM_32)
+        params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
+        return params
+
+    # --- kv <= 27 (3x3x3 or 2x2x2) below ---
+
+    # Small N (N <= 4K, logN <= 12): cute_grouped + implicit_gemm dominate
+    # cutlass_implicit_gemm has zero removal impact at these sizes
+    if 0 < log_n <= 12:
+        params = []
+        params.extend(_FWD_CUTE_GROUPED)
+        params.extend(_FWD_IMPLICIT_GEMM_16)
+        if max_ch <= 64:
+            params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
+        return params
+
+    # Medium N (4K < N <= 64K, logN 13-16)
+    if 0 < log_n <= 16:
+        params = []
+        params.extend(_FWD_CUTE_GROUPED)  # highest removal impact in this range
+        params.extend(_FWD_CUTLASS_IMPLICIT)
+        params.extend(_FWD_CUTLASS_GROUPED)
+        params.extend(_FWD_IMPLICIT_GEMM_16)
+        if max_ch <= 64:
+            params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
+            params.extend(_FWD_CUTE_IMPLICIT)
+        return params
+
+    # Large N (N > 64K, logN > 16) or unknown N (num_in_coords=0)
+    params = []
+    params.extend(_FWD_CUTLASS_IMPLICIT)  # dominates this range
+    params.extend(_FWD_CUTLASS_GROUPED)
+    params.extend(_FWD_IMPLICIT_GEMM_16)
     if max_ch <= 64:
-        params.extend(_BENCHMARK_FORWARD_PARAMS_SMALL_CH)
-        params.extend(_BENCHMARK_FORWARD_PARAMS_GROUPED)
+        # implicit_gemm_grouped: 10.7ms removal impact at 64K-512K, ch<=64
+        params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
+        params.extend(_FWD_IMPLICIT_GEMM_32)
+        params.extend(_FWD_CUTE_IMPLICIT)
+    if log_n <= 19 or log_n == 0:
+        # cute_grouped still contributes up to ~512K
+        params.extend(_FWD_CUTE_GROUPED)
     return params
 
 
@@ -155,28 +231,128 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
 # ---------------------------------------------------------------------------
 # Backward benchmark candidate lists
 # ---------------------------------------------------------------------------
+#
+# Time-weighted cache analysis of 458 backward configs (fp16/bf16, SM 8.9):
+# Total optimal time: 1826.6ms across all configs.
+#
+# Removal impact (ms lost if algo removed):
+#   cutlass_grouped_hybrid: 119.2ms — dominant at large N, all channel sizes
+#   cute_grouped          :  46.7ms — critical at small-medium N
+#   implicit_gemm         :  19.8ms — critical for small channels (<=32)
+#   cutlass_implicit_gemm :  13.9ms — important at xlarge N, large channels
+#   explicit_gemm         :   2.8ms — minor, mostly at large N + small channels
+#   explicit_gemm_grouped :   0.2ms — negligible unique value
+#   cute_implicit_gemm    :   0.0ms — never wins backward
+#   implicit_gemm_grouped :   0.0ms — never wins backward
+#
+# Cross-axis findings:
+#   - N<=4K: cute_grouped wins 100%
+#   - 4K<N<=64K: cute_grouped (26.2ms removal), implicit_gemm (7.9ms)
+#   - 64K<N<=512K, ch>64: cutlass_grouped_hybrid (56.2ms removal)
+#   - 64K<N<=512K, ch<=64: implicit_gemm (11.9ms), cute_grouped (4.1ms)
+#   - N>512K, ch>64: cutlass_grouped_hybrid (51.7ms), cutlass_implicit_gemm (10.4ms)
+#   - N>512K, ch<=64: cutlass_grouped_hybrid (8.8ms), explicit_gemm (0.2ms)
+#   - kv=125: explicit_gemm (59%) + explicit_gemm_grouped (32%) + implicit_gemm (9%)
 
-# Reduced backward benchmark candidates (default "auto"): only algorithms that
-# win or appear in top-3 frequently. 9 candidates vs 32 in the full set.
-_BENCHMARK_BACKWARD_PARAMS = [
-    ("cutlass_implicit_gemm", {}),
-    ("explicit_gemm", {}),
-    ("explicit_gemm_grouped", {"saturation_m": 2000}),
+# Algo building blocks for backward
+_BWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})]
+_BWD_CUTLASS_GROUPED = [
+    ("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]
+]
+_BWD_CUTE_GROUPED = (
+    []
+    if not _HAS_CUTE_GROUPED
+    else [
+        ("cute_grouped", {"mma_tile": 3}),
+        ("cute_grouped", {"mma_tile": 0}),
+        ("cute_grouped", {"mma_tile": 1}),
+    ]
+)
+_BWD_IMPLICIT_GEMM = [
     (
         "implicit_gemm",
         {"gemm_block_size": 16, "split_k_threads_per_block": 256, "split_k_factor": 2},
     ),
-    *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    *(
-        []
-        if not _HAS_CUTE_GROUPED
-        else [
-            ("cute_grouped", {"mma_tile": 3}),
-            ("cute_grouped", {"mma_tile": 0}),
-            ("cute_grouped", {"mma_tile": 1}),
-        ]
-    ),
 ]
+_BWD_EXPLICIT = [("explicit_gemm", {})]
+_BWD_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": 2000})]
+
+# Static backward params (used by _get_filtered_backward_params for env var filtering)
+_BENCHMARK_BACKWARD_PARAMS = [
+    *_BWD_CUTLASS_IMPLICIT,
+    *_BWD_EXPLICIT,
+    *_BWD_EXPLICIT_GROUPED,
+    *_BWD_IMPLICIT_GEMM,
+    *_BWD_CUTLASS_GROUPED,
+    *_BWD_CUTE_GROUPED,
+]
+
+
+def _get_adaptive_backward_params(
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+    voxel_size: Union[Tuple[int, ...], None] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get backward benchmark candidates adapted to the convolution dimensions.
+
+    Uses N (num_in_coords), max(C_in,C_out), and kernel_volume to select only
+    algorithms with non-trivial removal impact in that region, based on
+    time-weighted analysis of 458 configs.
+
+    Args:
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        kernel_volume: Product of kernel dimensions (e.g. 27 for 3x3x3).
+        num_in_coords: Number of input voxels (0 = unknown).
+        voxel_size: Tensor stride / voxel size tuple (None = unknown).
+    """
+    max_ch = max(in_channels, out_channels)
+    log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
+
+    # kv=125 (5x5x5): explicit_gemm + explicit_gemm_grouped + implicit_gemm
+    if kernel_volume >= 64:
+        params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_BWD_EXPLICIT)
+        params.extend(_BWD_EXPLICIT_GROUPED)
+        params.extend(_BWD_IMPLICIT_GEMM)
+        return params
+
+    # --- kv <= 27 below ---
+
+    # Small N (N <= 4K, logN <= 12): cute_grouped dominates (100%)
+    if 0 < log_n <= 12:
+        params = []
+        params.extend(_BWD_CUTE_GROUPED)
+        params.extend(_BWD_CUTLASS_IMPLICIT)  # minor but covers edge cases
+        return params
+
+    # Medium N (4K < N <= 64K, logN 13-16)
+    if 0 < log_n <= 16:
+        params = []
+        params.extend(_BWD_CUTE_GROUPED)  # 26.2ms removal impact
+        params.extend(_BWD_CUTLASS_IMPLICIT)
+        params.extend(_BWD_CUTLASS_GROUPED)
+        if max_ch <= 64:
+            params.extend(_BWD_IMPLICIT_GEMM)  # 7.9ms removal at ch<=64
+        return params
+
+    # Large N (N > 64K, logN > 16) or unknown N
+    params = []
+    params.extend(_BWD_CUTLASS_GROUPED)  # dominant: 119.2ms removal total
+    params.extend(_BWD_CUTLASS_IMPLICIT)
+    if max_ch <= 64:
+        params.extend(_BWD_IMPLICIT_GEMM)  # 11.9ms removal at 64K-512K ch<=64
+        params.extend(_BWD_EXPLICIT)  # minor but non-zero at ch<=32
+        params.extend(_BWD_EXPLICIT_GROUPED)
+    else:
+        params.extend(_BWD_EXPLICIT)  # 1.7ms removal at 65-128 channels
+    if log_n <= 19 or log_n == 0:
+        # cute_grouped still valuable up to ~512K
+        params.extend(_BWD_CUTE_GROUPED)
+    return params
+
 
 # Full backward benchmark candidates ("all"): exhaustive search.
 _ALL_BENCHMARK_BACKWARD_PARAMS = [
@@ -229,14 +405,28 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
 # ---------------------------------------------------------------------------
 
 
+# Static superset of all forward "auto" candidates (union of all adaptive branches).
+# Used by _get_filtered_forward_params for env var filtering.
+_BENCHMARK_FORWARD_PARAMS_ALL_AUTO = [
+    *_FWD_CUTLASS_IMPLICIT,
+    *_FWD_CUTLASS_GROUPED,
+    *_FWD_IMPLICIT_GEMM_16,
+    *_FWD_IMPLICIT_GEMM_32,
+    *_FWD_CUTE_GROUPED,
+    *_FWD_IMPLICIT_GEMM_GROUPED,
+    *_FWD_CUTE_IMPLICIT,
+    *_FWD_EXPLICIT,
+]
+
+
 def _get_filtered_forward_params() -> List[Tuple[str, Dict[str, Any]]]:
     """Get forward benchmark parameters filtered by environment variable.
 
-    For "auto", returns the adaptive (reduced) set for a generic large-channel config.
+    For "auto", returns the static superset of all adaptive candidates.
     For "all", returns the full exhaustive set.
     """
     return _filter_benchmark_params_by_env_config(
-        _BENCHMARK_FORWARD_PARAMS_BASE, WARPCONVNET_FWD_ALGO_MODE, is_forward=True
+        _BENCHMARK_FORWARD_PARAMS_ALL_AUTO, WARPCONVNET_FWD_ALGO_MODE, is_forward=True
     )
 
 

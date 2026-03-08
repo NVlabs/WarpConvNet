@@ -40,7 +40,7 @@ repos:
         args:
           [
             "--extend-ignore",
-            "E203,E402,E501,F401,F722,F821,F841,RST2,RST301",
+            "E203,E402,E501,F401,F541,F722,F821,F841,RST2,RST301",
             "--exclude",
             "logs/*,data/*",
           ]
@@ -158,7 +158,7 @@ repos:
       - id: nbqa-flake8
         args:
           [
-            "--extend-ignore=E203,E402,E501,F401,F722,F841",
+            "--extend-ignore=E203,E402,E501,F401,F541,F722,F841",
             "--exclude=logs/*,data/*",
           ]
 
