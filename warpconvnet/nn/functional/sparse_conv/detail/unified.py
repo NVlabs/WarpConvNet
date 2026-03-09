@@ -42,6 +42,8 @@ from .algo_params import (
     SPARSE_CONV_BWD_ALGO_MODE,
     _HAS_CUTE_BACKEND,
     _HAS_CUTE_GROUPED,
+    _HAS_CUTE_SM90,
+    _HAS_CUTE_GROUPED_SM90,
     _BENCHMARK_BACKWARD_PARAMS,
     _ALL_BENCHMARK_FORWARD_PARAMS,
     _ALL_BENCHMARK_BACKWARD_PARAMS,
@@ -69,6 +71,18 @@ if _HAS_CUTE_GROUPED:
     from .cute_grouped import (
         _cute_grouped_forward_logic,
         _cute_grouped_backward_logic,
+    )
+
+if _HAS_CUTE_SM90:
+    from .cute_sm90 import (
+        _cute_implicit_gemm_sm90_forward_logic,
+        _cute_implicit_gemm_sm90_backward_logic,
+    )
+
+if _HAS_CUTE_GROUPED_SM90:
+    from .cute_grouped_sm90 import (
+        _cute_grouped_sm90_forward_logic,
+        _cute_grouped_sm90_backward_logic,
     )
 
 logger = get_logger(__name__)
@@ -592,6 +606,32 @@ def _execute_forward(
                 f"Error in _cutlass_implicit_gemm_forward_grouped: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
             )
         return result
+    elif algo == "cute_implicit_gemm_sm90":
+        result = _cute_implicit_gemm_sm90_forward_logic(
+            in_features,
+            weight,
+            kernel_map,
+            num_out_coords,
+            mma_tile=params.get("mma_tile", 100),
+        )
+        if isinstance(result, int) and result != 0:
+            raise RuntimeError(
+                f"Error in _cute_implicit_gemm_sm90_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
+            )
+        return result
+    elif algo == "cute_grouped_sm90":
+        result = _cute_grouped_sm90_forward_logic(
+            in_features,
+            weight,
+            kernel_map,
+            num_out_coords,
+            mma_tile=params.get("mma_tile", 100),
+        )
+        if isinstance(result, int) and result != 0:
+            raise RuntimeError(
+                f"Error in _cute_grouped_sm90_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
+            )
+        return result
     else:
         raise ValueError(f"Unsupported forward algorithm: {algo}")
 
@@ -708,6 +748,36 @@ def _execute_backward(
         if isinstance(result[0], int) and result[0] != 0:
             raise RuntimeError(
                 f"Error in _cute_grouped_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
+            )
+        return result
+    elif algo == "cute_implicit_gemm_sm90":
+        result = _cute_implicit_gemm_sm90_backward_logic(
+            grad_output,
+            in_features,
+            weight,
+            kernel_map,
+            requires_grad=(needs_input_grad[0], needs_input_grad[1]),
+            device=device,
+            mma_tile=params.get("mma_tile", 100),
+        )
+        if isinstance(result[0], int) and result[0] != 0:
+            raise RuntimeError(
+                f"Error in _cute_implicit_gemm_sm90_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
+            )
+        return result
+    elif algo == "cute_grouped_sm90":
+        result = _cute_grouped_sm90_backward_logic(
+            grad_output,
+            in_features,
+            weight,
+            kernel_map,
+            requires_grad=(needs_input_grad[0], needs_input_grad[1]),
+            device=device,
+            mma_tile=params.get("mma_tile", 100),
+        )
+        if isinstance(result[0], int) and result[0] != 0:
+            raise RuntimeError(
+                f"Error in _cute_grouped_sm90_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
             )
         return result
     else:

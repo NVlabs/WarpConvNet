@@ -41,6 +41,8 @@ from .cutlass import (
 from .algo_params import (
     _HAS_CUTE_BACKEND,
     _HAS_CUTE_GROUPED,
+    _HAS_CUTE_SM90,
+    _HAS_CUTE_GROUPED_SM90,
     _get_filtered_forward_params,
     _get_filtered_backward_params,
 )
@@ -55,6 +57,18 @@ if _HAS_CUTE_GROUPED:
     from .cute_grouped import (
         _cute_grouped_forward_logic,
         _cute_grouped_backward_logic,
+    )
+
+if _HAS_CUTE_SM90:
+    from .cute_sm90 import (
+        _cute_implicit_gemm_sm90_forward_logic,
+        _cute_implicit_gemm_sm90_backward_logic,
+    )
+
+if _HAS_CUTE_GROUPED_SM90:
+    from .cute_grouped_sm90 import (
+        _cute_grouped_sm90_forward_logic,
+        _cute_grouped_sm90_backward_logic,
     )
 
 logger = get_logger(__name__)
@@ -241,6 +255,30 @@ def _run_forward_benchmarks(
                 kernel_map,
                 num_out_coords,
                 mma_tile=params_config.get("mma_tile", 3),
+            )
+            if isinstance(status, int) and status != 0:
+                return status
+        elif algo_mode == "cute_implicit_gemm_sm90":
+            if not _HAS_CUTE_SM90:
+                return -1
+            status = _cute_implicit_gemm_sm90_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                mma_tile=params_config.get("mma_tile", 100),
+            )
+            if isinstance(status, int) and status != 0:
+                return status
+        elif algo_mode == "cute_grouped_sm90":
+            if not _HAS_CUTE_GROUPED_SM90:
+                return -1
+            status = _cute_grouped_sm90_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                mma_tile=params_config.get("mma_tile", 100),
             )
             if isinstance(status, int) and status != 0:
                 return status
@@ -445,6 +483,33 @@ def _run_backward_benchmarks(
                 requires_grad=(True, True),
                 device=device,
                 mma_tile=params_config.get("mma_tile", 3),
+            )
+            if isinstance(result[0], int) and result[0] != 0:
+                return result[0]
+        elif algo_mode == "cute_implicit_gemm_sm90":
+            if not _HAS_CUTE_SM90:
+                return -1
+            result = _cute_implicit_gemm_sm90_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                device=device,
+                mma_tile=params_config.get("mma_tile", 100),
+            )
+            if isinstance(result[0], int) and result[0] != 0:
+                return result[0]
+        elif algo_mode == "cute_grouped_sm90":
+            if not _HAS_CUTE_GROUPED_SM90:
+                return -1
+            result = _cute_grouped_sm90_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                requires_grad=(True, True),
+                device=device,
+                mma_tile=params_config.get("mma_tile", 100),
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]

@@ -381,7 +381,7 @@ def run_single_config(
             result["fwd_autotune_ms"] = first_call_ms - result["forward_ms"]
 
     # Backward: first call triggers auto-tuning, second measures inference
-    if do_backward and not (do_forward is False):
+    if do_backward:
         if result["forward_ms"] is None:
             out = conv(voxels)
 

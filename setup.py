@@ -99,6 +99,33 @@ if cuda_arch_list:
 else:
     print("TORCH_CUDA_ARCH_LIST not set; using PyTorch default arch list")
 
+# For SM90 (Hopper) WGMMA support, we need -gencode with sm_90a (not just sm_90).
+# PyTorch generates sm_90 by default, which lacks __CUDA_ARCH_FEAT_SM90_ALL.
+# We add the 90a gencode explicitly if the target list includes 9.0+.
+_has_sm90_target = False
+if cuda_arch_list:
+    for arch in cuda_arch_list.replace(",", " ").split():
+        arch = arch.strip().rstrip("+")
+        try:
+            if float(arch) >= 9.0:
+                _has_sm90_target = True
+                break
+        except ValueError:
+            pass
+else:
+    # When no explicit arch list, check if the current GPU is SM90+
+    try:
+        cap = torch.cuda.get_device_capability()
+        _has_sm90_target = cap[0] >= 9
+    except Exception:
+        pass
+
+if _has_sm90_target:
+    nvcc_args.append("-gencode=arch=compute_90a,code=sm_90a")
+    cxx_args.append("-DWARPCONVNET_SM90_ENABLED=1")
+    nvcc_args.append("-DWARPCONVNET_SM90_ENABLED=1")
+    print("Adding SM90a (Hopper WGMMA) gencode flag and WARPCONVNET_SM90_ENABLED")
+
 # Check DISABLE_BFLOAT16
 if os.environ.get("DISABLE_BFLOAT16", "0") == "1":
     print("Disabling BFLOAT16 support")
@@ -123,6 +150,7 @@ ext_modules = [
             "warpconvnet/csrc/cutlass_gemm_gather_scatter.cu",
             "warpconvnet/csrc/cutlass_cute_gemm_gather_scatter.cu",
             "warpconvnet/csrc/cutlass_cute_gemm_staged.cu",
+            "warpconvnet/csrc/cutlass_cute_gemm_sm90.cu",  # SM90 (Hopper) WGMMA GEMM
             "warpconvnet/csrc/cutlass_gemm_gather_scatter_sm80_fp32.cu",
             "warpconvnet/csrc/cub_sort.cu",
             "warpconvnet/csrc/voxel_mapping_kernels.cu",
@@ -140,6 +168,8 @@ ext_modules = [
             "warpconvnet/csrc/morton_code.cu",
             "warpconvnet/csrc/find_first_gt_bsearch.cu",
             "warpconvnet/csrc/radius_search_kernels.cu",
+            "warpconvnet/csrc/fused_kernel_map.cu",
+            "warpconvnet/csrc/cutlass_cute_gemm_grouped_sm90.cu",
             "warpconvnet/csrc/window_grouping_kernels.cu",
         ],
         include_dirs=include_dirs,

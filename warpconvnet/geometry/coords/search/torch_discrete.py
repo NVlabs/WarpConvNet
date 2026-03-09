@@ -278,8 +278,27 @@ def _kernel_map_from_size(
             )
             return found_in_coord_index
 
-        # Search-once + fused postprocess path for "offsets" return type.
-        # Single hash table search pass → postprocess count → cumsum → postprocess scatter.
+        # Fused kernel map path: 2 CUDA kernel launches (count + scatter)
+        # instead of search + postprocess_count + cumsum + postprocess_scatter.
+        # No K*M intermediate matrix is allocated.
+        if hasattr(_C.coords, "fused_kernel_map") and not skip_symmetric_kernel_map:
+            in_maps, out_maps, offsets = _C.coords.fused_kernel_map(
+                batched_query_coords.contiguous(),
+                hashtable._table_kvs.contiguous(),
+                hashtable.vector_keys.contiguous(),
+                hashtable.capacity,
+                list(kernel_sizes),
+                hashtable.hash_method.value,
+            )
+            return IntSearchResult(
+                in_maps,
+                out_maps,
+                offsets,
+                identity_map_index=identity_map_index,
+            )
+
+        # Fallback: Search-once + fused postprocess path for "offsets" return type.
+        # Single hash table search pass -> postprocess count -> cumsum -> postprocess scatter.
         # This eliminates the second hash table search pass (the dominant cost).
         table_kvs = hashtable._table_kvs.contiguous()
         vector_keys = hashtable.vector_keys.contiguous()
@@ -287,7 +306,7 @@ def _kernel_map_from_size(
         capacity = hashtable.capacity
         hash_method_val = hashtable.hash_method.value
 
-        # Step 1: Single search pass → K×M intermediate
+        # Step 1: Single search pass -> K*M intermediate
         found_in_coord_index = torch.empty(
             (num_offsets, num_query_coords),
             dtype=torch.int32,

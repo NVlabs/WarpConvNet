@@ -184,6 +184,17 @@ cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
 
 _HAS_CUTE_GEMM = hasattr(_C.gemm, "cute_gemm_AD_gather_scatter")
 _HAS_CUTE_GEMM_STAGED = hasattr(_C.gemm, "cute_gemm_AD_gather_scatter_staged")
+_HAS_CUTE_GEMM_SM90 = hasattr(_C.gemm, "cute_gemm_sm90_AD_gather_scatter")
+
+# Runtime SM90+ hardware detection
+_HAS_SM90_HARDWARE = False
+try:
+    _sm_cap = torch.cuda.get_device_capability()
+    _HAS_SM90_HARDWARE = _sm_cap[0] >= 9
+except Exception:
+    pass
+
+_HAS_CUTE_SM90 = _HAS_CUTE_GEMM_SM90 and _HAS_SM90_HARDWARE
 
 
 def _key_cute_AD_gather_scatter(
@@ -367,3 +378,47 @@ if _HAS_CUTE_GEMM:
 else:
     cute_gemm_AD_gather_scatter_autotuned = None
     cute_gemm_trAB_gather_autotuned = None
+
+
+# ---------------------------------------------------------------------------
+# SM90 WGMMA autotuned wrappers
+# ---------------------------------------------------------------------------
+
+
+def _key_cute_sm90_AD_gather_scatter(
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
+    tensor_c: torch.Tensor,
+    tensor_d: torch.Tensor,
+    indices_a: torch.Tensor,
+    indices_d: torch.Tensor,
+    *,
+    mma_tile: int = 100,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+) -> Tuple[Any, ...]:
+    sm, dtype = _sm_dtype_key(tensor_a)
+    out_dtype = str(tensor_c.dtype)
+    _, K = tensor_a.shape
+    K2, N = tensor_b.shape
+    len_a = int(indices_a.numel())
+    len_d = int(indices_d.numel())
+    log_len_a = int(math.ceil(math.log2(len_a))) if len_a > 0 else 0
+    log_len_d = int(math.ceil(math.log2(len_d))) if len_d > 0 else 0
+    return ("cute_gemm_sm90_AD_gather_scatter", sm, dtype, out_dtype, K, N, log_len_a, log_len_d)
+
+
+# SM90 tile options: 100 (64x128x64), 101 (128x128x64), 102 (128x256x64), 103 (256x128x64)
+_BENCHMARK_SM90_AD_GATHER_SCATTER_PARAMS = [{"mma_tile": tile} for tile in [100, 101, 102, 103]]
+
+if _HAS_CUTE_SM90:
+    cute_gemm_sm90_AD_gather_scatter_autotuned = make_autotuned_op(
+        namespace="cute_gemm_sm90_AD_gather_scatter",
+        c_fn=_C.gemm.cute_gemm_sm90_AD_gather_scatter,
+        param_space=_BENCHMARK_SM90_AD_GATHER_SCATTER_PARAMS,
+        key_fn=_key_cute_sm90_AD_gather_scatter,
+        run_and_time_fn=_status_runner_factory(_C.gemm.cute_gemm_sm90_AD_gather_scatter, (2, 3)),
+        record_failures_as_inf=False,
+    )
+else:
+    cute_gemm_sm90_AD_gather_scatter_autotuned = None

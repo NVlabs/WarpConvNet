@@ -409,6 +409,23 @@ __device__ void expand_insert_kernel_templated(int* table_kvs,
                                                int* num_entries_ptr,
                                                int* status_ptr) {
   extern __shared__ int shared_candidates[];
+
+  // Shared memory probe cache: direct-mapped, 256 entries.
+  // Placed after the shared_candidates region.
+  // Layout: shared_candidates[0 .. blockDim.x * key_dim - 1] = candidate keys
+  //         smem_cache[0..255] = cached 64-bit slot pairs
+  //         smem_cache_tags[0..255] = tag (slot index) or -1 if invalid
+  const int CACHE_SIZE = 256;
+  const int CACHE_MASK = CACHE_SIZE - 1;
+  long long* smem_cache = reinterpret_cast<long long*>(&shared_candidates[blockDim.x * key_dim]);
+  int* smem_cache_tags = reinterpret_cast<int*>(&smem_cache[CACHE_SIZE]);
+
+  // Initialize cache as invalid
+  for (int i = threadIdx.x; i < CACHE_SIZE; i += blockDim.x) {
+    smem_cache_tags[i] = -1;
+  }
+  __syncthreads();
+
   long long global_idx = blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
   long long total = static_cast<long long>(num_base_coords) * static_cast<long long>(num_offsets);
   if (global_idx >= total) {
@@ -425,6 +442,62 @@ __device__ void expand_insert_kernel_templated(int* table_kvs,
     candidate[d] = base_ptr[d] + offset_ptr[d];
   }
 
+  // --- Search phase with shared memory cache before insert ---
+  // Check if the candidate key already exists using the cache to reduce
+  // redundant global memory reads within the same block.
+  int slot = HashFuncT::hash(candidate, key_dim, table_capacity);
+  const int capacity_mask = table_capacity - 1;
+  int initial_slot = slot;
+  int attempts = 0;
+  bool found_existing = false;
+
+  while (attempts < table_capacity) {
+    long long pair;
+    int cache_idx = slot & CACHE_MASK;
+
+    // Check shared memory cache (read-only for search phase)
+    if (smem_cache_tags[cache_idx] == slot) {
+      pair = smem_cache[cache_idx];
+    } else {
+      pair = *reinterpret_cast<const long long*>(&table_kvs[slot * 2]);
+      // Populate cache
+      smem_cache[cache_idx] = pair;
+      smem_cache_tags[cache_idx] = slot;
+    }
+
+    int slot_marker = (int)(pair & 0xFFFFFFFF);
+    int vector_index = (int)(pair >> 32);
+
+    if (slot_marker == -1) {
+      // Empty slot — key is not present, proceed to insert
+      break;
+    }
+
+    if (vector_index >= 0) {
+      bool keys_match;
+      if (key_dim == 4) {
+        keys_match = vec_equal_4d(&vector_keys[vector_index * 4], candidate);
+      } else {
+        keys_match = vec_equal(&vector_keys[vector_index * key_dim], candidate, key_dim);
+      }
+      if (keys_match) {
+        found_existing = true;
+        break;
+      }
+    }
+
+    slot = (slot + 1) & capacity_mask;
+    if (slot == initial_slot) {
+      break;
+    }
+    attempts++;
+  }
+
+  if (found_existing) {
+    return;  // Already present, skip insert
+  }
+
+  // --- Insert phase: always go to global memory, invalidate cache entry ---
   insert_candidate_if_absent<HashFuncT>(table_kvs,
                                         vector_keys,
                                         candidate,
@@ -433,6 +506,84 @@ __device__ void expand_insert_kernel_templated(int* table_kvs,
                                         vector_capacity,
                                         num_entries_ptr,
                                         status_ptr);
+
+  // Invalidate cache entries that may have been modified by the insert.
+  // The insert probes from the hash slot, so invalidate the initial slot's
+  // cache entry to avoid stale reads by other threads in this block.
+  int insert_slot = HashFuncT::hash(candidate, key_dim, table_capacity);
+  int inv_cache_idx = insert_slot & CACHE_MASK;
+  smem_cache_tags[inv_cache_idx] = -1;
+}
+
+// --- Warp-Cooperative Search Kernel ---
+// Each WARP (32 threads) handles one query key, probing 32 consecutive slots
+// simultaneously per iteration. This improves hash table search throughput by
+// reducing the number of serial probe iterations.
+template <typename HashFuncT>
+__device__ void warp_cooperative_search_kernel_templated(const int* __restrict__ table_kvs,
+                                                         const int* __restrict__ vector_keys,
+                                                         const int* __restrict__ search_keys,
+                                                         int* __restrict__ results,
+                                                         int num_search_keys,
+                                                         int key_dim,
+                                                         int table_capacity) {
+  // Each WARP handles one query key
+  int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int lane = threadIdx.x % 32;
+
+  if (warp_id >= num_search_keys) return;
+
+  const int* query_key = &search_keys[warp_id * key_dim];
+  int slot = HashFuncT::hash(query_key, key_dim, table_capacity);
+  const int capacity_mask = table_capacity - 1;
+
+  int result = -1;
+
+  // Each iteration, 32 lanes probe 32 consecutive slots
+  for (int attempt = 0; attempt < table_capacity; attempt += 32) {
+    int my_slot = (slot + lane + attempt) & capacity_mask;
+
+    // Load slot entry (64-bit load for both marker and index)
+    long long pair = *reinterpret_cast<const long long*>(&table_kvs[my_slot * 2]);
+    int slot_marker = (int)(pair & 0xFFFFFFFF);
+    int vector_index = (int)(pair >> 32);
+
+    // Check for empty slot — if any lane hits empty before finding key, key is absent
+    unsigned empty_mask = __ballot_sync(0xFFFFFFFF, slot_marker == -1);
+
+    // Check for key match
+    bool match = false;
+    if (slot_marker != -1 && vector_index >= 0) {
+      if (key_dim == 4) {
+        match = vec_equal_4d(&vector_keys[vector_index * 4], query_key);
+      } else {
+        match = vec_equal(&vector_keys[vector_index * key_dim], query_key, key_dim);
+      }
+    }
+    unsigned match_mask = __ballot_sync(0xFFFFFFFF, match);
+
+    if (match_mask != 0) {
+      // Found! Get result from the matching lane
+      int winner_lane = __ffs(match_mask) - 1;
+      result = __shfl_sync(0xFFFFFFFF, vector_index, winner_lane);
+      break;
+    }
+
+    if (empty_mask != 0) {
+      // Found an empty slot in the probe sequence.
+      // With linear probing, if we've checked all slots before the
+      // first empty and found no match, the key is absent.
+      //
+      // Lanes are ordered 0..31 and all share the same attempt offset,
+      // so lane ordering IS probe ordering within this batch.
+      break;
+    }
+    // All 32 slots occupied with non-matching keys — continue to next batch
+  }
+
+  if (lane == 0) {
+    results[warp_id] = result;
+  }
 }
 
 // --- Extern "C" Wrappers for CuPy ---
@@ -480,6 +631,38 @@ extern "C" __global__ void search_kernel_murmur(const int* table_kvs,
                                                 int key_dim,
                                                 int table_capacity) {
   search_kernel_templated<MurmurHash>(
+      table_kvs, vector_keys, search_keys, results, num_search_keys, key_dim, table_capacity);
+}
+
+// Warp-Cooperative Search Wrappers
+extern "C" __global__ void warp_search_kernel_fnv1a(const int* table_kvs,
+                                                    const int* vector_keys,
+                                                    const int* search_keys,
+                                                    int* results,
+                                                    int num_search_keys,
+                                                    int key_dim,
+                                                    int table_capacity) {
+  warp_cooperative_search_kernel_templated<FNV1AHash>(
+      table_kvs, vector_keys, search_keys, results, num_search_keys, key_dim, table_capacity);
+}
+extern "C" __global__ void warp_search_kernel_city(const int* table_kvs,
+                                                   const int* vector_keys,
+                                                   const int* search_keys,
+                                                   int* results,
+                                                   int num_search_keys,
+                                                   int key_dim,
+                                                   int table_capacity) {
+  warp_cooperative_search_kernel_templated<CityHash>(
+      table_kvs, vector_keys, search_keys, results, num_search_keys, key_dim, table_capacity);
+}
+extern "C" __global__ void warp_search_kernel_murmur(const int* table_kvs,
+                                                     const int* vector_keys,
+                                                     const int* search_keys,
+                                                     int* results,
+                                                     int num_search_keys,
+                                                     int key_dim,
+                                                     int table_capacity) {
+  warp_cooperative_search_kernel_templated<MurmurHash>(
       table_kvs, vector_keys, search_keys, results, num_search_keys, key_dim, table_capacity);
 }
 
