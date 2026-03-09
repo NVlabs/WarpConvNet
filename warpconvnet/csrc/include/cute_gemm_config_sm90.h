@@ -74,6 +74,7 @@ using SmemLayoutAtomB_SM90_BF16 = cute::GMMA::Layout_MN_SW128_Atom<cutlass::bflo
     static constexpr int AlignmentA = 8;                                                           \
     static constexpr int AlignmentB = 8;                                                           \
     static constexpr bool UseCpAsyncGatherA = true;                                                \
+    static constexpr bool UseTmaLoadB = true;                                                      \
   };
 
 #define DEFINE_CUTE_TILE_CONFIG_SM90_BF16(TileTag, M_DIM, N_DIM, K_DIM)                   \
@@ -95,6 +96,7 @@ using SmemLayoutAtomB_SM90_BF16 = cute::GMMA::Layout_MN_SW128_Atom<cutlass::bflo
     static constexpr int AlignmentA = 8;                                                  \
     static constexpr int AlignmentB = 8;                                                  \
     static constexpr bool UseCpAsyncGatherA = true;                                       \
+    static constexpr bool UseTmaLoadB = true;                                              \
   };
 
 // ============================================================================
