@@ -104,7 +104,7 @@ else:
 # We add the 90a gencode explicitly if the target list includes 9.0+.
 _has_sm90_target = False
 if cuda_arch_list:
-    for arch in cuda_arch_list.replace(",", " ").split():
+    for arch in cuda_arch_list.replace(",", " ").replace(";", " ").split():
         arch = arch.strip().rstrip("+")
         try:
             if float(arch) >= 9.0:
