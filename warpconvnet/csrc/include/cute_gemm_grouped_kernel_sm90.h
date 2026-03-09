@@ -88,13 +88,15 @@ struct CuteGemmGroupedKernelSm90 {
   using SmemLayoutAtomA = typename TileConfig::SmemLayoutAtomA;
   using SmemLayoutAtomB = typename TileConfig::SmemLayoutAtomB;
 
-  // SM90 WGMMA uses 128 threads (1 warp group)
-  static constexpr int MaxThreadsPerBlock = 128;
-  static constexpr int MinBlocksPerMultiprocessor = 1;
-
   static constexpr int tM = cute::size<0>(TileShape{});
   static constexpr int tN = cute::size<1>(TileShape{});
   static constexpr int tK = cute::size<2>(TileShape{});
+
+  // WGMMA SS: 128 threads per warp group. Tiles with tM > 64 use multiple
+  // warp groups (tM/64), each requiring 128 threads.
+  static constexpr int NumWarpGroups = tM / 64;
+  static constexpr int MaxThreadsPerBlock = 128 * NumWarpGroups;
+  static constexpr int MinBlocksPerMultiprocessor = 1;
   static constexpr int NumStages = TileConfig::NumStages;
   static constexpr bool UseCpAsyncGatherA = TileConfig::UseCpAsyncGatherA;
 

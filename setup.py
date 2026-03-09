@@ -69,6 +69,7 @@ library_dirs = [
 libraries = [
     "cudart",
     "cublas",
+    "cuda",  # CUDA driver API (cuTensorMapEncodeTiled for SM90 TMA)
 ]
 
 # Define compile arguments
