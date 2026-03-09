@@ -40,6 +40,27 @@ try:
 except Exception:
     _HAS_CUTE_GROUPED = False
 
+# SM90 WGMMA backends — available when compiled with SM90 support and running on SM90+ hardware
+_HAS_SM90_HARDWARE = False
+try:
+    import torch
+
+    _sm_cap = torch.cuda.get_device_capability()
+    _HAS_SM90_HARDWARE = _sm_cap[0] >= 9
+except Exception:
+    pass
+
+try:
+    import warpconvnet._C as _C
+
+    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(_C.gemm, "cute_gemm_sm90_AD_gather_scatter")
+    _HAS_CUTE_GROUPED_SM90 = _HAS_SM90_HARDWARE and hasattr(
+        _C.gemm, "cute_gemm_sm90_grouped_AD_gather_scatter"
+    )
+except Exception:
+    _HAS_CUTE_SM90 = False
+    _HAS_CUTE_GROUPED_SM90 = False
+
 # ---------------------------------------------------------------------------
 # Enums for granular algorithm control
 # ---------------------------------------------------------------------------
@@ -54,6 +75,8 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
     CUTE_GROUPED = "cute_grouped"
+    CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
+    CUTE_GROUPED_SM90 = "cute_grouped_sm90"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
 
@@ -67,6 +90,8 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     IMPLICIT_GEMM_GROUPED = "implicit_gemm_grouped"
     CUTLASS_GROUPED_HYBRID = "cutlass_grouped_hybrid"
     CUTE_GROUPED = "cute_grouped"
+    CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
+    CUTE_GROUPED_SM90 = "cute_grouped_sm90"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
 
@@ -110,6 +135,24 @@ _FWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})]
 _FWD_CUTLASS_GROUPED = [
     ("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]
 ]
+# SM90 WGMMA forward building blocks (only on Hopper+ hardware with SM90 compiled support)
+_FWD_CUTE_SM90 = (
+    []
+    if not _HAS_CUTE_SM90
+    else [
+        ("cute_implicit_gemm_sm90", {"mma_tile": 100}),
+        ("cute_implicit_gemm_sm90", {"mma_tile": 103}),
+    ]
+)
+_FWD_CUTE_GROUPED_SM90 = (
+    []
+    if not _HAS_CUTE_GROUPED_SM90
+    else [
+        ("cute_grouped_sm90", {"mma_tile": 103}),
+        ("cute_grouped_sm90", {"mma_tile": 100}),
+        ("cute_grouped_sm90", {"mma_tile": 101}),
+    ]
+)
 _FWD_IMPLICIT_GEMM_16 = [("implicit_gemm", {"fwd_block_size": 16})]
 _FWD_IMPLICIT_GEMM_32 = [("implicit_gemm", {"fwd_block_size": 32})]
 _FWD_CUTE_GROUPED = (
@@ -127,9 +170,7 @@ _FWD_IMPLICIT_GEMM_GROUPED = [
 ]
 _FWD_CUTE_IMPLICIT = [] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]
 _FWD_EXPLICIT = [("explicit_gemm", {})]
-_FWD_EXPLICIT_GROUPED = [
-    ("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]
-]
+_FWD_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]]
 
 
 import math as _math
@@ -176,6 +217,8 @@ def _get_adaptive_forward_params(
         params.extend(_FWD_IMPLICIT_GEMM_16)
         if max_ch <= 64:
             params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
+        params.extend(_FWD_CUTE_SM90)
+        params.extend(_FWD_CUTE_GROUPED_SM90)
         return params
 
     # Medium N (4K < N <= 64K, logN 13-16)
@@ -188,6 +231,8 @@ def _get_adaptive_forward_params(
         if max_ch <= 64:
             params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
             params.extend(_FWD_CUTE_IMPLICIT)
+        params.extend(_FWD_CUTE_SM90)
+        params.extend(_FWD_CUTE_GROUPED_SM90)
         return params
 
     # Large N (N > 64K, logN > 16) or unknown N (num_in_coords=0)
@@ -206,6 +251,8 @@ def _get_adaptive_forward_params(
     if log_n <= 19 or log_n == 0:
         # cute_grouped still contributes up to ~512K
         params.extend(_FWD_CUTE_GROUPED)
+    params.extend(_FWD_CUTE_SM90)
+    params.extend(_FWD_CUTE_GROUPED_SM90)
     return params
 
 
@@ -231,6 +278,19 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
             ("cute_grouped", {"mma_tile": 0}),
             ("cute_grouped", {"mma_tile": 1}),
         ]
+    ),
+    # SM90 WGMMA candidates for exhaustive search
+    *(
+        []
+        if not _HAS_CUTE_SM90
+        else [
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+        ]
+    ),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED_SM90
+        else [("cute_grouped_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]]
     ),
 ]
 
@@ -280,6 +340,26 @@ _BWD_IMPLICIT_GEMM = [
         {"gemm_block_size": 16, "split_k_threads_per_block": 256, "split_k_factor": 2},
     ),
 ]
+# SM90 WGMMA backward building blocks
+_BWD_CUTE_SM90 = (
+    []
+    if not _HAS_CUTE_SM90
+    else [
+        ("cute_implicit_gemm_sm90", {"mma_tile": 100}),
+        ("cute_implicit_gemm_sm90", {"mma_tile": 103}),
+        ("cute_implicit_gemm_sm90", {"mma_tile": 104}),
+    ]
+)
+_BWD_CUTE_GROUPED_SM90 = (
+    []
+    if not _HAS_CUTE_GROUPED_SM90
+    else [
+        ("cute_grouped_sm90", {"mma_tile": 103}),
+        ("cute_grouped_sm90", {"mma_tile": 100}),
+        ("cute_grouped_sm90", {"mma_tile": 101}),
+        ("cute_grouped_sm90", {"mma_tile": 104}),
+    ]
+)
 _BWD_EXPLICIT = [("explicit_gemm", {})]
 _BWD_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": 2000})]
 
@@ -291,6 +371,8 @@ _BENCHMARK_BACKWARD_PARAMS = [
     *_BWD_IMPLICIT_GEMM,
     *_BWD_CUTLASS_GROUPED,
     *_BWD_CUTE_GROUPED,
+    *_BWD_CUTE_SM90,
+    *_BWD_CUTE_GROUPED_SM90,
 ]
 
 
@@ -332,6 +414,8 @@ def _get_adaptive_backward_params(
         params = []
         params.extend(_BWD_CUTE_GROUPED)
         params.extend(_BWD_CUTLASS_IMPLICIT)  # minor but covers edge cases
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
 
     # Medium N (4K < N <= 64K, logN 13-16)
@@ -342,6 +426,8 @@ def _get_adaptive_backward_params(
         params.extend(_BWD_CUTLASS_GROUPED)
         if max_ch <= 64:
             params.extend(_BWD_IMPLICIT_GEMM)  # 7.9ms removal at ch<=64
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
 
     # Large N (N > 64K, logN > 16) or unknown N
@@ -357,6 +443,8 @@ def _get_adaptive_backward_params(
     if log_n <= 19 or log_n == 0:
         # cute_grouped still valuable up to ~512K
         params.extend(_BWD_CUTE_GROUPED)
+    params.extend(_BWD_CUTE_SM90)
+    params.extend(_BWD_CUTE_GROUPED_SM90)
     return params
 
 
@@ -404,6 +492,19 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
             ("cute_grouped", {"mma_tile": 1}),
         ]
     ),
+    # SM90 WGMMA backward exhaustive candidates
+    *(
+        []
+        if not _HAS_CUTE_SM90
+        else [
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+        ]
+    ),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED_SM90
+        else [("cute_grouped_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]]
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -422,6 +523,8 @@ _BENCHMARK_FORWARD_PARAMS_ALL_AUTO = [
     *_FWD_IMPLICIT_GEMM_GROUPED,
     *_FWD_CUTE_IMPLICIT,
     *_FWD_EXPLICIT,
+    *_FWD_CUTE_SM90,
+    *_FWD_CUTE_GROUPED_SM90,
     *_FWD_EXPLICIT_GROUPED,
 ]
 

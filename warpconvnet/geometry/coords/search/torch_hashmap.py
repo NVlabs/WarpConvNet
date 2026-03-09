@@ -249,7 +249,10 @@ class TorchHashTable:
         return obj
 
     def search(
-        self, search_keys: Union[Tensor, np.ndarray], threads_per_block: int = 256
+        self,
+        search_keys: Union[Tensor, np.ndarray],
+        threads_per_block: int = 256,
+        cooperative: bool = True,
     ) -> Tensor:
         """Search for keys (PyTorch Tensor) in the hash table.
 
@@ -306,16 +309,28 @@ class TorchHashTable:
         results = torch.empty(num_search_keys, dtype=torch.int32, device=table_device)
 
         # --- Launch Search Kernel ---
-        _C.coords.hashmap_search(
-            self._table_kvs,
-            self._vector_keys,
-            search_keys,
-            results,
-            num_search_keys,
-            self._key_dim,
-            self._capacity,
-            self._hash_method_enum.value,
-        )
+        if cooperative and hasattr(_C.coords, "hashmap_warp_search"):
+            _C.coords.hashmap_warp_search(
+                self._table_kvs,
+                self._vector_keys,
+                search_keys,
+                results,
+                num_search_keys,
+                self._key_dim,
+                self._capacity,
+                self._hash_method_enum.value,
+            )
+        else:
+            _C.coords.hashmap_search(
+                self._table_kvs,
+                self._vector_keys,
+                search_keys,
+                results,
+                num_search_keys,
+                self._key_dim,
+                self._capacity,
+                self._hash_method_enum.value,
+            )
         # No sync needed: downstream PyTorch ops on the same stream will
         # see the results. Only sync if CPU needs to read the tensor.
 

@@ -5,7 +5,11 @@
 // Exposes _C.coords submodule.
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/extension.h>
+
+#include <tuple>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -25,6 +29,14 @@ void coords_hashmap_search(torch::Tensor table_kvs,
                            int key_dim,
                            int capacity,
                            int hash_method);
+void coords_hashmap_warp_search(torch::Tensor table_kvs,
+                                torch::Tensor vector_keys,
+                                torch::Tensor search_keys,
+                                torch::Tensor results,
+                                int num_search,
+                                int key_dim,
+                                int capacity,
+                                int hash_method);
 void coords_hashmap_expand(torch::Tensor table_kvs,
                            torch::Tensor vector_keys,
                            torch::Tensor base_coords,
@@ -142,6 +154,13 @@ void coords_radius_search_write(torch::Tensor points,
                                 float cell_size,
                                 int table_capacity,
                                 int hash_method);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> launch_fused_kernel_map(
+    torch::Tensor output_coords,
+    torch::Tensor table_kvs,
+    torch::Tensor vector_keys,
+    int table_capacity,
+    std::vector<int> kernel_size,
+    int hash_method);
 
 // Forward declarations: window grouping (counting sort)
 void coords_window_group_histogram(torch::Tensor grid_coord,
@@ -180,6 +199,16 @@ void register_coords(py::module_ &m) {
              py::arg("hash_method"));
   coords.def("hashmap_search",
              &coords_hashmap_search,
+             py::arg("table_kvs"),
+             py::arg("vector_keys"),
+             py::arg("search_keys"),
+             py::arg("results"),
+             py::arg("num_search"),
+             py::arg("key_dim"),
+             py::arg("capacity"),
+             py::arg("hash_method"));
+  coords.def("hashmap_warp_search",
+             &coords_hashmap_warp_search,
              py::arg("table_kvs"),
              py::arg("vector_keys"),
              py::arg("search_keys"),
@@ -357,6 +386,17 @@ void register_coords(py::module_ &m) {
              py::arg("cell_size"),
              py::arg("table_capacity"),
              py::arg("hash_method"));
+
+  // --- Fused kernel map (2 CUDA launches instead of 4) ---
+  coords.def("fused_kernel_map",
+             &launch_fused_kernel_map,
+             "Fused kernel map generation (search + count + scatter in 2 passes)",
+             py::arg("output_coords"),
+             py::arg("table_kvs"),
+             py::arg("vector_keys"),
+             py::arg("table_capacity"),
+             py::arg("kernel_size"),
+             py::arg("hash_method") = 1);
   // --- Window grouping (counting sort) ---
   coords.def("window_group_histogram",
              &coords_window_group_histogram,

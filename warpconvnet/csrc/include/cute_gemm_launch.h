@@ -242,3 +242,70 @@ int launch_cute_gemm_grouped_trAB_gather(const void *ptr_A,
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
+
+// ============================================================================
+// SM90 Grouped GEMM launcher — fused multi-offset sparse convolution (WGMMA)
+// ============================================================================
+
+#if defined(WARPCONVNET_SM90_ENABLED)
+
+// Include SM90 grouped kernel OUTSIDE namespace to avoid nested namespace issues
+#include "cute_gemm_grouped_kernel_sm90.h"
+
+namespace warpconvnet {
+namespace cute_gemm {
+
+/// Launch a fused grouped CuTe GEMM with AD gather-scatter using SM90 WGMMA.
+///
+/// Same interface as the SM80 grouped launcher, but uses the SM90 WGMMA kernel
+/// with GMMA-compatible smem layouts and warp-group synchronization.
+template <typename ElementInput, typename TileConfig, typename ElementOutput = float>
+int launch_cute_gemm_grouped_ad_gather_scatter_sm90(const void *ptr_A,
+                                                    void *ptr_D,
+                                                    const int *in_map,
+                                                    const int *out_map,
+                                                    const GroupedGemmParams &params,
+                                                    int total_m_tiles,
+                                                    int K,
+                                                    int N,
+                                                    float alpha,
+                                                    cudaStream_t stream = 0) {
+  using Kernel = CuteGemmGroupedKernelSm90<TileConfig, ElementOutput>;
+  constexpr int TileN = cute::size<1>(typename TileConfig::TileShape{});
+  constexpr size_t smem_size = Kernel::SharedStorageSize;
+
+  if (total_m_tiles == 0) {
+    return static_cast<int>(gemm::GemmStatus::kSuccess);
+  }
+
+  dim3 grid(total_m_tiles, (N + TileN - 1) / TileN, 1);
+
+  if (smem_size > 48 * 1024) {
+    auto err = cudaFuncSetAttribute(cute_gemm_grouped_kernel_sm90_entry<Kernel>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    smem_size);
+    if (err != cudaSuccess) {
+      return static_cast<int>(gemm::GemmStatus::kErrorKernelInitialization);
+    }
+  }
+
+  cute_gemm_grouped_kernel_sm90_entry<Kernel>
+      <<<grid, Kernel::MaxThreadsPerBlock, smem_size, stream>>>(
+          reinterpret_cast<const ElementInput *>(ptr_A),
+          reinterpret_cast<ElementOutput *>(ptr_D),
+          in_map,
+          out_map,
+          params,
+          N,
+          K,
+          alpha);
+
+  auto err = cudaGetLastError();
+  return err == cudaSuccess ? static_cast<int>(gemm::GemmStatus::kSuccess)
+                            : static_cast<int>(gemm::GemmStatus::kErrorKernelExecution);
+}
+
+}  // namespace cute_gemm
+}  // namespace warpconvnet
+
+#endif  // WARPCONVNET_SM90_ENABLED

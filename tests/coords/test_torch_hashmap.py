@@ -188,5 +188,110 @@ def test_benchmark_torch_search_non_existent_min_of_k(
     benchmark(run_search_k_times_and_return_min_time)
 
 
+# --- Warp-Cooperative Search Tests ---
+
+
+@pytest.mark.parametrize("hash_method", list(HashMethod))
+@pytest.mark.parametrize(
+    "num_keys,key_dim",
+    [
+        (100, 4),  # Small table, 4D keys
+        (100, 3),  # Small table, 3D keys
+        (10000, 4),  # Medium table, 4D keys
+        (10000, 3),  # Medium table, 3D keys
+        (100000, 4),  # Large table, 4D keys
+        (100000, 3),  # Large table, 3D keys
+    ],
+)
+def test_warp_cooperative_search_matches_standard(device, hash_method, num_keys, key_dim):
+    """Verify warp-cooperative search produces identical results to standard search."""
+    keys = torch.randint(0, 50000, (num_keys, key_dim), device=device, dtype=torch.int32)
+    table = TorchHashTable.from_keys(keys, hash_method=hash_method, device=device)
+
+    # Search for existing keys with both methods
+    results_standard = table.search(keys, cooperative=False)
+    results_cooperative = table.search(keys, cooperative=True)
+    torch.testing.assert_close(
+        results_standard,
+        results_cooperative,
+        msg=f"Warp-cooperative search must match standard search for existing keys "
+        f"(hash={hash_method}, N={num_keys}, dim={key_dim})",
+    )
+
+    # All existing keys should be found
+    assert (results_cooperative.cpu() != -1).all(), (
+        f"Warp-cooperative search failed to find existing keys "
+        f"(hash={hash_method}, N={num_keys}, dim={key_dim})"
+    )
+
+    # Search for non-existent keys with both methods
+    non_existent = torch.randint(
+        50001, 100000, (num_keys, key_dim), device=device, dtype=torch.int32
+    )
+    results_standard_ne = table.search(non_existent, cooperative=False)
+    results_cooperative_ne = table.search(non_existent, cooperative=True)
+    torch.testing.assert_close(
+        results_standard_ne,
+        results_cooperative_ne,
+        msg=f"Warp-cooperative search must match standard search for non-existent keys "
+        f"(hash={hash_method}, N={num_keys}, dim={key_dim})",
+    )
+
+    # All non-existent keys should return -1
+    assert (results_cooperative_ne.cpu() == -1).all(), (
+        f"Warp-cooperative search returned false positives for non-existent keys "
+        f"(hash={hash_method}, N={num_keys}, dim={key_dim})"
+    )
+
+
+@pytest.mark.parametrize("hash_method", list(HashMethod))
+@pytest.mark.parametrize("load_factor", [0.25, 0.50, 0.75])
+def test_warp_cooperative_search_load_factors(device, hash_method, load_factor):
+    """Test warp-cooperative search at different hash table load factors."""
+    # Use a fixed capacity and vary the number of keys to achieve the target load factor.
+    capacity = 1 << 14  # 16384
+    num_keys = int(capacity * load_factor)
+    key_dim = 4
+    keys = torch.randint(0, 50000, (num_keys, key_dim), device=device, dtype=torch.int32)
+    table = TorchHashTable.from_keys(
+        keys, hash_method=hash_method, device=device, capacity=capacity
+    )
+
+    results_standard = table.search(keys, cooperative=False)
+    results_cooperative = table.search(keys, cooperative=True)
+    torch.testing.assert_close(
+        results_standard,
+        results_cooperative,
+        msg=f"Mismatch at load_factor={load_factor} with {hash_method}",
+    )
+    assert (
+        results_cooperative.cpu() != -1
+    ).all(), f"Warp-cooperative search missed keys at load_factor={load_factor} with {hash_method}"
+
+
+@pytest.mark.parametrize("hash_method", list(HashMethod))
+def test_warp_cooperative_search_mixed_keys(device, hash_method):
+    """Test warp-cooperative search with a mix of existing and non-existing keys."""
+    num_keys = 10000
+    key_dim = 4
+    keys = torch.randint(0, 50000, (num_keys, key_dim), device=device, dtype=torch.int32)
+    table = TorchHashTable.from_keys(keys, hash_method=hash_method, device=device)
+
+    # Create mixed search keys: half existing, half non-existing
+    existing = keys[: num_keys // 2]
+    non_existing = torch.randint(
+        50001, 100000, (num_keys // 2, key_dim), device=device, dtype=torch.int32
+    )
+    mixed = torch.cat([existing, non_existing], dim=0)
+
+    results_standard = table.search(mixed, cooperative=False)
+    results_cooperative = table.search(mixed, cooperative=True)
+    torch.testing.assert_close(
+        results_standard,
+        results_cooperative,
+        msg=f"Warp-cooperative search must match standard for mixed keys with {hash_method}",
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

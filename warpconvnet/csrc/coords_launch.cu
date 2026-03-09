@@ -10,6 +10,8 @@
 #include <torch/extension.h>
 
 #include <cstdint>
+#include <tuple>
+#include <vector>
 
 // ============================================================================
 // Forward declarations of extern "C" __global__ kernels from other .cu files
@@ -46,6 +48,28 @@ extern "C" __global__ void search_kernel_murmur(const int* table_kvs,
                                                 int num_search_keys,
                                                 int key_dim,
                                                 int table_capacity);
+
+extern "C" __global__ void warp_search_kernel_fnv1a(const int* table_kvs,
+                                                    const int* vector_keys,
+                                                    const int* search_keys,
+                                                    int* results,
+                                                    int num_search_keys,
+                                                    int key_dim,
+                                                    int table_capacity);
+extern "C" __global__ void warp_search_kernel_city(const int* table_kvs,
+                                                   const int* vector_keys,
+                                                   const int* search_keys,
+                                                   int* results,
+                                                   int num_search_keys,
+                                                   int key_dim,
+                                                   int table_capacity);
+extern "C" __global__ void warp_search_kernel_murmur(const int* table_kvs,
+                                                     const int* vector_keys,
+                                                     const int* search_keys,
+                                                     int* results,
+                                                     int num_search_keys,
+                                                     int key_dim,
+                                                     int table_capacity);
 
 extern "C" __global__ void expand_insert_kernel_fnv1a(int* table_kvs,
                                                       int* vector_keys,
@@ -443,6 +467,42 @@ void coords_hashmap_search(torch::Tensor table_kvs,
   }
 }
 
+void coords_hashmap_warp_search(torch::Tensor table_kvs,
+                                torch::Tensor vector_keys,
+                                torch::Tensor search_keys,
+                                torch::Tensor results,
+                                int num_search,
+                                int key_dim,
+                                int capacity,
+                                int hash_method) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  int threads = 256;
+  // Each warp (32 threads) handles one query, so we need num_search warps total.
+  // Total threads = num_search * 32
+  int total_threads = num_search * 32;
+  int blocks = (total_threads + threads - 1) / threads;
+  auto* tbl = table_kvs.data_ptr<int>();
+  auto* vk = vector_keys.data_ptr<int>();
+  auto* sk = search_keys.data_ptr<int>();
+  auto* res = results.data_ptr<int>();
+  switch (hash_method) {
+    case 0:
+      warp_search_kernel_fnv1a<<<blocks, threads, 0, stream>>>(
+          tbl, vk, sk, res, num_search, key_dim, capacity);
+      break;
+    case 1:
+      warp_search_kernel_city<<<blocks, threads, 0, stream>>>(
+          tbl, vk, sk, res, num_search, key_dim, capacity);
+      break;
+    case 2:
+      warp_search_kernel_murmur<<<blocks, threads, 0, stream>>>(
+          tbl, vk, sk, res, num_search, key_dim, capacity);
+      break;
+    default:
+      TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+  }
+}
+
 void coords_hashmap_expand(torch::Tensor table_kvs,
                            torch::Tensor vector_keys,
                            torch::Tensor base_coords,
@@ -459,7 +519,10 @@ void coords_hashmap_expand(torch::Tensor table_kvs,
   int threads = 256;
   long long total = (long long)num_base * (long long)num_offsets;
   int blocks = (int)((total + threads - 1) / threads);
-  int shared_mem = threads * key_dim * 4;  // sizeof(int) * key_dim * threads
+  // shared_candidates: threads * key_dim * sizeof(int)
+  // smem_cache: 256 * sizeof(long long) = 2048 bytes
+  // smem_cache_tags: 256 * sizeof(int) = 1024 bytes
+  int shared_mem = threads * key_dim * 4 + 256 * 8 + 256 * 4;
 
   auto* tbl = table_kvs.data_ptr<int>();
   auto* vk = vector_keys.data_ptr<int>();
@@ -742,6 +805,111 @@ void coords_postprocess_scatter(torch::Tensor found,
                                                              M);
 }
 
+// ============================================================================
+// Fused kernel map: count + cumsum + scatter in a single host function call.
+// Eliminates the K*M intermediate and reduces to 2 CUDA kernel launches
+// plus a torch::cumsum on a small (K,) tensor.
+// ============================================================================
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> launch_fused_kernel_map(
+    torch::Tensor output_coords,
+    torch::Tensor table_kvs,
+    torch::Tensor vector_keys,
+    int table_capacity,
+    std::vector<int> kernel_size,
+    int hash_method) {
+  TORCH_CHECK(kernel_size.size() == 3, "kernel_size must have 3 elements");
+  TORCH_CHECK(output_coords.dim() == 2 && output_coords.size(1) == 4,
+              "output_coords must be [M, 4]");
+  TORCH_CHECK(output_coords.dtype() == torch::kInt32, "output_coords must be int32");
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto device = output_coords.device();
+  int num_query = output_coords.size(0);
+  int num_kernels = kernel_size[0] * kernel_size[1] * kernel_size[2];
+
+  // Prepare kernel size tensor on device
+  auto kernel_size_tensor =
+      torch::tensor({kernel_size[0], kernel_size[1], kernel_size[2]},
+                    torch::TensorOptions().dtype(torch::kInt32).device(device));
+
+  // Thread block configuration matching existing kernels
+  int threads_x = 64;
+  int threads_y = 8;
+  dim3 block(threads_x, threads_y);
+  dim3 grid((num_query + threads_x - 1) / threads_x, (num_kernels + threads_y - 1) / threads_y);
+
+  auto* tbl = table_kvs.data_ptr<int>();
+  auto* vk = vector_keys.data_ptr<int>();
+  auto* qc = output_coords.data_ptr<int>();
+  auto* ks = kernel_size_tensor.data_ptr<int>();
+
+  // --- Pass 1: Count valid pairs per kernel offset ---
+  auto counts =
+      torch::zeros({num_kernels}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+  auto* cnt = counts.data_ptr<int>();
+
+  switch (hash_method) {
+    case 0:
+      kernel_map_size_4d_count_fnv1a<<<grid, block, 0, stream>>>(
+          tbl, vk, qc, ks, cnt, num_query, table_capacity, num_kernels);
+      break;
+    case 1:
+      kernel_map_size_4d_count_city<<<grid, block, 0, stream>>>(
+          tbl, vk, qc, ks, cnt, num_query, table_capacity, num_kernels);
+      break;
+    case 2:
+      kernel_map_size_4d_count_murmur<<<grid, block, 0, stream>>>(
+          tbl, vk, qc, ks, cnt, num_query, table_capacity, num_kernels);
+      break;
+    default:
+      TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+  }
+
+  // --- Prefix sum to compute offsets ---
+  auto offsets =
+      torch::zeros({num_kernels + 1}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+  auto cumsum_result = torch::cumsum(counts, 0, torch::kInt32);
+  offsets.slice(0, 1, num_kernels + 1).copy_(cumsum_result);
+
+  // Get total number of pairs (last element of offsets)
+  int num_total_maps = offsets[num_kernels].item<int>();
+
+  // --- Allocate output arrays ---
+  auto in_maps =
+      torch::empty({num_total_maps}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+  auto out_maps =
+      torch::empty({num_total_maps}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+
+  if (num_total_maps > 0) {
+    // --- Pass 2: Scatter valid pairs ---
+    auto scatter_counters =
+        torch::zeros({num_kernels}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    auto* off = offsets.data_ptr<int>();
+    auto* sc = scatter_counters.data_ptr<int>();
+    auto* im = in_maps.data_ptr<int>();
+    auto* om = out_maps.data_ptr<int>();
+
+    switch (hash_method) {
+      case 0:
+        kernel_map_size_4d_scatter_fnv1a<<<grid, block, 0, stream>>>(
+            tbl, vk, qc, ks, off, sc, im, om, num_query, table_capacity, num_kernels);
+        break;
+      case 1:
+        kernel_map_size_4d_scatter_city<<<grid, block, 0, stream>>>(
+            tbl, vk, qc, ks, off, sc, im, om, num_query, table_capacity, num_kernels);
+        break;
+      case 2:
+        kernel_map_size_4d_scatter_murmur<<<grid, block, 0, stream>>>(
+            tbl, vk, qc, ks, off, sc, im, om, num_query, table_capacity, num_kernels);
+        break;
+      default:
+        TORCH_CHECK(false, "Invalid hash_method: ", hash_method);
+    }
+  }
+
+  return std::make_tuple(in_maps, out_maps, offsets);
+}
+
 void coords_radius_search_count(torch::Tensor points,
                                 torch::Tensor queries,
                                 torch::Tensor sorted_indices,
@@ -884,26 +1052,24 @@ void coords_radius_search_write(torch::Tensor points,
 // Window grouping kernels (counting sort)
 // ============================================================================
 
-extern "C" __global__ void window_group_histogram_kernel(
-    const int* __restrict__ grid_coord,
-    const int* __restrict__ batch_offsets,
-    const int* __restrict__ coord_offset,
-    const int* __restrict__ min_coord,
-    const int* __restrict__ window_size,
-    const int* __restrict__ grid_shape,
-    int64_t* __restrict__ codes,
-    int* __restrict__ histogram,
-    int N,
-    int B,
-    int W);
+extern "C" __global__ void window_group_histogram_kernel(const int* __restrict__ grid_coord,
+                                                         const int* __restrict__ batch_offsets,
+                                                         const int* __restrict__ coord_offset,
+                                                         const int* __restrict__ min_coord,
+                                                         const int* __restrict__ window_size,
+                                                         const int* __restrict__ grid_shape,
+                                                         int64_t* __restrict__ codes,
+                                                         int* __restrict__ histogram,
+                                                         int N,
+                                                         int B,
+                                                         int W);
 
-extern "C" __global__ void window_group_scatter_kernel(
-    const int64_t* __restrict__ codes,
-    const int* __restrict__ window_offsets_dense,
-    int* __restrict__ scatter_counters,
-    int64_t* __restrict__ perm,
-    int64_t* __restrict__ inverse_perm,
-    int N);
+extern "C" __global__ void window_group_scatter_kernel(const int64_t* __restrict__ codes,
+                                                       const int* __restrict__ window_offsets_dense,
+                                                       int* __restrict__ scatter_counters,
+                                                       int64_t* __restrict__ perm,
+                                                       int64_t* __restrict__ inverse_perm,
+                                                       int N);
 
 void coords_window_group_histogram(torch::Tensor grid_coord,
                                    torch::Tensor batch_offsets,
@@ -919,18 +1085,17 @@ void coords_window_group_histogram(torch::Tensor grid_coord,
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   int threads = 256;
   int blocks = (N + threads - 1) / threads;
-  window_group_histogram_kernel<<<blocks, threads, 0, stream>>>(
-      grid_coord.data_ptr<int>(),
-      batch_offsets.data_ptr<int>(),
-      coord_offset.data_ptr<int>(),
-      min_coord.data_ptr<int>(),
-      window_size.data_ptr<int>(),
-      grid_shape.data_ptr<int>(),
-      codes.data_ptr<int64_t>(),
-      histogram.data_ptr<int>(),
-      N,
-      B,
-      W);
+  window_group_histogram_kernel<<<blocks, threads, 0, stream>>>(grid_coord.data_ptr<int>(),
+                                                                batch_offsets.data_ptr<int>(),
+                                                                coord_offset.data_ptr<int>(),
+                                                                min_coord.data_ptr<int>(),
+                                                                window_size.data_ptr<int>(),
+                                                                grid_shape.data_ptr<int>(),
+                                                                codes.data_ptr<int64_t>(),
+                                                                histogram.data_ptr<int>(),
+                                                                N,
+                                                                B,
+                                                                W);
 }
 
 void coords_window_group_scatter(torch::Tensor codes,
@@ -942,11 +1107,10 @@ void coords_window_group_scatter(torch::Tensor codes,
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   int threads = 256;
   int blocks = (N + threads - 1) / threads;
-  window_group_scatter_kernel<<<blocks, threads, 0, stream>>>(
-      codes.data_ptr<int64_t>(),
-      window_offsets_dense.data_ptr<int>(),
-      scatter_counters.data_ptr<int>(),
-      perm.data_ptr<int64_t>(),
-      inverse_perm.data_ptr<int64_t>(),
-      N);
+  window_group_scatter_kernel<<<blocks, threads, 0, stream>>>(codes.data_ptr<int64_t>(),
+                                                              window_offsets_dense.data_ptr<int>(),
+                                                              scatter_counters.data_ptr<int>(),
+                                                              perm.data_ptr<int64_t>(),
+                                                              inverse_perm.data_ptr<int64_t>(),
+                                                              N);
 }
