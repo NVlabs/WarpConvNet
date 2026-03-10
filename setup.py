@@ -100,27 +100,40 @@ if cuda_arch_list:
 else:
     print("TORCH_CUDA_ARCH_LIST not set; using PyTorch default arch list")
 
-# For SM90 (Hopper) WGMMA support, we need -gencode with sm_90a (not just sm_90).
-# PyTorch generates sm_90 by default, which lacks __CUDA_ARCH_FEAT_SM90_ALL.
-# We add the 90a gencode explicitly if the target list includes 9.0+.
+# Explicitly generate -gencode flags from TORCH_CUDA_ARCH_LIST.
+# We must do this ourselves because adding any explicit -gencode (e.g. sm_90a)
+# prevents PyTorch's BuildExtension from injecting its own gencode flags.
 _has_sm90_target = False
+_arch_values = []
+
 if cuda_arch_list:
     for arch in cuda_arch_list.replace(",", " ").replace(";", " ").split():
         arch = arch.strip().rstrip("+")
         try:
-            if float(arch) >= 9.0:
-                _has_sm90_target = True
-                break
+            _arch_values.append(float(arch))
         except ValueError:
             pass
 else:
-    # When no explicit arch list, check if the current GPU is SM90+
+    # When no explicit arch list, detect from current GPU
     try:
         cap = torch.cuda.get_device_capability()
-        _has_sm90_target = cap[0] >= 9
+        _arch_values.append(float(f"{cap[0]}.{cap[1]}"))
+        if cap[0] >= 9:
+            _has_sm90_target = True
     except Exception:
         pass
 
+# Generate gencode flags for all requested architectures
+for arch_val in _arch_values:
+    arch_int = int(arch_val * 10)  # e.g. 8.0 -> 80, 9.0 -> 90
+    if arch_val >= 9.0:
+        _has_sm90_target = True
+    else:
+        nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=sm_{arch_int}")
+        print(f"Adding gencode for SM{arch_int}")
+
+# For SM90 (Hopper) WGMMA support, use sm_90a (not just sm_90).
+# sm_90a enables __CUDA_ARCH_FEAT_SM90_ALL needed for WGMMA instructions.
 if _has_sm90_target:
     nvcc_args.append("-gencode=arch=compute_90a,code=sm_90a")
     cxx_args.append("-DWARPCONVNET_SM90_ENABLED=1")
