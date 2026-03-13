@@ -224,7 +224,9 @@ int run_cute_gemm_sm90_grouped_ad_gather_scatter(const void *a,
                                                  int total_m_tiles,
                                                  int K,
                                                  int N,
-                                                 float alpha);
+                                                 float alpha,
+                                                 bool use_atomic = true,
+                                                 bool use_cp_async = true);
 #endif  // WARPCONVNET_SM90_ENABLED
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
@@ -1997,12 +1999,12 @@ static int dispatch_cute_gemm_sm90_ad_gather_scatter(const torch::Tensor &tensor
 #undef CUTE_SM90_AD_GS_CASE
 
 // SM90 grouped GEMM dispatch
-#define CUTE_SM90_GROUPED_CASE(TILE_ENUM, TILE_TAG)                                \
-  case warpconvnet::gemm::MMATile::TILE_ENUM:                                      \
-    return ::warpconvnet::cute_gemm::run_cute_gemm_sm90_grouped_ad_gather_scatter< \
-        ElementInput,                                                              \
-        warpconvnet::gemm::TILE_TAG,                                               \
-        ElementOutput>(ptr_A, ptr_D, in_map, out_map, params, total_m_tiles, K, N, alpha);
+#define CUTE_SM90_GROUPED_CASE(TILE_ENUM, TILE_TAG)                                              \
+  case warpconvnet::gemm::MMATile::TILE_ENUM:                                                    \
+    return ::warpconvnet::cute_gemm::run_cute_gemm_sm90_grouped_ad_gather_scatter<               \
+        ElementInput,                                                                            \
+        warpconvnet::gemm::TILE_TAG,                                                             \
+        ElementOutput>(ptr_A, ptr_D, in_map, out_map, params, total_m_tiles, K, N, alpha, use_atomic, use_cp_async);
 
 template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_sm90_grouped_ad_gather_scatter(
@@ -2015,7 +2017,9 @@ static int dispatch_cute_gemm_sm90_grouped_ad_gather_scatter(
     int K,
     int N,
     float alpha,
-    int mma_tile) {
+    int mma_tile,
+    bool use_atomic,
+    bool use_cp_async) {
   using ElementInput = typename torch_to_cutlass<SA>::type;
   using ElementOutput = typename torch_to_cutlass<SC>::type;
   auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
@@ -2113,7 +2117,9 @@ int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
                                              torch::Tensor map_offsets,
                                              int total_m_tiles,
                                              int mma_tile,
-                                             float alpha) {
+                                             float alpha,
+                                             bool use_atomic,
+                                             bool use_cp_async) {
   TORCH_CHECK(tensor_a.is_cuda() && tensor_d.is_cuda(), "Tensors must be on CUDA");
   TORCH_CHECK(in_map.is_cuda() && out_map.is_cuda(), "Maps must be on CUDA");
   TORCH_CHECK(weight_ptrs.is_cuda() && tile_offsets.is_cuda() && group_sizes.is_cuda() &&
@@ -2172,7 +2178,9 @@ int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
         K,
         N,
         alpha,
-        mma_tile);
+        mma_tile,
+        use_atomic,
+        use_cp_async);
   } else if (scalar_a == torch::kFloat16 && scalar_d == torch::kFloat16) {
     handled = true;
     status = dispatch_cute_gemm_sm90_grouped_ad_gather_scatter<torch::kFloat16, torch::kFloat16>(
@@ -2185,7 +2193,9 @@ int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
         K,
         N,
         alpha,
-        mma_tile);
+        mma_tile,
+        use_atomic,
+        use_cp_async);
   }
 #ifndef DISABLE_BFLOAT16
   else if (scalar_a == torch::kBFloat16 && scalar_d == torch::kFloat32) {
@@ -2200,7 +2210,9 @@ int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
         K,
         N,
         alpha,
-        mma_tile);
+        mma_tile,
+        use_atomic,
+        use_cp_async);
   } else if (scalar_a == torch::kBFloat16 && scalar_d == torch::kBFloat16) {
     handled = true;
     status = dispatch_cute_gemm_sm90_grouped_ad_gather_scatter<torch::kBFloat16, torch::kBFloat16>(
@@ -2213,7 +2225,9 @@ int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
         K,
         N,
         alpha,
-        mma_tile);
+        mma_tile,
+        use_atomic,
+        use_cp_async);
   }
 #endif
 
@@ -2588,7 +2602,9 @@ void register_gemm(py::module_ &m) {
            py::arg("map_offsets"),
            py::arg("total_m_tiles"),
            py::arg("mma_tile") = 100,
-           py::arg("alpha") = 1.0f);
+           py::arg("alpha") = 1.0f,
+           py::arg("use_atomic") = true,
+           py::arg("use_cp_async") = true);
 #endif  // WARPCONVNET_SM90_ENABLED
 }
 

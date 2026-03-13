@@ -36,6 +36,7 @@ def _cute_grouped_sm90_forward_logic(
     kernel_map: IntSearchResult,
     num_out_coords: int,
     mma_tile: int = 100,
+    use_cp_async: bool = True,
 ) -> Union[Float[Tensor, "M C_out"], int]:
     """Forward pass using SM90 WGMMA fused multi-offset CuTe GEMM."""
     device = in_features.device
@@ -82,6 +83,8 @@ def _cute_grouped_sm90_forward_logic(
         total_m_tiles,
         mma_tile,
         1.0,
+        True,  # use_atomic=True: HW-coalesced atomicAdd is faster than direct store on SM90
+        use_cp_async,
     )
 
     if status != 0:
@@ -97,6 +100,7 @@ def _cute_grouped_sm90_backward_logic(
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
     mma_tile: int = 100,
+    use_cp_async: bool = True,
 ) -> Union[
     Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]],
     Tuple[int, int],
@@ -156,6 +160,8 @@ def _cute_grouped_sm90_backward_logic(
                 total_m_tiles,
                 mma_tile,
                 1.0,
+                True,  # use_atomic=True: backward input grad has overlapping output rows
+                use_cp_async,
             )
             if status != 0:
                 return status, -1
@@ -189,7 +195,7 @@ def _cute_grouped_sm90_backward_logic(
                 map_offsets_t,
                 C_in,
                 C_out,
-                0,  # mma_tile=0: SM80 Tile128x128x32 default for TrAB
+                3,  # mma_tile=3: SM80 Tile64x64x32 for TrAB (best on H200)
                 1.0,
                 _DTYPE_TO_SCALAR_TYPE_INT[out_dtype],
             )

@@ -626,6 +626,7 @@ def _execute_forward(
             kernel_map,
             num_out_coords,
             mma_tile=params.get("mma_tile", 100),
+            use_cp_async=params.get("use_cp_async", True),
         )
         if isinstance(result, int) and result != 0:
             raise RuntimeError(
@@ -774,6 +775,7 @@ def _execute_backward(
             requires_grad=(needs_input_grad[0], needs_input_grad[1]),
             device=device,
             mma_tile=params.get("mma_tile", 100),
+            use_cp_async=params.get("use_cp_async", True),
         )
         if isinstance(result[0], int) and result[0] != 0:
             raise RuntimeError(

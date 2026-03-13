@@ -124,6 +124,7 @@ struct CuteGemmGroupedKernelSm90 {
                              int N,
                              int K_dim,
                              float alpha,
+                             bool use_atomic,
                              char *smem_buf) const {
     using namespace cute;
 
@@ -169,7 +170,10 @@ struct CuteGemmGroupedKernelSm90 {
     int num_k_tiles = (K_dim + tK - 1) / tK;
 
     if (num_k_tiles == 0) {
-      _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
+      if (use_atomic)
+        _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
+      else
+        _epilogue_direct(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
       return;
     }
 
@@ -199,7 +203,10 @@ struct CuteGemmGroupedKernelSm90 {
       warpgroup_wait<0>();
       warpgroup_fence_operand(accum);
 
-      _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
+      if (use_atomic)
+        _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
+      else
+        _epilogue_direct(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
       return;
     }
 
@@ -252,7 +259,10 @@ struct CuteGemmGroupedKernelSm90 {
       warpgroup_fence_operand(accum);
     }
 
-    _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
+    if (use_atomic)
+      _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
+    else
+      _epilogue_direct(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
   }
 
 private:
@@ -396,9 +406,6 @@ private:
                                    TiledMma_ &tiled_mma) const {
     using namespace cute;
 
-    // For WGMMA, the accumulator is distributed across the warp group.
-    // We use partition_C on an identity tensor to get the (m,n) coordinates
-    // that each thread owns in the accumulator.
     auto thr_mma = tiled_mma.get_slice(threadIdx.x);
     Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
 
@@ -417,6 +424,40 @@ private:
       }
     }
   }
+
+  // ---- Direct-store epilogue for non-overlapping output (forward pass) ----
+  // When output scatter map has no duplicate rows within the same group,
+  // atomicAdd is unnecessary. Direct store with += avoids atomic overhead.
+  template <class Accumulator, class TiledMma_>
+  __device__ void _epilogue_direct(Accumulator &accum,
+                                   ElementOutput *ptr_D,
+                                   const int *out_map,
+                                   int m_start,
+                                   int n_start,
+                                   int M_g,
+                                   int N,
+                                   float alpha,
+                                   TiledMma_ &tiled_mma) const {
+    using namespace cute;
+
+    auto thr_mma = tiled_mma.get_slice(threadIdx.x);
+    Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
+
+    CUTE_UNROLL
+    for (int i = 0; i < size(accum); ++i) {
+      auto coord = tCrC(i);
+      int m_local = get<0>(coord);
+      int n_local = get<1>(coord);
+      int m_global = m_start + m_local;
+      int n_global = n_start + n_local;
+
+      if (m_global < M_g && n_global < N) {
+        int phys_row = out_map[m_global];
+        float result = alpha * float(accum(i));
+        ptr_D[phys_row * N + n_global] += static_cast<ElementOutput>(result);
+      }
+    }
+  }
 };
 
 /// Global kernel entry point for SM90 grouped AD gather-scatter
@@ -429,12 +470,11 @@ __global__ __launch_bounds__(Kernel::MaxThreadsPerBlock) void cute_gemm_grouped_
     GroupedGemmParams params,
     int N,
     int K_dim,
-    float alpha) {
-  // WGMMA instructions are only available on SM90+. On older arches this kernel
-  // exists as a stub so that host-side launcher code compiles for fat binaries.
+    float alpha,
+    bool use_atomic) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   extern __shared__ char smem[];
-  Kernel{}(ptr_A, ptr_D, in_map, out_map, params, N, K_dim, alpha, smem);
+  Kernel{}(ptr_A, ptr_D, in_map, out_map, params, N, K_dim, alpha, use_atomic, smem);
 #endif  // __CUDA_ARCH__ >= 900
 }
 

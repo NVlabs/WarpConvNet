@@ -142,15 +142,17 @@ _FWD_CUTE_SM90 = (
     else [
         ("cute_implicit_gemm_sm90", {"mma_tile": 100}),
         ("cute_implicit_gemm_sm90", {"mma_tile": 103}),
+        ("cute_implicit_gemm_sm90", {"mma_tile": 104}),
     ]
 )
 _FWD_CUTE_GROUPED_SM90 = (
     []
     if not _HAS_CUTE_GROUPED_SM90
     else [
-        ("cute_grouped_sm90", {"mma_tile": 103}),
-        ("cute_grouped_sm90", {"mma_tile": 100}),
-        ("cute_grouped_sm90", {"mma_tile": 101}),
+        ("cute_grouped_sm90", {"mma_tile": 103, "use_cp_async": True}),
+        ("cute_grouped_sm90", {"mma_tile": 100, "use_cp_async": True}),
+        ("cute_grouped_sm90", {"mma_tile": 101, "use_cp_async": True}),
+        ("cute_grouped_sm90", {"mma_tile": 104, "use_cp_async": True}),
     ]
 )
 _FWD_IMPLICIT_GEMM_16 = [("implicit_gemm", {"fwd_block_size": 16})]
@@ -290,7 +292,11 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
     *(
         []
         if not _HAS_CUTE_GROUPED_SM90
-        else [("cute_grouped_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]]
+        else [
+            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
+            for tile in [100, 101, 102, 103, 104]
+            for cp in [True, False]
+        ]
     ),
 ]
 
@@ -354,10 +360,10 @@ _BWD_CUTE_GROUPED_SM90 = (
     []
     if not _HAS_CUTE_GROUPED_SM90
     else [
-        ("cute_grouped_sm90", {"mma_tile": 103}),
-        ("cute_grouped_sm90", {"mma_tile": 100}),
-        ("cute_grouped_sm90", {"mma_tile": 101}),
-        ("cute_grouped_sm90", {"mma_tile": 104}),
+        ("cute_grouped_sm90", {"mma_tile": 103, "use_cp_async": True}),
+        ("cute_grouped_sm90", {"mma_tile": 100, "use_cp_async": True}),
+        ("cute_grouped_sm90", {"mma_tile": 101, "use_cp_async": True}),
+        ("cute_grouped_sm90", {"mma_tile": 104, "use_cp_async": True}),
     ]
 )
 _BWD_EXPLICIT = [("explicit_gemm", {})]
@@ -503,7 +509,11 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
     *(
         []
         if not _HAS_CUTE_GROUPED_SM90
-        else [("cute_grouped_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]]
+        else [
+            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
+            for tile in [100, 101, 102, 103, 104]
+            for cp in [True, False]
+        ]
     ),
 ]
 
