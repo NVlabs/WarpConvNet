@@ -269,6 +269,7 @@ int launch_cute_gemm_grouped_ad_gather_scatter_sm90(const void *ptr_A,
                                                     int K,
                                                     int N,
                                                     float alpha,
+                                                    bool use_atomic = true,
                                                     cudaStream_t stream = 0) {
   using Kernel = CuteGemmGroupedKernelSm90<TileConfig, ElementOutput>;
   constexpr int TileN = cute::size<1>(typename TileConfig::TileShape{});
@@ -298,7 +299,8 @@ int launch_cute_gemm_grouped_ad_gather_scatter_sm90(const void *ptr_A,
           params,
           N,
           K,
-          alpha);
+          alpha,
+          use_atomic);
 
   auto err = cudaGetLastError();
   return err == cudaSuccess ? static_cast<int>(gemm::GemmStatus::kSuccess)

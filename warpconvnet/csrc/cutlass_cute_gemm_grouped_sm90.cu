@@ -28,14 +28,15 @@ int run_cute_gemm_grouped_ad_gather_scatter_sm90_staged(const void *a,
                                                         int N,
                                                         float alpha,
                                                         int num_stages,
-                                                        bool use_cp_async) {
+                                                        bool use_cp_async,
+                                                        bool use_atomic) {
   using Base = CuteTileConfig<ElementInput, TileTag>;
 
 #define DISPATCH_SM90_STAGED_GROUPED(S, CP)                                                      \
   {                                                                                              \
     using Config = CuteTileConfigOverride<Base, S, CP>;                                          \
     return launch_cute_gemm_grouped_ad_gather_scatter_sm90<ElementInput, Config, ElementOutput>( \
-        a, d, in_map, out_map, params, total_m_tiles, K, N, alpha);                              \
+        a, d, in_map, out_map, params, total_m_tiles, K, N, alpha, use_atomic);                  \
   }
 
   if (num_stages == 2 && !use_cp_async) DISPATCH_SM90_STAGED_GROUPED(2, false)
@@ -66,6 +67,7 @@ int run_cute_gemm_grouped_ad_gather_scatter_sm90_staged(const void *a,
       int,                                                                             \
       float,                                                                           \
       int,                                                                             \
+      bool,                                                                            \
       bool);
 
 // Primary tiles: SM90_Tile128x128x64, SM90_Tile64x128x64, SM90_Tile256x128x64
@@ -115,10 +117,12 @@ int run_cute_gemm_sm90_grouped_ad_gather_scatter(const void *a,
                                                  int total_m_tiles,
                                                  int K,
                                                  int N,
-                                                 float alpha) {
+                                                 float alpha,
+                                                 bool use_atomic,
+                                                 bool use_cp_async) {
   constexpr int default_stages = CuteTileConfig<ElementInput, TileTag>::NumStages;
   return run_cute_gemm_grouped_ad_gather_scatter_sm90_staged<ElementInput, TileTag, ElementOutput>(
-      a, d, in_map, out_map, params, total_m_tiles, K, N, alpha, default_stages, true);
+      a, d, in_map, out_map, params, total_m_tiles, K, N, alpha, default_stages, use_cp_async, use_atomic);
 }
 
 #define INSTANTIATE_SM90_GROUPED_SIMPLE(ElemIn, ElemOut, TileTag)                            \
@@ -131,7 +135,9 @@ int run_cute_gemm_sm90_grouped_ad_gather_scatter(const void *a,
       int,                                                                                   \
       int,                                                                                   \
       int,                                                                                   \
-      float);
+      float,                                                                                 \
+      bool,                                                                                  \
+      bool);
 
 INSTANTIATE_SM90_GROUPED_SIMPLE(cutlass::half_t, float, SM90_Tile64x64x64)
 INSTANTIATE_SM90_GROUPED_SIMPLE(cutlass::half_t, float, SM90_Tile128x128x64)

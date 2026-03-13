@@ -160,45 +160,94 @@ struct CuteGemmKernelSm90 {
       _init_tma_barriers(storage.tma_barriers);
     }
 
-    // ==================== MAINLOOP: load then compute each K-tile ====================
-    // Uses double-buffering (2 stages) with full drain between iterations.
-    // The load/compute overlap comes from WGMMA's asynchronous execution —
-    // warpgroup_wait<1> allows GMMA to overlap with the next load phase.
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (int k_tile = 0; k_tile < num_k_tiles; ++k_tile) {
-      int stage = k_tile % NumStages;
-      int k_start = k_tile * tK;
+    // ==================== PROLOG: load k_tile=0 into stage[0] ====================
+    _load_A(ptr_A, in_map, sA(_, _, 0), m_start, 0, M, K_dim);
+    if constexpr (UseTmaLoadB) {
+      cute::cp_async_fence();
+      _load_dense_B_tile_tma(*tma_desc_B, sB(_, _, 0), &storage.tma_barriers[0], n_start, 0);
+      cute::cp_async_wait<0>();
+      _wait_tma_barrier(&storage.tma_barriers[0], tma_phases[0]);
+      tma_phases[0] ^= 1;
+    } else {
+      _load_dense_B_tile_cpasync(ptr_B, sB(_, _, 0), n_start, 0, N, K_dim);
+      cute::cp_async_fence();
+      cute::cp_async_wait<0>();
+    }
+    __syncthreads();
 
-      // Load A and B for this K-tile
-      _load_A(ptr_A, in_map, sA(_, _, stage), m_start, k_start, M, K_dim);
-      if constexpr (UseTmaLoadB) {
-        cute::cp_async_fence();
-        _load_dense_B_tile_tma(*tma_desc_B, sB(_, _, stage), &storage.tma_barriers[stage], n_start,
-                               k_start);
-        cute::cp_async_wait<0>();
-        _wait_tma_barrier(&storage.tma_barriers[stage], tma_phases[stage]);
-        tma_phases[stage] ^= 1;
-      } else {
-        _load_dense_B_tile_cpasync(ptr_B, sB(_, _, stage), n_start, k_start, N, K_dim);
-        cute::cp_async_fence();
-        cute::cp_async_wait<0>();
-      }
-      __syncthreads();
+    // ==================== MAINLOOP: overlap load(next) with compute(curr) ====================
+    // Pipelined: issue loads for next K-tile, then WGMMA-compute current K-tile,
+    // with cp_async_wait<NumStages-2> to keep older loads in flight.
+    tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
 
-      // Compute this K-tile via WGMMA
+    if (num_k_tiles == 1) {
+      // Single k-tile: compute and go to epilogue
       warpgroup_fence_operand(accum);
       warpgroup_arrive();
       CUTLASS_PRAGMA_UNROLL
       for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-        cute::gemm(tiled_mma, tCrA(_, _, k_block, stage), tCrB(_, _, k_block, stage), accum);
+        cute::gemm(tiled_mma, tCrA(_, _, k_block, 0), tCrB(_, _, k_block, 0), accum);
+        tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
       }
       warpgroup_commit_batch();
-      if (k_tile < num_k_tiles - 1) {
-        warpgroup_wait<1>();  // Allow 1 batch in flight for load overlap
-      } else {
-        warpgroup_wait<0>();  // Drain all before epilogue
-      }
+      warpgroup_wait<0>();
       warpgroup_fence_operand(accum);
+    } else {
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (int k_tile = 1; k_tile < num_k_tiles; ++k_tile) {
+        int curr_stage = (k_tile - 1) % NumStages;
+        int next_stage = k_tile % NumStages;
+        int k_start = k_tile * tK;
+
+        // Issue loads for NEXT k_tile into next_stage
+        _load_A(ptr_A, in_map, sA(_, _, next_stage), m_start, k_start, M, K_dim);
+        if constexpr (UseTmaLoadB) {
+          cute::cp_async_fence();
+          _load_dense_B_tile_tma(*tma_desc_B, sB(_, _, next_stage),
+                                 &storage.tma_barriers[next_stage], n_start, k_start);
+        } else {
+          _load_dense_B_tile_cpasync(ptr_B, sB(_, _, next_stage), n_start, k_start, N, K_dim);
+          cute::cp_async_fence();
+        }
+
+        // Compute CURRENT k_tile from curr_stage via WGMMA
+        warpgroup_fence_operand(accum);
+        warpgroup_arrive();
+        CUTLASS_PRAGMA_UNROLL
+        for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
+          cute::gemm(tiled_mma, tCrA(_, _, k_block, curr_stage), tCrB(_, _, k_block, curr_stage),
+                     accum);
+          tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
+        }
+        warpgroup_commit_batch();
+        warpgroup_wait<1>();  // Allow 1 GMMA batch in flight for compute/load overlap
+        warpgroup_fence_operand(accum);
+
+        // Wait for oldest in-flight loads to complete before next iteration
+        if constexpr (UseTmaLoadB) {
+          cute::cp_async_wait<0>();
+          _wait_tma_barrier(&storage.tma_barriers[next_stage], tma_phases[next_stage]);
+          tma_phases[next_stage] ^= 1;
+        } else {
+          cute::cp_async_wait<NumStages - 2>();
+        }
+        __syncthreads();
+      }
+
+      // Epilog: compute last k_tile, drain all pipelines
+      {
+        int last_stage = (num_k_tiles - 1) % NumStages;
+        warpgroup_fence_operand(accum);
+        warpgroup_arrive();
+        CUTLASS_PRAGMA_UNROLL
+        for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
+          cute::gemm(tiled_mma, tCrA(_, _, k_block, last_stage), tCrB(_, _, k_block, last_stage),
+                     accum);
+        }
+        warpgroup_commit_batch();
+        warpgroup_wait<0>();
+        warpgroup_fence_operand(accum);
+      }
     }
 
     // ==================== EPILOGUE ====================
