@@ -227,7 +227,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
                                         int C_b,
                                         int K,
                                         int split_k_factor = 4,
-                                        int block_threads = 256) {
+                                        int block_threads = 256,
+                                        void *scratch = nullptr) {
   // Convert void pointers
   auto a_ptr = reinterpret_cast<const ElementA *>(tensor_a);
   auto b_ptr = reinterpret_cast<const ElementB *>(tensor_b);
@@ -245,13 +246,14 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
   const int chunk_size = (K + split_k_factor - 1) / split_k_factor;
   const int actual_splits = (K + chunk_size - 1) / chunk_size;
 
-  // Allocate temporary memory for partial results if needed
+  // Use caller-provided scratch buffer for partial results (allocated via
+  // PyTorch's caching allocator to avoid competing with cudaMallocAsync).
   ElementC *c_partials = nullptr;
   bool needs_reduction = (actual_splits > 1);
 
   if (needs_reduction) {
+    c_partials = reinterpret_cast<ElementC *>(scratch);
     size_t partial_size = actual_splits * C_a * C_b * sizeof(ElementC);
-    cudaMallocAsync(&c_partials, partial_size, stream);
     cudaMemsetAsync(c_partials, 0, partial_size, stream);
   }
 
@@ -377,11 +379,7 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
   // Non-blocking error check
   cudaError_t cuda_status = cudaGetLastError();
 
-  // Stream-ordered free: kernel on `stream` completes before the free executes,
-  // without blocking the CPU.  Requires CUDA 11.2+ (we target 12.9).
-  if (c_partials) {
-    cudaFreeAsync(c_partials, stream);
-  }
+  // Scratch buffer lifetime is managed by the caller (PyTorch tensor) — no free needed.
 
   if (cuda_status != cudaSuccess) {
     return static_cast<int>(SplitKGemmStatus::kErrorKernelExecution);
@@ -396,12 +394,44 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
 // Explicit template instantiations
 template int
 warpconvnet::split_k_implicit_gemm::run_split_k_implicit_gemm_templated<float, float, float, int>(
-    const void *, const void *, void *, const int *, const int *, int, int, int, int, int, int);
+    const void *,
+    const void *,
+    void *,
+    const int *,
+    const int *,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    void *);
 
 template int warpconvnet::split_k_implicit_gemm::
-    run_split_k_implicit_gemm_templated<__half, __half, __half, int>(
-        const void *, const void *, void *, const int *, const int *, int, int, int, int, int, int);
+    run_split_k_implicit_gemm_templated<__half, __half, __half, int>(const void *,
+                                                                     const void *,
+                                                                     void *,
+                                                                     const int *,
+                                                                     const int *,
+                                                                     int,
+                                                                     int,
+                                                                     int,
+                                                                     int,
+                                                                     int,
+                                                                     int,
+                                                                     void *);
 
 template int warpconvnet::split_k_implicit_gemm::
     run_split_k_implicit_gemm_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
-        const void *, const void *, void *, const int *, const int *, int, int, int, int, int, int);
+        const void *,
+        const void *,
+        void *,
+        const int *,
+        const int *,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        void *);

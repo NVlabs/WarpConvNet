@@ -64,7 +64,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
                                         int C_b,
                                         int K,
                                         int split_k_factor,
-                                        int block_threads);
+                                        int block_threads,
+                                        void *scratch);
 }  // namespace split_k_implicit_gemm
 
 namespace gemm {
@@ -1017,6 +1018,18 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
   indices_a = indices_a.contiguous();
   indices_b = indices_b.contiguous();
 
+  // Allocate scratch buffer for split-K partial results using PyTorch's caching
+  // allocator. This avoids competing with cudaMallocAsync for GPU memory — PyTorch's
+  // allocator already holds most GPU memory during training.
+  const int chunk_size = (K + split_k_factor - 1) / split_k_factor;
+  const int actual_splits = (K + chunk_size - 1) / chunk_size;
+  torch::Tensor scratch;
+  void *scratch_ptr = nullptr;
+  if (actual_splits > 1) {
+    scratch = torch::empty({actual_splits * C_a * C_b}, c.options().requires_grad(false));
+    scratch_ptr = scratch.data_ptr();
+  }
+
   // Dispatch based on tensor types
   int status = 0;
   if (a.scalar_type() == torch::kFloat32) {
@@ -1031,7 +1044,8 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
                                                                       C_b,
                                                                       K,
                                                                       split_k_factor,
-                                                                      block_size);
+                                                                      block_size,
+                                                                      scratch_ptr);
   } else if (a.scalar_type() == torch::kFloat16) {
     status = ::warpconvnet::split_k_implicit_gemm::
         run_split_k_implicit_gemm_templated<__half, __half, __half, int>(a.data_ptr(),
@@ -1044,7 +1058,8 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
                                                                          C_b,
                                                                          K,
                                                                          split_k_factor,
-                                                                         block_size);
+                                                                         block_size,
+                                                                         scratch_ptr);
   } else if (a.scalar_type() == torch::kBFloat16) {
     status = ::warpconvnet::split_k_implicit_gemm::
         run_split_k_implicit_gemm_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
@@ -1058,7 +1073,8 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
             C_b,
             K,
             split_k_factor,
-            block_size);
+            block_size,
+            scratch_ptr);
   } else {
     TORCH_CHECK(false, "Unsupported data type for split-K implicit GEMM");
   }
@@ -1999,12 +2015,22 @@ static int dispatch_cute_gemm_sm90_ad_gather_scatter(const torch::Tensor &tensor
 #undef CUTE_SM90_AD_GS_CASE
 
 // SM90 grouped GEMM dispatch
-#define CUTE_SM90_GROUPED_CASE(TILE_ENUM, TILE_TAG)                                              \
-  case warpconvnet::gemm::MMATile::TILE_ENUM:                                                    \
-    return ::warpconvnet::cute_gemm::run_cute_gemm_sm90_grouped_ad_gather_scatter<               \
-        ElementInput,                                                                            \
-        warpconvnet::gemm::TILE_TAG,                                                             \
-        ElementOutput>(ptr_A, ptr_D, in_map, out_map, params, total_m_tiles, K, N, alpha, use_atomic, use_cp_async);
+#define CUTE_SM90_GROUPED_CASE(TILE_ENUM, TILE_TAG)                                \
+  case warpconvnet::gemm::MMATile::TILE_ENUM:                                      \
+    return ::warpconvnet::cute_gemm::run_cute_gemm_sm90_grouped_ad_gather_scatter< \
+        ElementInput,                                                              \
+        warpconvnet::gemm::TILE_TAG,                                               \
+        ElementOutput>(ptr_A,                                                      \
+                       ptr_D,                                                      \
+                       in_map,                                                     \
+                       out_map,                                                    \
+                       params,                                                     \
+                       total_m_tiles,                                              \
+                       K,                                                          \
+                       N,                                                          \
+                       alpha,                                                      \
+                       use_atomic,                                                 \
+                       use_cp_async);
 
 template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_sm90_grouped_ad_gather_scatter(
