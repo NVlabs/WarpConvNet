@@ -105,6 +105,7 @@ else:
 # prevents PyTorch's BuildExtension from injecting its own gencode flags.
 _has_sm90_target = False
 _arch_values = []
+_MIN_ARCH = 8.0  # CUTLASS kernels require sm_80+ (cp.async)
 
 if cuda_arch_list:
     for arch in cuda_arch_list.replace(",", " ").replace(";", " ").split():
@@ -122,6 +123,20 @@ else:
             _has_sm90_target = True
     except Exception:
         pass
+
+# Filter out architectures below minimum (CUTLASS requires sm_80+ for cp.async)
+_skipped = [v for v in _arch_values if v < _MIN_ARCH]
+_arch_values = [v for v in _arch_values if v >= _MIN_ARCH]
+if _skipped:
+    print(
+        f"WARNING: Skipping unsupported architectures < sm_{int(_MIN_ARCH * 10)}: "
+        f"{', '.join(f'sm_{int(v * 10)}' for v in _skipped)} "
+        f"(CUTLASS requires sm_80+ for cp.async)"
+    )
+if not _arch_values and not any(v >= 9.0 for v in _skipped):
+    # No valid arch remaining and no sm_90 — default to sm_80
+    _arch_values = [8.0]
+    print("No supported architecture found; defaulting to sm_80")
 
 # Generate gencode flags for all requested architectures
 for arch_val in _arch_values:
