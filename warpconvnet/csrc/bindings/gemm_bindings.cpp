@@ -68,6 +68,8 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
                                         void *scratch);
 }  // namespace split_k_implicit_gemm
 
+#if defined(WARPCONVNET_SM80_ENABLED)
+
 namespace gemm {
 template <typename ElementInputA,
           typename ElementInputB,
@@ -241,12 +243,16 @@ int run_cute_gemm_grouped_trAB_gather(const void *a,
                                       float alpha);
 }  // namespace cute_gemm
 
+#endif  // WARPCONVNET_SM80_ENABLED (forward declarations)
+
 }  // namespace warpconvnet
 
 namespace warpconvnet {
 namespace bindings {
 
 // ------------------- Internal helpers and kernels -------------------
+
+#if defined(WARPCONVNET_SM80_ENABLED)
 
 // Type mapping from PyTorch scalar types to CUTLASS types
 template <torch::ScalarType T>
@@ -794,6 +800,8 @@ int cutlass_gemm_trAB_gather(torch::Tensor tensor_a,
   return status;
 }
 
+#endif  // WARPCONVNET_SM80_ENABLED (CUTLASS dispatch)
+
 // Non cutlass implicit GEMM
 int implicit_gemm_cuda(torch::Tensor a,
                        torch::Tensor b,
@@ -1084,6 +1092,8 @@ int split_k_implicit_gemm_cuda(torch::Tensor a,
   }
   return status;
 }
+
+#if defined(WARPCONVNET_SM80_ENABLED)
 
 // ------------------- CuTe 3.x dispatch helpers -------------------
 
@@ -1960,6 +1970,8 @@ int cute_gemm_grouped_AD_gather_scatter(
   return status;
 }
 
+#endif  // WARPCONVNET_SM80_ENABLED (CuTe dispatch)
+
 // ------------------- SM90 WGMMA GEMM dispatch (guarded) -------------------
 
 #if defined(WARPCONVNET_SM90_ENABLED)
@@ -2263,6 +2275,8 @@ int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
 
 #endif  // WARPCONVNET_SM90_ENABLED
 
+#if defined(WARPCONVNET_SM80_ENABLED)
+
 // ------------------- CuTe Grouped TrAB dispatch -------------------
 
 #define CUTE_GROUPED_TRAB_CASE(TILE_ENUM, TILE_TAG)                     \
@@ -2424,10 +2438,14 @@ int cute_gemm_grouped_trAB_gather(
               " output)");
   return status;
 }
+
+#endif  // WARPCONVNET_SM80_ENABLED (CuTe Grouped TrAB)
+
 void register_gemm(py::module_ &m) {
   py::module_ gemm = m.def_submodule(
       "gemm", "CUTLASS GEMM with gather/scatter operations supporting multiple precisions");
 
+#if defined(WARPCONVNET_SM80_ENABLED)
   gemm.def("cutlass_gemm_AD_gather_scatter",
            &cutlass_gemm_AD_gather_scatter,
            py::arg("tensor_a"),
@@ -2455,6 +2473,7 @@ void register_gemm(py::module_ &m) {
            py::arg("mma_tile") = 0,
            py::arg("alpha") = 1.0f,
            py::arg("beta") = 1.0f);
+#endif  // WARPCONVNET_SM80_ENABLED (CUTLASS pybind registrations)
 
   py::enum_<warpconvnet::gemm::GemmStatus>(gemm, "GemmStatus")
       .value("kSuccess", warpconvnet::gemm::GemmStatus::kSuccess)
@@ -2475,6 +2494,7 @@ void register_gemm(py::module_ &m) {
       },
       py::arg("status"));
 
+#if defined(WARPCONVNET_SM80_ENABLED)
   gemm.def("cute_gemm_AD_gather_scatter",
            &cute_gemm_AD_gather_scatter,
            py::arg("tensor_a"),
@@ -2571,6 +2591,7 @@ void register_gemm(py::module_ &m) {
            py::arg("alpha") = 1.0f,
            py::arg("num_stages") = 2,
            py::arg("use_cp_async") = false);
+#endif  // WARPCONVNET_SM80_ENABLED (CuTe pybind registrations)
 
   gemm.def("implicit_gemm",
            &implicit_gemm_cuda,

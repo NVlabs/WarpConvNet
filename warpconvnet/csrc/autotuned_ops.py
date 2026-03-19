@@ -158,24 +158,30 @@ def _status_runner_factory(c_fn, output_positions: Tuple[int, ...]):
     return lambda cand, a_kw, k_kw: runner(cand, a_kw, k_kw)
 
 
-# Public autotuned wrappers
-cutlass_gemm_trAB_gather_autotuned = make_autotuned_op(
-    namespace="implicit_gemm_trAB_gather",
-    c_fn=_C.gemm.cutlass_gemm_trAB_gather,
-    param_space=_BENCHMARK_TRAB_GATHER_PARAMS,
-    key_fn=_key_trAB_gather,
-    run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_trAB_gather, (2, 3)),
-    record_failures_as_inf=False,
-)
+# Public autotuned wrappers (require SM80+ CUTLASS support)
+_HAS_CUTLASS_GEMM = hasattr(_C.gemm, "cutlass_gemm_AD_gather_scatter")
 
-cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
-    namespace="implicit_gemm_AD_gather_scatter",
-    c_fn=_C.gemm.cutlass_gemm_AD_gather_scatter,
-    param_space=_BENCHMARK_AD_GATHER_SCATTER_PARAMS,
-    key_fn=_key_AD_gather_scatter,
-    run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)),
-    record_failures_as_inf=False,
-)
+if _HAS_CUTLASS_GEMM:
+    cutlass_gemm_trAB_gather_autotuned = make_autotuned_op(
+        namespace="implicit_gemm_trAB_gather",
+        c_fn=_C.gemm.cutlass_gemm_trAB_gather,
+        param_space=_BENCHMARK_TRAB_GATHER_PARAMS,
+        key_fn=_key_trAB_gather,
+        run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_trAB_gather, (2, 3)),
+        record_failures_as_inf=False,
+    )
+
+    cutlass_gemm_AD_gather_scatter_autotuned = make_autotuned_op(
+        namespace="implicit_gemm_AD_gather_scatter",
+        c_fn=_C.gemm.cutlass_gemm_AD_gather_scatter,
+        param_space=_BENCHMARK_AD_GATHER_SCATTER_PARAMS,
+        key_fn=_key_AD_gather_scatter,
+        run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)),
+        record_failures_as_inf=False,
+    )
+else:
+    cutlass_gemm_trAB_gather_autotuned = None
+    cutlass_gemm_AD_gather_scatter_autotuned = None
 
 
 # ---------------------------------------------------------------------------

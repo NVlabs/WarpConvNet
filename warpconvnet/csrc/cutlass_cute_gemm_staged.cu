@@ -4,6 +4,8 @@
 // Staged CuTe GEMM variants: autotunable NumStages and UseCpAsyncGatherA.
 // Only the 4 common tK=32 tiles (mma_tile 0-3) are instantiated with staged overrides.
 
+#if defined(WARPCONVNET_SM80_ENABLED)
+
 #include "include/cute_gemm_launch.h"
 
 namespace warpconvnet {
@@ -204,3 +206,14 @@ INSTANTIATE_STAGED_ALL_DTYPES(Tile64x64x32)
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
+
+#else  // !WARPCONVNET_SM80_ENABLED
+
+// Empty translation unit when SM80 CUTLASS is not available.
+namespace warpconvnet {
+namespace cute_gemm {
+void cute_gemm_staged_stub() {}
+}  // namespace cute_gemm
+}  // namespace warpconvnet
+
+#endif  // WARPCONVNET_SM80_ENABLED
