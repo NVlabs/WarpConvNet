@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <cutlass/cutlass.h>
+#if defined(WARPCONVNET_SM80_ENABLED)
+
 #include <cutlass/arch/arch.h>
 #include <cutlass/arch/memory_sm80.h>  // cp.async helpers
+#include <cutlass/cutlass.h>
 #include <cutlass/epilogue/thread/linear_combination.h>
 #include <cutlass/gemm/device/gemm_universal_adapter.h>
 #include <cutlass/gemm/gemm.h>
@@ -284,3 +286,10 @@ int main() {
   return 0;
 }
 #endif
+
+#else  // !WARPCONVNET_SM80_ENABLED
+
+// Empty translation unit when SM80 CUTLASS is not available.
+void cutlass_gemm_sm80_fp32_stub() {}
+
+#endif  // WARPCONVNET_SM80_ENABLED

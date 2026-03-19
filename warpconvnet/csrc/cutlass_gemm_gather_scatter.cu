@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#if defined(WARPCONVNET_SM80_ENABLED)
+
 #include <cutlass/util/device_memory.h>
 
 #include "include/gemm_error_codes.h"
@@ -582,3 +584,14 @@ INSTANTIATE_TRAB_FOR_ARCH(Tile64x64x32, DefaultSmArch)
 
 }  // namespace gemm
 }  // namespace warpconvnet
+
+#else  // !WARPCONVNET_SM80_ENABLED
+
+// Empty translation unit when SM80 CUTLASS is not available.
+namespace warpconvnet {
+namespace gemm {
+void cutlass_gemm_stub() {}
+}  // namespace gemm
+}  // namespace warpconvnet
+
+#endif  // WARPCONVNET_SM80_ENABLED

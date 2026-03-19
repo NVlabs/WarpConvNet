@@ -40,19 +40,36 @@ try:
 except Exception:
     _HAS_CUTE_GROUPED = False
 
-# SM90 WGMMA backends — available when compiled with SM90 support and running on SM90+ hardware
+# Hardware capability detection
+_HAS_SM80_HARDWARE = False
 _HAS_SM90_HARDWARE = False
 try:
     import torch
 
     _sm_cap = torch.cuda.get_device_capability()
+    _HAS_SM80_HARDWARE = _sm_cap[0] >= 8
     _HAS_SM90_HARDWARE = _sm_cap[0] >= 9
 except Exception:
     pass
 
+# CUTLASS/CuTe backends — require SM80+ hardware AND compiled support
+_HAS_CUTLASS_BACKEND = False
 try:
     import warpconvnet._C as _C
 
+    _HAS_CUTLASS_BACKEND = _HAS_SM80_HARDWARE and hasattr(
+        _C.gemm, "cutlass_gemm_AD_gather_scatter"
+    )
+except Exception:
+    pass
+
+# Override CuTe backend availability: require SM80+ hardware
+if not _HAS_SM80_HARDWARE:
+    _HAS_CUTE_BACKEND = False
+    _HAS_CUTE_GROUPED = False
+
+# SM90 WGMMA backends — available when compiled with SM90 support and running on SM90+ hardware
+try:
     _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(_C.gemm, "cute_gemm_sm90_AD_gather_scatter")
     _HAS_CUTE_GROUPED_SM90 = _HAS_SM90_HARDWARE and hasattr(
         _C.gemm, "cute_gemm_sm90_grouped_AD_gather_scatter"
@@ -131,10 +148,12 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
 #   - kv=125: only implicit_gemm and implicit_gemm_grouped win
 
 # Algo building blocks (assembled conditionally by _get_adaptive_forward_params)
-_FWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})]
-_FWD_CUTLASS_GROUPED = [
-    ("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]
-]
+_FWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})] if _HAS_CUTLASS_BACKEND else []
+_FWD_CUTLASS_GROUPED = (
+    [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
+    if _HAS_CUTLASS_BACKEND
+    else []
+)
 # SM90 WGMMA forward building blocks (only on Hopper+ hardware with SM90 compiled support)
 _FWD_CUTE_SM90 = (
     []
@@ -260,7 +279,7 @@ def _get_adaptive_forward_params(
 
 # Full forward benchmark candidates ("all"): exhaustive search including rarely-winning variants.
 _ALL_BENCHMARK_FORWARD_PARAMS = [
-    ("cutlass_implicit_gemm", {}),
+    *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
     *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
     ("explicit_gemm", {}),
@@ -271,7 +290,11 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
         for bs in [16, 32]
         for m in [2000, 5000]
     ],
-    *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *(
+        [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
+        if _HAS_CUTLASS_BACKEND
+        else []
+    ),
     *(
         []
         if not _HAS_CUTE_GROUPED
@@ -327,10 +350,12 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
 #   - kv=125: explicit_gemm (59%) + explicit_gemm_grouped (32%) + implicit_gemm (9%)
 
 # Algo building blocks for backward
-_BWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})]
-_BWD_CUTLASS_GROUPED = [
-    ("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]
-]
+_BWD_CUTLASS_IMPLICIT = [("cutlass_implicit_gemm", {})] if _HAS_CUTLASS_BACKEND else []
+_BWD_CUTLASS_GROUPED = (
+    [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
+    if _HAS_CUTLASS_BACKEND
+    else []
+)
 _BWD_CUTE_GROUPED = (
     []
     if not _HAS_CUTE_GROUPED
@@ -456,7 +481,7 @@ def _get_adaptive_backward_params(
 
 # Full backward benchmark candidates ("all"): exhaustive search.
 _ALL_BENCHMARK_BACKWARD_PARAMS = [
-    ("cutlass_implicit_gemm", {}),
+    *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
     *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
     *[
         (
@@ -488,7 +513,11 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
         for sf in [4, 8]
         for m in [2000, 5000]
     ],
-    *[("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    *(
+        [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
+        if _HAS_CUTLASS_BACKEND
+        else []
+    ),
     *(
         []
         if not _HAS_CUTE_GROUPED

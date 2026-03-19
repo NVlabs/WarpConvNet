@@ -4,6 +4,8 @@
 // CuTe 3.x GEMM with gather/scatter via layout composition.
 // Explicit template instantiations for all (element type × tile × output type) combinations.
 
+#if defined(WARPCONVNET_SM80_ENABLED)
+
 #include "include/cute_gemm_launch.h"
 
 namespace warpconvnet {
@@ -228,3 +230,14 @@ INSTANTIATE_GROUPED_TRAB_ALL_DTYPES(Tile64x256x32)
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
+
+#else  // !WARPCONVNET_SM80_ENABLED
+
+// Empty translation unit when SM80 CUTLASS is not available.
+namespace warpconvnet {
+namespace cute_gemm {
+void cute_gemm_gather_scatter_stub() {}
+}  // namespace cute_gemm
+}  // namespace warpconvnet
+
+#endif  // WARPCONVNET_SM80_ENABLED

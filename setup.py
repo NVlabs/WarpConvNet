@@ -104,8 +104,9 @@ else:
 # We must do this ourselves because adding any explicit -gencode (e.g. sm_90a)
 # prevents PyTorch's BuildExtension from injecting its own gencode flags.
 _has_sm90_target = False
+_has_sm80_target = False
 _arch_values = []
-_MIN_ARCH = 8.0  # CUTLASS kernels require sm_80+ (cp.async)
+_MIN_ARCH = 7.0  # Minimum supported architecture (Volta)
 
 if cuda_arch_list:
     for arch in cuda_arch_list.replace(",", " ").replace(";", " ").split():
@@ -121,31 +122,61 @@ else:
         _arch_values.append(float(f"{cap[0]}.{cap[1]}"))
         if cap[0] >= 9:
             _has_sm90_target = True
+        if cap[0] >= 8:
+            _has_sm80_target = True
     except Exception:
         pass
 
-# Filter out architectures below minimum (CUTLASS requires sm_80+ for cp.async)
+# Filter out architectures below minimum
 _skipped = [v for v in _arch_values if v < _MIN_ARCH]
 _arch_values = [v for v in _arch_values if v >= _MIN_ARCH]
 if _skipped:
     print(
         f"WARNING: Skipping unsupported architectures < sm_{int(_MIN_ARCH * 10)}: "
-        f"{', '.join(f'sm_{int(v * 10)}' for v in _skipped)} "
-        f"(CUTLASS requires sm_80+ for cp.async)"
+        f"{', '.join(f'sm_{int(v * 10)}' for v in _skipped)}"
     )
 if not _arch_values and not any(v >= 9.0 for v in _skipped):
-    # No valid arch remaining and no sm_90 — default to sm_80
-    _arch_values = [8.0]
-    print("No supported architecture found; defaulting to sm_80")
+    # No valid arch remaining and no sm_90 — default to sm_70
+    _arch_values = [7.0]
+    print("No supported architecture found; defaulting to sm_70")
 
-# Generate gencode flags for all requested architectures
+# Determine SM80+ presence first (needed to decide whether SM7X gencode is safe)
 for arch_val in _arch_values:
-    arch_int = int(arch_val * 10)  # e.g. 8.0 -> 80, 9.0 -> 90
     if arch_val >= 9.0:
         _has_sm90_target = True
+        _has_sm80_target = True
+    elif arch_val >= 8.0:
+        _has_sm80_target = True
+
+# Generate gencode flags for all requested architectures.
+# When SM80+ targets are present, skip SM7X gencode: CUTLASS .cu files are compiled
+# with all gencode flags, and CUTLASS cp.async / tensor-core MMA fail on compute_7X.
+_skipped_sm7x = []
+for arch_val in _arch_values:
+    arch_int = int(arch_val * 10)  # e.g. 7.0 -> 70, 8.0 -> 80, 9.0 -> 90
+    if arch_val >= 9.0:
+        pass  # sm_90a added separately below
+    elif arch_val >= 8.0:
+        nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=sm_{arch_int}")
+        print(f"Adding gencode for SM{arch_int}")
+    elif _has_sm80_target:
+        # Skip SM7X gencode when SM80+ is also targeted (CUTLASS incompatible)
+        _skipped_sm7x.append(arch_val)
     else:
         nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=sm_{arch_int}")
         print(f"Adding gencode for SM{arch_int}")
+
+if _skipped_sm7x:
+    print(
+        f"WARNING: Skipping SM7X gencode ({', '.join(f'sm_{int(v * 10)}' for v in _skipped_sm7x)}) "
+        f"because SM80+ targets are present (CUTLASS requires sm_80+ for all gencode targets)"
+    )
+
+# SM80+ CUTLASS support (cp.async, tensor core MMA)
+if _has_sm80_target:
+    cxx_args.append("-DWARPCONVNET_SM80_ENABLED=1")
+    nvcc_args.append("-DWARPCONVNET_SM80_ENABLED=1")
+    print("Adding WARPCONVNET_SM80_ENABLED (CUTLASS cp.async, tensor core MMA)")
 
 # For SM90 (Hopper) WGMMA support, use sm_90a (not just sm_90).
 # sm_90a enables __CUDA_ARCH_FEAT_SM90_ALL needed for WGMMA instructions.
