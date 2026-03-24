@@ -197,10 +197,12 @@ def _mask_implicit_gemm_backward_logic(
         used_cute = False
 
         if _has_cute_dgrad and aligned and min_dtype in (torch.float16, torch.bfloat16):
-            # Pre-transpose weight for dgrad: [K, C_in, C_out] → keep same layout
-            # The CuTe kernel handles the transpose internally via strided loads
+            # Pre-transpose weight for vectorized B loads in dgrad kernel:
+            # [K, C_in, C_out] -> [K, C_out, C_in] so B[k] is contiguous [C_out, C_in]
+            # and the kernel can use 128-bit cp.async loads instead of scalar strided loads.
+            _weight_T = _weight.transpose(1, 2).contiguous()
             status = _C.gemm.cute_gemm_mask_dgrad(
-                _grad_output, _weight, grad_in,
+                _grad_output, _weight_T, grad_in,
                 pair_table, pair_mask, mask_argsort,
                 K, 3, 1.0,
             )
