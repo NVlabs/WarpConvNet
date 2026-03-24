@@ -248,11 +248,14 @@ class SpatiallySparseConvConfig:
         kernel_volume: int,
         in_dtype: torch.dtype,
     ):
-        # Use log10 bins to reduce cache misses across batches with varying
-        # voxel counts. log10 gives ~3.3x coarser bins than log2:
-        #   N=1K-10K → bin 3-4, N=10K-100K → bin 4-5, N=100K-1M → bin 5-6
-        self.log_num_in_coords = math.ceil(math.log10(num_in_coords)) if num_in_coords > 0 else 0
-        self.log_num_out_coords = math.ceil(math.log10(num_out_coords)) if num_out_coords > 0 else 0
+        # Use clamped log10 bins: ceil(log10(N)) clamped to [3, inf).
+        # This treats all N < 10K identically (bin 3-4), which covers the
+        # deep encoder/decoder levels where N varies most across batches.
+        # Bins: N<10K → 4, N=10K-100K → 5, N=100K-1M → 6
+        _log10_in = math.ceil(math.log10(max(num_in_coords, 1)))
+        _log10_out = math.ceil(math.log10(max(num_out_coords, 1)))
+        self.log_num_in_coords = max(_log10_in, 4)  # clamp: treat N<10K as one bin
+        self.log_num_out_coords = max(_log10_out, 4)
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_volume = kernel_volume
