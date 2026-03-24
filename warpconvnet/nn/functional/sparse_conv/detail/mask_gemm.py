@@ -79,9 +79,17 @@ def _get_mask_data(
     num_out_coords: int,
     device: torch.device,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """Get or compute cached mask data for a kernel_map."""
-    cache_key = id(kernel_map)
+    """Get or compute cached mask data for a kernel_map.
+
+    Uses (id, num_out_coords) as cache key to avoid stale data from
+    id() collisions after garbage collection.
+    """
+    cache_key = (id(kernel_map), num_out_coords, len(kernel_map))
     if cache_key not in _MASK_DATA_CACHE:
+        # Evict stale entries with the same id (from GC'd objects)
+        stale_keys = [k for k in _MASK_DATA_CACHE if k[0] == id(kernel_map)]
+        for k in stale_keys:
+            del _MASK_DATA_CACHE[k]
         _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(
             kernel_map, num_out_coords, device
         )
@@ -138,23 +146,17 @@ def _mask_implicit_gemm_forward_logic(
         )
         if status == 0:
             return output.to(dtype=in_features.dtype)
-        # CuTe failed (likely alignment issue) — fall through to SIMT
+        # CuTe failed — signal error so auto-tuner skips this algo
+        raise RuntimeError(
+            f"cute_gemm_mask_fwd failed with status {status} "
+            f"(N={num_out_coords}, C_in={C_in}, C_out={C_out}, K={K})"
+        )
 
-    # SIMT fallback
-    status = _C.gemm.mask_implicit_gemm_fwd(
-        _in_features,
-        _weight,
-        output,
-        pair_table,
-        pair_mask,
-        mask_argsort,
-        K,
-        block_size,
+    # No CuTe available or channels unaligned — signal unsupported
+    raise RuntimeError(
+        f"mask_implicit_gemm requires aligned channels for CuTe "
+        f"(C_in={C_in}, C_out={C_out})"
     )
-    if status != 0:
-        raise RuntimeError(f"mask_implicit_gemm_fwd failed with status {status}")
-
-    return output.to(dtype=in_features.dtype)
 
 
 def _mask_implicit_gemm_backward_logic(

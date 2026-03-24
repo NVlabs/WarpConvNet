@@ -168,7 +168,7 @@ template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_mask_fwd(const void *a, const void *b, void *d,
                            const int *pair_table, const uint32_t *pair_mask,
                            const int *mask_argsort,
-                           int N_out, int C_in, int C_out, int K, float alpha);
+                           int N_in, int N_out, int C_in, int C_out, int K, float alpha);
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_mask_dgrad(const void *go, const void *b, void *gi,
@@ -1981,13 +1981,13 @@ static int dispatch_cute_gemm_grouped_ad_gather_scatter(
         ElementInput,                                                    \
         warpconvnet::gemm::TILE_TAG,                                     \
         ElementOutput>(ptr_A, ptr_B, ptr_D, pair_table, pair_mask,       \
-                       mask_argsort, N_out, C_in, C_out, K, alpha);
+                       mask_argsort, N_in, N_out, C_in, C_out, K, alpha);
 
 template <torch::ScalarType SA, torch::ScalarType SC>
 static int dispatch_cute_gemm_mask_fwd(
     const void *ptr_A, const void *ptr_B, void *ptr_D,
     const int *pair_table, const uint32_t *pair_mask, const int *mask_argsort,
-    int N_out, int C_in, int C_out, int K, float alpha, int mma_tile) {
+    int N_in, int N_out, int C_in, int C_out, int K, float alpha, int mma_tile) {
   using ElementInput = typename torch_to_cutlass<SA>::type;
   using ElementOutput = typename torch_to_cutlass<SC>::type;
   auto tile = static_cast<warpconvnet::gemm::MMATile>(mma_tile);
@@ -2021,6 +2021,7 @@ int cute_gemm_mask_fwd(
   weight = weight.contiguous();
   output = output.contiguous();
 
+  int N_in = input.size(0);
   int N_out_val = output.size(0);
   int C_in = input.size(1);
   int C_out = output.size(1);
@@ -2049,14 +2050,14 @@ int cute_gemm_mask_fwd(
         pair_table.data_ptr<int>(),
         reinterpret_cast<const uint32_t*>(pair_mask.data_ptr<int>()),
         mask_argsort.data_ptr<int>(),
-        N_out_val, C_in, C_out, K, alpha, mma_tile);
+        N_in, N_out_val, C_in, C_out, K, alpha, mma_tile);
   } else if (scalar_in == torch::kFloat16 && scalar_out == torch::kFloat32) {
     status = dispatch_cute_gemm_mask_fwd<torch::kFloat16, torch::kFloat32>(
         input.data_ptr(), weight.data_ptr(), output.data_ptr(),
         pair_table.data_ptr<int>(),
         reinterpret_cast<const uint32_t*>(pair_mask.data_ptr<int>()),
         mask_argsort.data_ptr<int>(),
-        N_out_val, C_in, C_out, K, alpha, mma_tile);
+        N_in, N_out_val, C_in, C_out, K, alpha, mma_tile);
   }
 #ifndef DISABLE_BFLOAT16
   else if (scalar_in == torch::kBFloat16 && scalar_out == torch::kBFloat16) {
@@ -2065,14 +2066,14 @@ int cute_gemm_mask_fwd(
         pair_table.data_ptr<int>(),
         reinterpret_cast<const uint32_t*>(pair_mask.data_ptr<int>()),
         mask_argsort.data_ptr<int>(),
-        N_out_val, C_in, C_out, K, alpha, mma_tile);
+        N_in, N_out_val, C_in, C_out, K, alpha, mma_tile);
   } else if (scalar_in == torch::kBFloat16 && scalar_out == torch::kFloat32) {
     status = dispatch_cute_gemm_mask_fwd<torch::kBFloat16, torch::kFloat32>(
         input.data_ptr(), weight.data_ptr(), output.data_ptr(),
         pair_table.data_ptr<int>(),
         reinterpret_cast<const uint32_t*>(pair_mask.data_ptr<int>()),
         mask_argsort.data_ptr<int>(),
-        N_out_val, C_in, C_out, K, alpha, mma_tile);
+        N_in, N_out_val, C_in, C_out, K, alpha, mma_tile);
   }
 #endif
   else {

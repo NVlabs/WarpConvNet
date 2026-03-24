@@ -21,7 +21,7 @@ int launch_cute_gemm_mask_fwd(
     const int *pair_table,
     const uint32_t *pair_mask,
     const int *mask_argsort,
-    int N_out, int C_in, int C_out, int K,
+    int N_in, int N_out, int C_in, int C_out, int K,
     float alpha,
     cudaStream_t stream = 0) {
 
@@ -53,7 +53,7 @@ int launch_cute_gemm_mask_fwd(
           reinterpret_cast<const ElementInput *>(ptr_B),
           reinterpret_cast<ElementOutput *>(ptr_D),
           pair_table, pair_mask, mask_argsort,
-          N_out, C_in, C_out, K, alpha);
+          N_in, N_out, C_in, C_out, K, alpha);
 
   auto err = cudaGetLastError();
   return err == cudaSuccess ? static_cast<int>(gemm::GemmStatus::kSuccess)

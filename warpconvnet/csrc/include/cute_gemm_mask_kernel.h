@@ -95,6 +95,7 @@ struct CuteGemmMaskKernel {
       const int *pair_table,        // [K * N_out] — pair_table[k*N_out + i] = input idx
       const uint32_t *pair_mask,    // [N_out] — bitmask per output voxel
       const int *mask_argsort,      // [N_out] — sorted permutation
+      int N_in,
       int N_out,
       int C_in,
       int C_out,
@@ -167,7 +168,7 @@ struct CuteGemmMaskKernel {
 
       // Prolog: load first k-tile
       _load_A_masked(ptr_A, pair_table, pair_mask, mask_argsort,
-                     sA(_, _, 0), m_start, 0, N_out, C_in, k, K);
+                     sA(_, _, 0), m_start, 0, N_in, N_out, C_in, k, K);
       _load_dense_B_cpasync(ptr_Bk, sB(_, _, 0), n_start, 0, C_out, C_in);
       cute::cp_async_fence();
       cute::cp_async_wait<0>();
@@ -181,7 +182,7 @@ struct CuteGemmMaskKernel {
         int k_start_cin = ktile * tK;
 
         _load_A_masked(ptr_A, pair_table, pair_mask, mask_argsort,
-                       sA(_, _, next_stage), m_start, k_start_cin, N_out, C_in, k, K);
+                       sA(_, _, next_stage), m_start, k_start_cin, N_in, N_out, C_in, k, K);
         _load_dense_B_cpasync(ptr_Bk, sB(_, _, next_stage), n_start, k_start_cin, C_out, C_in);
         cute::cp_async_fence();
 
@@ -224,9 +225,10 @@ private:
       SmemTensor smem_tile,
       int m_start,
       int k_start,
+      int N_in,
       int N_out,
       int C_in,
-      int offset_k,   // current kernel offset
+      int offset_k,
       int K) const {
 
     static_assert(tK % kVec == 0, "tK must be a multiple of vector width");
@@ -245,11 +247,21 @@ private:
 
       if (sorted_row < N_out) {
         int real_row = mask_argsort[sorted_row];
-        bool has_offset;
-        if (K <= 32) {
-          has_offset = (pair_mask[real_row] & (1u << offset_k)) != 0;
-        } else {
-          has_offset = (pair_table[offset_k * N_out + real_row] >= 0);
+        bool has_offset = false;
+        if (real_row >= 0 && real_row < N_out) {
+          if (K <= 32) {
+            has_offset = (pair_mask[real_row] & (1u << offset_k)) != 0;
+          } else {
+            has_offset = (pair_table[offset_k * N_out + real_row] >= 0);
+          }
+        }
+
+        if (has_offset) {
+          int in_row = pair_table[offset_k * N_out + real_row];
+          // Bounds check on input row
+          if (in_row < 0 || in_row >= N_in) {
+            has_offset = false;
+          }
         }
 
         if (has_offset) {
@@ -665,6 +677,7 @@ void cute_gemm_mask_kernel_entry(
     const int *pair_table,
     const uint32_t *pair_mask,
     const int *mask_argsort,
+    int N_in,
     int N_out,
     int C_in,
     int C_out,
@@ -672,7 +685,7 @@ void cute_gemm_mask_kernel_entry(
     float alpha) {
   extern __shared__ char smem[];
   Kernel{}(ptr_A, ptr_B, ptr_D, pair_table, pair_mask, mask_argsort,
-           N_out, C_in, C_out, K, alpha, smem);
+           N_in, N_out, C_in, C_out, K, alpha, smem);
 }
 
 }  // namespace cute_gemm

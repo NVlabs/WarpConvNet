@@ -15,11 +15,11 @@ template <typename ElementInput, typename TileTag, typename ElementOutput>
 int run_cute_gemm_mask_fwd(
     const void *a, const void *b, void *d,
     const int *pair_table, const uint32_t *pair_mask, const int *mask_argsort,
-    int N_out, int C_in, int C_out, int K, float alpha) {
+    int N_in, int N_out, int C_in, int C_out, int K, float alpha) {
   using Config = CuteTileConfig<ElementInput, TileTag>;
   return launch_cute_gemm_mask_fwd<ElementInput, Config, ElementOutput>(
       a, b, d, pair_table, pair_mask, mask_argsort,
-      N_out, C_in, C_out, K, alpha);
+      N_in, N_out, C_in, C_out, K, alpha);
 }
 
 // Instantiation macro
@@ -27,7 +27,7 @@ int run_cute_gemm_mask_fwd(
   template int run_cute_gemm_mask_fwd<ElemIn, TileTag, ElemOut>(          \
       const void *, const void *, void *,                                \
       const int *, const uint32_t *, const int *,                        \
-      int, int, int, int, float);
+      int, int, int, int, int, float);
 
 #define INSTANTIATE_MASK_ALL_DTYPES(TileTag)                             \
   INSTANTIATE_MASK_FWD(cutlass::half_t, cutlass::half_t, TileTag)        \
