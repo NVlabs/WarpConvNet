@@ -33,7 +33,9 @@ def points_to_closest_voxel_mapping(points, grid_shape, bounds, memory_format=No
     Returns:
         Tensor of voxel indices for each point
     """
-    assert points.device.type == "cuda", "points_to_closest_voxel_mapping only supports CUDA"
+    assert (
+        points.device.type == "cuda"
+    ), "points_to_closest_voxel_mapping only supports CUDA"
     # Extract coordinates and offsets
     coords = points.coordinate_tensor
     offsets = points.offsets
@@ -96,12 +98,17 @@ def _point_to_grid_mapping(
         RealSearchResult: Search results class
     """
     from warpconvnet.geometry.coords.search.continuous import neighbor_search
-    from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig, RealSearchMode
+    from warpconvnet.geometry.coords.search.search_configs import (
+        RealSearchConfig,
+        RealSearchMode,
+    )
     from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 
     # Create search config
     if search_type == "radius":
-        assert search_radius is not None, "Search radius must be provided for radius search"
+        assert (
+            search_radius is not None
+        ), "Search radius must be provided for radius search"
         search_mode = RealSearchMode.RADIUS
         search_config = RealSearchConfig(
             mode=search_mode, radius=search_radius, grid_dim=search_grid_dim
@@ -314,7 +321,9 @@ def _points_to_grid_features(
     from warpconvnet.geometry.features.grid import GridFeatures
 
     assert isinstance(points, Points), f"Expected Points, got {type(points)}"
-    assert isinstance(grid_coords, GridCoords), f"Expected GridCoords, got {type(grid_coords)}"
+    assert isinstance(
+        grid_coords, GridCoords
+    ), f"Expected GridCoords, got {type(grid_coords)}"
 
     if memory_format is None:
         memory_format = GridMemoryFormat.b_x_y_z_c
@@ -411,7 +420,11 @@ def _points_to_grid_features(
 
     # Create GridFeatures
     return GridFeatures(
-        grid_tensor, grid_coords.offsets, memory_format, grid_coords.grid_shape, num_channels
+        grid_tensor,
+        grid_coords.offsets,
+        memory_format,
+        grid_coords.grid_shape,
+        num_channels,
     )
 
 
@@ -477,7 +490,9 @@ def points_to_grid(
             # Count points per voxel
             counts = torch.zeros(total_voxels, device=device)
             counts.scatter_add_(
-                0, to_voxel_indices, torch.ones_like(to_voxel_indices, dtype=torch.float32)
+                0,
+                to_voxel_indices,
+                torch.ones_like(to_voxel_indices, dtype=torch.float32),
             )
             # Sum features per voxel
             flat_grid.scatter_add_(
@@ -639,7 +654,9 @@ def voxels_to_grid(
         flat_grid_feats_view = grid_feats.view(-1, grid_feats.shape[4])
         # This will randomly select one of the voxel features for each grid cell
         # TODO(cchoy) 2025-04-10: reduction should be applied here
-        flat_grid_feats_view[batched_cell_flat_indices] = voxels.batched_features.batched_tensor
+        flat_grid_feats_view[batched_cell_flat_indices] = (
+            voxels.batched_features.batched_tensor
+        )
 
         # Restore the
         # Replace the grid features with the reduced features

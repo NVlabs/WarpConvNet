@@ -85,7 +85,9 @@ def voxel_downsample_csr_mapping(
     N = len(batched_points)
     B = len(offsets) - 1
     device = str(batched_points.device)
-    assert offsets[-1] == N, f"Offsets {offsets} does not match the number of points {N}"
+    assert (
+        offsets[-1] == N
+    ), f"Offsets {offsets} does not match the number of points {N}"
 
     voxel_coords = torch.floor(batched_points / voxel_size).int()
     if B > 1:
@@ -93,7 +95,9 @@ def voxel_downsample_csr_mapping(
         voxel_coords = torch.cat([batch_index.unsqueeze(1), voxel_coords], dim=1)
 
     to_unique = ToUnique(return_to_unique_indices=True, unique_method=unique_method)
-    unique_coords, to_csr_indices, to_csr_offsets = to_unique.to_unique_csr(voxel_coords, dim=0)
+    unique_coords, to_csr_indices, to_csr_offsets = to_unique.to_unique_csr(
+        voxel_coords, dim=0
+    )
 
     if B == 1:
         unique_offsets = torch.IntTensor([0, len(unique_coords)])
@@ -102,7 +106,9 @@ def voxel_downsample_csr_mapping(
             batch_index[to_unique.to_unique_indices], return_counts=True
         )
         batch_counts = batch_counts.cpu()
-        unique_offsets = torch.cat((batch_counts.new_zeros(1), batch_counts.cumsum(dim=0)))
+        unique_offsets = torch.cat(
+            (batch_counts.new_zeros(1), batch_counts.cumsum(dim=0))
+        )
     assert len(unique_offsets) == B + 1
 
     return unique_coords, unique_offsets, to_csr_indices, to_csr_offsets, to_unique
@@ -129,7 +135,9 @@ def voxel_downsample_random_indices(
     N = len(batched_points)
     B = len(offsets) - 1
     device = str(batched_points.device)
-    assert offsets[-1] == N, f"Offsets {offsets} does not match the number of points {N}"
+    assert (
+        offsets[-1] == N
+    ), f"Offsets {offsets} does not match the number of points {N}"
 
     if voxel_size is not None:
         voxel_coords = torch.floor(batched_points / voxel_size).int()
@@ -146,7 +154,9 @@ def voxel_downsample_random_indices(
     else:
         _, batch_counts = torch.unique(batch_index[unique_indices], return_counts=True)
         batch_counts = batch_counts.cpu()
-        batch_offsets = torch.cat((batch_counts.new_zeros(1), batch_counts.cumsum(dim=0)))
+        batch_offsets = torch.cat(
+            (batch_counts.new_zeros(1), batch_counts.cumsum(dim=0))
+        )
 
     return unique_indices, batch_offsets
 
@@ -163,7 +173,9 @@ def voxel_downsample_ravel(
     Returns:
         unique_indices: sorted indices of unique voxels.
     """
-    batch_indexed_coords[:, 1:] = torch.floor(batch_indexed_coords[:, 1:] / voxel_size).int()
+    batch_indexed_coords[:, 1:] = torch.floor(
+        batch_indexed_coords[:, 1:] / voxel_size
+    ).int()
     raveled_coords = ravel_multi_index_auto_shape(batch_indexed_coords)
     _, _, _, _, perm = unique_torch(raveled_coords, dim=0)
     return perm
@@ -185,7 +197,9 @@ def voxel_downsample_random_indices_list_of_coords(
         batch_offsets: Batch offsets.
     """
     batched_coords, offsets, _ = list_to_cat_tensor(list_of_coords)
-    return voxel_downsample_random_indices(batched_coords.to(device), offsets, voxel_size)
+    return voxel_downsample_random_indices(
+        batched_coords.to(device), offsets, voxel_size
+    )
 
 
 @torch.no_grad()
@@ -220,7 +234,9 @@ def voxel_downsample_mapping(
         down_batched_points = down_batched_points.int()
 
     # Get the batch index
-    up_bcoords = batch_indexed_coordinates(up_batched_points, up_offsets, return_type="torch")
+    up_bcoords = batch_indexed_coordinates(
+        up_batched_points, up_offsets, return_type="torch"
+    )
     down_bcoords = batch_indexed_coordinates(
         down_batched_points, down_offsets, return_type="torch"
     )
@@ -236,7 +252,9 @@ def voxel_downsample_mapping(
         # get batch index
         # The invalid batch index is sorted as it is initialized from torch.nonzero.
         invalid_up_points = up_batched_points[invalid_idx]
-        invalid_batch_index = batch_index_from_indices(invalid_idx, up_offsets, device=device)
+        invalid_batch_index = batch_index_from_indices(
+            invalid_idx, up_offsets, device=device
+        )
         invalid_offsets = offsets_from_batch_index(invalid_batch_index)
         nearest_down = batched_knn_search(
             down_batched_points.float(),

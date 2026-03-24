@@ -117,7 +117,9 @@ class SegmentedLayerNorm(nn.LayerNorm):
         elementwise_affine: bool = True,
         bias: bool = True,
     ):
-        super().__init__([channels], eps=eps, elementwise_affine=elementwise_affine, bias=bias)
+        super().__init__(
+            [channels], eps=eps, elementwise_affine=elementwise_affine, bias=bias
+        )
 
     def forward(self, x: Geometry):
         # Only works for geometry with batched features

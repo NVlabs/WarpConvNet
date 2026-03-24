@@ -93,7 +93,9 @@ def main(
     device: str = "cuda",
 ):
     wp.init()
-    device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
+    device = torch.device(
+        device if torch.cuda.is_available() and device == "cuda" else "cpu"
+    )
 
     torch.manual_seed(1)
 

@@ -70,10 +70,13 @@ class ModelNet40Dataset(Dataset):
             self.download_and_extract()
 
         # Load file list
-        file_list_path = os.path.join(root_dir, f"modelnet40_ply_hdf5_2048/{split}_files.txt")
+        file_list_path = os.path.join(
+            root_dir, f"modelnet40_ply_hdf5_2048/{split}_files.txt"
+        )
         with open(file_list_path, "r") as f:
             self.file_list = [
-                os.path.join(root_dir, line.strip().replace("data/", "")) for line in f.readlines()
+                os.path.join(root_dir, line.strip().replace("data/", ""))
+                for line in f.readlines()
             ]
 
         self.data = []

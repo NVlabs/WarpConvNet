@@ -22,14 +22,18 @@ class PadFeatures(Features):
 
     def __init__(
         self,
-        batched_tensor: List[Float[Tensor, "N C"]] | Float[Tensor, "B M C"],  # noqa: F722,F821
+        batched_tensor: (
+            List[Float[Tensor, "N C"]] | Float[Tensor, "B M C"]
+        ),  # noqa: F722,F821
         offsets: Optional[Int[Tensor, "B+1"]] = None,  # noqa: F722,F821
         pad_multiple: Optional[int] = None,
         device: Optional[str] = None,
     ):
         if isinstance(batched_tensor, list):
             assert offsets is None, "If batched_tensors is a list, offsets must be None"
-            batched_tensor, offsets, _ = list_to_pad_tensor(batched_tensor, pad_multiple)
+            batched_tensor, offsets, _ = list_to_pad_tensor(
+                batched_tensor, pad_multiple
+            )
 
         if isinstance(batched_tensor, torch.Tensor) and offsets is None:
             assert (
@@ -90,14 +94,19 @@ class PadFeatures(Features):
     def equal_rigorous(self, value: "PadFeatures") -> bool:
         if not isinstance(value, PadFeatures):
             return False
-        return self.equal_shape(value) and (self.batched_tensor == value.batched_tensor).all()
+        return (
+            self.equal_shape(value)
+            and (self.batched_tensor == value.batched_tensor).all()
+        )
 
     def to_cat(self) -> "CatFeatures":  # noqa: F821
         return pad_to_cat(self)
 
     @classmethod
     def from_cat(
-        cls, batched_object: "CatFeatures", pad_multiplier: Optional[int] = None  # noqa: F821
+        cls,
+        batched_object: "CatFeatures",
+        pad_multiplier: Optional[int] = None,  # noqa: F821
     ) -> "PadFeatures":  # noqa: F821
         return cat_to_pad(batched_object, pad_multiplier)
 
@@ -117,11 +126,15 @@ class PadFeatures(Features):
         pad_multiple: Optional[int] = None,
         **kwargs,
     ):
-        batched_tensor = batched_tensor if batched_tensor is not None else self.batched_tensor
+        batched_tensor = (
+            batched_tensor if batched_tensor is not None else self.batched_tensor
+        )
         if pad_multiple is not None:
             # pad the tensor to the same multiple as the original tensor
             new_num_points = (
-                (batched_tensor.shape[1] + pad_multiple - 1) // pad_multiple * pad_multiple
+                (batched_tensor.shape[1] + pad_multiple - 1)
+                // pad_multiple
+                * pad_multiple
             )
             if new_num_points > batched_tensor.shape[1]:
                 batched_tensor = F.pad(

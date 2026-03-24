@@ -23,7 +23,9 @@ from warpconvnet.utils.ravel import ravel_multi_index
 class Voxels(Geometry):
     def __init__(
         self,
-        batched_coordinates: List[Float[Tensor, "N 3"]] | Float[Tensor, "N 3"] | IntCoords,
+        batched_coordinates: (
+            List[Float[Tensor, "N 3"]] | Float[Tensor, "N 3"] | IntCoords
+        ),
         batched_features: (
             List[Float[Tensor, "N C"]]
             | Float[Tensor, "N C"]
@@ -44,7 +46,9 @@ class Voxels(Geometry):
             ), "If coords is a list, features must be a list too."
             assert len(batched_coordinates) == len(batched_features)
             # Assert all elements in coords and features have same length
-            assert all(len(c) == len(f) for c, f in zip(batched_coordinates, batched_features))
+            assert all(
+                len(c) == len(f) for c, f in zip(batched_coordinates, batched_features)
+            )
             batched_coordinates = IntCoords(
                 batched_coordinates, device=device, tensor_stride=tensor_stride
             )
@@ -82,7 +86,10 @@ class Voxels(Geometry):
         **kwargs,
     ):
         # Move channel dimension to the end
-        if dense_tensor_channel_dim != -1 or dense_tensor.ndim != dense_tensor_channel_dim + 1:
+        if (
+            dense_tensor_channel_dim != -1
+            or dense_tensor.ndim != dense_tensor_channel_dim + 1
+        ):
             dense_tensor = dense_tensor.moveaxis(dense_tensor_channel_dim, -1)
         spatial_shape = dense_tensor.shape[1:-1]
         batched_spatial_shape = dense_tensor.shape[:-1]
@@ -111,11 +118,13 @@ class Voxels(Geometry):
             assert target_spatial_sparse_tensor.num_spatial_dims == len(spatial_shape)
             assert target_spatial_sparse_tensor.batch_size == batched_spatial_shape[0]
             # Use the provided spatial sparse tensor's coordinate only
-            batch_indexed_coords = target_spatial_sparse_tensor.batch_indexed_coordinates.clone()
-            # subtract the min_coords
-            min_coords = target_spatial_sparse_tensor.coordinate_tensor.min(dim=0).values.view(
-                1, -1
+            batch_indexed_coords = (
+                target_spatial_sparse_tensor.batch_indexed_coordinates.clone()
             )
+            # subtract the min_coords
+            min_coords = target_spatial_sparse_tensor.coordinate_tensor.min(
+                dim=0
+            ).values.view(1, -1)
             batch_indexed_coords[:, 1:] = batch_indexed_coords[:, 1:] - min_coords
             if dense_max_coords is not None:
                 invalid = (batch_indexed_coords[:, 1:] > dense_max_coords).any(dim=1)
@@ -127,7 +136,9 @@ class Voxels(Geometry):
                     sparse_max_coords.cpu() < torch.tensor(spatial_shape)
                 ), "Max coords must be aligned with the spatial shape."
             # Ravel the coordinates. This assumes the max_coords are already aligned with the spatial_shape.
-            flattened_indices = ravel_multi_index(batch_indexed_coords, batched_spatial_shape)
+            flattened_indices = ravel_multi_index(
+                batch_indexed_coords, batched_spatial_shape
+            )
             # use index_select to get the features
             non_zero_feats = torch.index_select(flattened_tensor, 0, flattened_indices)
             if dense_max_coords is not None:
@@ -144,7 +155,9 @@ class Voxels(Geometry):
         device = self.batched_coordinates.device
 
         # Get the batch indexed coordinates and features
-        batch_indexed_coords = self.batched_coordinates.batch_indexed_coordinates.clone()
+        batch_indexed_coords = (
+            self.batched_coordinates.batch_indexed_coordinates.clone()
+        )
         features = self.batched_features.batched_tensor
 
         # Get the spatial shape.
@@ -164,15 +177,17 @@ class Voxels(Geometry):
                 max_coords_tensor = coords.max(dim=0).values
                 spatial_shape_tensor = max_coords_tensor - min_coords_tensor + 1
             # Shift the coordinates to the min_coords
-            batch_indexed_coords[:, 1:] = batch_indexed_coords[:, 1:] - min_coords_tensor.to(
-                device
-            )
+            batch_indexed_coords[:, 1:] = batch_indexed_coords[
+                :, 1:
+            ] - min_coords_tensor.to(device)
             spatial_shape = tuple(s.item() for s in spatial_shape_tensor)
         elif min_coords is not None:
             # Assert either max_coords or spatial_shape is provided
             assert max_coords is not None or spatial_shape is not None
             # Convert min_coords to tensor
-            min_coords_tensor = torch.tensor(min_coords, dtype=torch.int32, device=device)
+            min_coords_tensor = torch.tensor(
+                min_coords, dtype=torch.int32, device=device
+            )
             if max_coords is None:
                 # convert spatial_shape to tensor
                 spatial_shape_tensor = torch.tensor(
@@ -181,21 +196,35 @@ class Voxels(Geometry):
                 # max_coords_tensor = min_coords_tensor + spatial_shape_tensor - 1
             else:  # both min_coords and max_coords are provided
                 # Convert max_coords to tensor
-                max_coords_tensor = torch.tensor(max_coords, dtype=torch.int32, device=device)
-                assert len(min_coords_tensor) == len(max_coords_tensor) == self.num_spatial_dims
+                max_coords_tensor = torch.tensor(
+                    max_coords, dtype=torch.int32, device=device
+                )
+                assert (
+                    len(min_coords_tensor)
+                    == len(max_coords_tensor)
+                    == self.num_spatial_dims
+                )
                 spatial_shape_tensor = max_coords_tensor - min_coords_tensor + 1
             # Shift the coordinates to the min_coords and clip to the spatial_shape
             # Create a mask to identify coordinates within the spatial range
-            mask = torch.ones(batch_indexed_coords.shape[0], dtype=torch.bool, device=device)
+            mask = torch.ones(
+                batch_indexed_coords.shape[0], dtype=torch.bool, device=device
+            )
             for d in range(1, batch_indexed_coords.shape[1]):
-                mask &= (batch_indexed_coords[:, d] >= min_coords_tensor[d - 1].item()) & (
+                mask &= (
+                    batch_indexed_coords[:, d] >= min_coords_tensor[d - 1].item()
+                ) & (
                     batch_indexed_coords[:, d]
-                    < min_coords_tensor[d - 1].item() + spatial_shape_tensor[d - 1].item()
+                    < min_coords_tensor[d - 1].item()
+                    + spatial_shape_tensor[d - 1].item()
                 )
             batch_indexed_coords = batch_indexed_coords[mask]
             features = features[mask]
             spatial_shape = tuple(s.item() for s in spatial_shape_tensor)
-        elif spatial_shape is not None and len(spatial_shape) == self.coordinate_tensor.shape[1]:
+        elif (
+            spatial_shape is not None
+            and len(spatial_shape) == self.coordinate_tensor.shape[1]
+        ):
             # prepend a batch dimension
             pass
         else:
@@ -236,7 +265,9 @@ class Voxels(Geometry):
         if self.tensor_stride is not None:
             tensor_stride = self.tensor_stride
             # multiply voxel_size by tensor_stride
-            voxel_size = torch.Tensor([[voxel_size * s for s in tensor_stride]]).to(self.device)
+            voxel_size = torch.Tensor([[voxel_size * s for s in tensor_stride]]).to(
+                self.device
+            )
 
         from warpconvnet.geometry.types.points import Points
 
@@ -261,8 +292,12 @@ class Voxels(Geometry):
         kwargs["ordering"] = ordering
         kwargs["code"] = code_result.codes
         return self.__class__(
-            batched_coordinates=IntCoords(self.coordinate_tensor[code_result.perm], self.offsets),
-            batched_features=CatFeatures(self.feature_tensor[code_result.perm], self.offsets),
+            batched_coordinates=IntCoords(
+                self.coordinate_tensor[code_result.perm], self.offsets
+            ),
+            batched_features=CatFeatures(
+                self.feature_tensor[code_result.perm], self.offsets
+            ),
             **kwargs,
         )
 

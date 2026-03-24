@@ -5,7 +5,9 @@ import torch
 from warpconvnet import _C
 
 
-def farthest_point_sampling(points: torch.Tensor, offsets: torch.Tensor, K: int) -> torch.Tensor:
+def farthest_point_sampling(
+    points: torch.Tensor, offsets: torch.Tensor, K: int
+) -> torch.Tensor:
     """
     Farthest Point Sampling for packed coordinates.
 

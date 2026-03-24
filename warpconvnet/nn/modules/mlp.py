@@ -76,7 +76,11 @@ class BatchedLinear(nn.Module):
     """
 
     def __init__(
-        self, in_features: int, out_features: int, num_matrices: int = 3, bias: bool = True
+        self,
+        in_features: int,
+        out_features: int,
+        num_matrices: int = 3,
+        bias: bool = True,
     ):
         super().__init__()
         self.in_features = in_features

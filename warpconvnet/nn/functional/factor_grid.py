@@ -203,13 +203,17 @@ def _factor_grid_intra_communication(
 
             # Normalize coordinates to [-1, 1] for grid_sample
             bounds_min, bounds_max = grid.bounds
-            normalized_coords = 2.0 * (coords_grid - bounds_min) / (bounds_max - bounds_min) - 1.0
+            normalized_coords = (
+                2.0 * (coords_grid - bounds_min) / (bounds_max - bounds_min) - 1.0
+            )
             normalized_coords_list.append(normalized_coords)
 
     # Perform feature communication
     updated_grids = []
     for i, target_grid in enumerate(standard_grids):
-        target_features = target_grid.grid_features.batched_tensor.clone()  # B, C, H, W, D
+        target_features = (
+            target_grid.grid_features.batched_tensor.clone()
+        )  # B, C, H, W, D
 
         # Sample features from all other grids and accumulate
         for j, source_grid in enumerate(standard_grids):
@@ -279,4 +283,6 @@ def factor_grid_intra_communication(
         else:
             return factor_grid_cat(result1, result2)
     else:
-        raise ValueError(f"Unsupported number of communication types: {len(communication_types)}")
+        raise ValueError(
+            f"Unsupported number of communication types: {len(communication_types)}"
+        )

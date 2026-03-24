@@ -50,7 +50,9 @@ class Sequential(nn.Sequential, BaseSpatialModule):
     """
 
     def forward(self, x: Geometry):
-        assert isinstance(x, Geometry), f"Expected BatchedSpatialFeatures, got {type(x)}"
+        assert isinstance(
+            x, Geometry
+        ), f"Expected BatchedSpatialFeatures, got {type(x)}"
 
         in_sf = x
         for module in self:

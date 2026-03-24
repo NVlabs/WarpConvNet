@@ -67,26 +67,30 @@ def pre_autotune(
             inputs = prepare_fn(batch)
         else:
             # Default: assume batch has 'coords' and 'colors' keys
-            coords = [c.int() if isinstance(c, torch.Tensor) else torch.tensor(c).int()
-                      for c in batch['coords']]
-            feats = [f.float() if isinstance(f, torch.Tensor) else torch.tensor(f).float()
-                     for f in batch['colors']]
-            inputs = Voxels(coords, feats, device='cuda')
+            coords = [
+                c.int() if isinstance(c, torch.Tensor) else torch.tensor(c).int()
+                for c in batch["coords"]
+            ]
+            feats = [
+                f.float() if isinstance(f, torch.Tensor) else torch.tensor(f).float()
+                for f in batch["colors"]
+            ]
+            inputs = Voxels(coords, feats, device="cuda")
 
         # Forward pass (populates forward auto-tune cache)
         if amp_dtype is not None:
-            with torch.autocast('cuda', dtype=amp_dtype):
+            with torch.autocast("cuda", dtype=amp_dtype):
                 output = model(inputs)
         else:
             output = model(inputs)
 
         # Backward pass (populates backward auto-tune cache)
-        if hasattr(output, 'feature_tensor'):
+        if hasattr(output, "feature_tensor"):
             loss = output.feature_tensor.sum()
         elif isinstance(output, torch.Tensor):
             loss = output.sum()
         else:
-            loss = output.features.sum() if hasattr(output, 'features') else None
+            loss = output.features.sum() if hasattr(output, "features") else None
 
         if loss is not None:
             loss.backward()

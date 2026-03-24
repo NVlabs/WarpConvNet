@@ -28,7 +28,9 @@ class IntCoords(Coords):
 
     def __init__(
         self,
-        batched_tensor: List[Float[Tensor, "N D"]] | Float[Tensor, "N D"],  # noqa: F722,F821
+        batched_tensor: (
+            List[Float[Tensor, "N D"]] | Float[Tensor, "N D"]
+        ),  # noqa: F722,F821
         offsets: Optional[Union[List[int], Int[Tensor, "B+1"]]] = None,
         voxel_size: Optional[float] = None,
         voxel_origin: Optional[Float[Tensor, "D"]] = None,  # noqa: F821
@@ -45,7 +47,9 @@ class IntCoords(Coords):
             tensor_stride: provides the stride of the tensor for converting the coordinates to points
         """
         if isinstance(batched_tensor, list):
-            assert offsets is None, "If batched_tensors is a list, offsets must be None."
+            assert (
+                offsets is None
+            ), "If batched_tensors is a list, offsets must be None."
             batched_tensor, offsets, _ = list_to_cat_tensor(batched_tensor)
 
         if isinstance(offsets, list):
@@ -60,7 +64,9 @@ class IntCoords(Coords):
         self.voxel_origin = voxel_origin
         # Convert the tensor stride to ntuple
         if tensor_stride is not None:
-            self.tensor_stride = ntuple(tensor_stride, ndim=self.batched_tensor.shape[1])
+            self.tensor_stride = ntuple(
+                tensor_stride, ndim=self.batched_tensor.shape[1]
+            )
         else:
             self.tensor_stride = None
 
@@ -103,14 +109,18 @@ class IntCoords(Coords):
         Returns:
             New IntCoords instance with pruned coordinates.
         """
-        assert mask.shape[0] == self.batched_tensor.shape[0], "Mask must match tensor shape"
+        assert (
+            mask.shape[0] == self.batched_tensor.shape[0]
+        ), "Mask must match tensor shape"
 
         mask = mask.to(self.batched_tensor.device)
         if mask.dtype != torch.bool:
             mask = mask.bool()
 
         # Get original batch indices
-        batch_indices = batch_index_from_offset(self.offsets).to(self.batched_tensor.device)
+        batch_indices = batch_index_from_offset(self.offsets).to(
+            self.batched_tensor.device
+        )
 
         # Filter tensor and batch indices
         new_tensor = self.batched_tensor[mask]
@@ -163,7 +173,9 @@ class IntCoords(Coords):
         _kernel_size = ntuple(kernel_size, ndim=ndim)
         _dilation = ntuple(dilation, ndim=ndim)
 
-        batch_indexed_coords = batch_indexed_coordinates(self.batched_tensor, self.offsets)
+        batch_indexed_coords = batch_indexed_coordinates(
+            self.batched_tensor, self.offsets
+        )
 
         # Call expand_coords
         out_coords, out_offsets = expand_coords(

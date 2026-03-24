@@ -10,7 +10,18 @@ import time
 import atexit
 import enum
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional, Sequence, TypeVar, Generic, Callable, Iterable, List
+from typing import (
+    Dict,
+    Any,
+    Tuple,
+    Optional,
+    Sequence,
+    TypeVar,
+    Generic,
+    Callable,
+    Iterable,
+    List,
+)
 from dataclasses import dataclass
 
 import msgpack
@@ -76,12 +87,14 @@ class _FileLock:
 
     def __enter__(self):
         import fcntl
+
         self._fd = open(self.lock_path, "w")
         fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
         return self
 
     def __exit__(self, *args):
         import fcntl
+
         fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
         self._fd.close()
 
@@ -105,7 +118,10 @@ def _sanitize_for_pickle(value: Any) -> Any:
         except Exception:
             pass
         if isinstance(value, dict):
-            return {_sanitize_for_pickle(k): _sanitize_for_pickle(v) for k, v in value.items()}
+            return {
+                _sanitize_for_pickle(k): _sanitize_for_pickle(v)
+                for k, v in value.items()
+            }
         if isinstance(value, list):
             return [_sanitize_for_pickle(v) for v in value]
         if isinstance(value, tuple):
@@ -280,7 +296,9 @@ class SpatiallySparseConvConfig:
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_volume = kernel_volume
-        assert in_dtype in _SPARSE_CONV_CONFIG_DTYPE_TO_INT, f"Unsupported in_dtype: {in_dtype}"
+        assert (
+            in_dtype in _SPARSE_CONV_CONFIG_DTYPE_TO_INT
+        ), f"Unsupported in_dtype: {in_dtype}"
         self.in_dtype = in_dtype
         self.sm_capability = _get_sm_capability()
 
@@ -401,7 +419,9 @@ class GenericBenchmarkCache(Generic[K, V]):
         """
         self._on_merge_callbacks.append(callback)
 
-    def register_value_validator(self, namespace: str, validator: Callable[[V], None]) -> None:
+    def register_value_validator(
+        self, namespace: str, validator: Callable[[V], None]
+    ) -> None:
         """Register a validator for a namespace. Validator should raise ValueError/TypeError on invalid value."""
         if not callable(validator):
             raise TypeError("validator must be callable")
@@ -416,7 +436,9 @@ class GenericBenchmarkCache(Generic[K, V]):
         if self._save_thread is not None:
             return
         self._save_thread = threading.Thread(
-            target=self._background_save_worker, name="GenericBenchmarkCacheSaver", daemon=True
+            target=self._background_save_worker,
+            name="GenericBenchmarkCacheSaver",
+            daemon=True,
         )
         self._save_thread.start()
         logger.debug("Started background generic benchmark cache saver thread")
@@ -452,12 +474,16 @@ class GenericBenchmarkCache(Generic[K, V]):
                     result[ns_name] = _namespace_from_msgpack(pairs)  # type: ignore[assignment]
                 elif isinstance(pairs, dict):
                     # Should not happen with new format, but handle gracefully
-                    result[ns_name] = {_from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()}
+                    result[ns_name] = {
+                        _from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()
+                    }
             return result
         except Exception:
             return {}
 
-    def _write_cache_to_disk(self, namespaces: Dict[str, Dict[K, V]], timestamp: float) -> None:
+    def _write_cache_to_disk(
+        self, namespaces: Dict[str, Dict[K, V]], timestamp: float
+    ) -> None:
         """Serialize namespaces to msgpack and atomically write to disk."""
         serialized_ns: Dict[str, list] = {}
         for ns_name, ns_dict in namespaces.items():
@@ -549,7 +575,9 @@ class GenericBenchmarkCache(Generic[K, V]):
                     if isinstance(pairs, list):
                         result[ns_name] = _namespace_from_msgpack(pairs)  # type: ignore[assignment]
                     elif isinstance(pairs, dict):
-                        result[ns_name] = {_from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()}
+                        result[ns_name] = {
+                            _from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()
+                        }
                 return result
             else:
                 logger.warning(
@@ -612,7 +640,9 @@ class GenericBenchmarkCache(Generic[K, V]):
                         f"Failed to force save generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
                     )
 
-    def update_entry(self, namespace: str, key: K, value: V, force: bool = False) -> None:
+    def update_entry(
+        self, namespace: str, key: K, value: V, force: bool = False
+    ) -> None:
         if not _is_rank_zero():
             return
         with self.lock:
@@ -642,7 +672,9 @@ class GenericBenchmarkCache(Generic[K, V]):
         result = namespaces.get(namespace, {})
 
         if result:
-            logger.debug(f"Cache hit on disk for namespace '{namespace}': {len(result)} entries")
+            logger.debug(
+                f"Cache hit on disk for namespace '{namespace}': {len(result)} entries"
+            )
             # Update in-memory cache with disk results for future fast access
             with self.lock:
                 if namespace not in self._results:
@@ -817,16 +849,22 @@ def make_autotuned_op(
         if isinstance(v, list):
             for item in v:
                 if not isinstance(item, dict):
-                    raise TypeError("Each list item must be a dict with 'params' and 'metric'")
+                    raise TypeError(
+                        "Each list item must be a dict with 'params' and 'metric'"
+                    )
                 if "params" not in item or "metric" not in item:
-                    raise ValueError("Each list item must contain 'params' and 'metric' keys")
+                    raise ValueError(
+                        "Each list item must contain 'params' and 'metric' keys"
+                    )
                 if not isinstance(item["params"], dict):
                     raise TypeError("'params' must be a dict")
                 # metric must be a real number
                 if not isinstance(item["metric"], (int, float)):
                     raise TypeError("'metric' must be a number")
             return
-        raise TypeError("Cached value must be a dict (legacy) or a list of benchmark results")
+        raise TypeError(
+            "Cached value must be a dict (legacy) or a list of benchmark results"
+        )
 
     cache.register_value_validator(namespace, _validator)
 
@@ -878,7 +916,11 @@ def make_autotuned_op(
         cached = ns_map.get(key)
         if cached is not None:
             # Support both legacy dict and new list-of-results formats
-            if isinstance(cached, list) and len(cached) > 0 and isinstance(cached[0], dict):
+            if (
+                isinstance(cached, list)
+                and len(cached) > 0
+                and isinstance(cached[0], dict)
+            ):
                 best_params_raw = cached[0].get("params", {})
                 if not isinstance(best_params_raw, dict):
                     raise TypeError(
@@ -909,7 +951,9 @@ def make_autotuned_op(
         # Benchmark all candidates
         best_candidate: Optional[Dict[str, Any]] = None
         best_metric: Optional[float] = None
-        all_results: List[Dict[str, Any]] = []  # each entry: {"params": dict, "metric": float}
+        all_results: List[Dict[str, Any]] = (
+            []
+        )  # each entry: {"params": dict, "metric": float}
 
         # Use pre-materialized candidate list
         candidates: List[Dict[str, Any]] = _candidates_list

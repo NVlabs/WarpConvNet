@@ -35,7 +35,9 @@ class GridMemoryFormat(Enum):
 
     b_x_y_z_c = auto()
     b_c_x_y_z = auto()
-    b_c_z_x_y = auto()  # Channels, Z, X, Y which is consistent with the pytorch conv3d format
+    b_c_z_x_y = (
+        auto()
+    )  # Channels, Z, X, Y which is consistent with the pytorch conv3d format
 
     # Factorized 3D formats
     b_zc_x_y = auto()
@@ -133,7 +135,9 @@ class GridFeatures(Features):
             assert (
                 batched_tensor.ndim == 4
             ), f"Expected 4D tensor for b_zc_x_y format, got {batched_tensor.ndim}D"
-            assert num_channels is not None, "num_channels must be provided for b_zc_x_y format"
+            assert (
+                num_channels is not None
+            ), "num_channels must be provided for b_zc_x_y format"
             B, ZC, H, W = batched_tensor.shape
             D, _ = divmod(ZC, num_channels)
             C = num_channels
@@ -141,7 +145,9 @@ class GridFeatures(Features):
             assert (
                 batched_tensor.ndim == 4
             ), f"Expected 4D tensor for b_xc_y_z format, got {batched_tensor.ndim}D"
-            assert num_channels is not None, "num_channels must be provided for b_xc_y_z format"
+            assert (
+                num_channels is not None
+            ), "num_channels must be provided for b_xc_y_z format"
             B, XC, W, D = batched_tensor.shape
             H, _ = divmod(XC, num_channels)
             C = num_channels
@@ -149,7 +155,9 @@ class GridFeatures(Features):
             assert (
                 batched_tensor.ndim == 4
             ), f"Expected 4D tensor for b_yc_x_z format, got {batched_tensor.ndim}D"
-            assert num_channels is not None, "num_channels must be provided for b_yc_x_z format"
+            assert (
+                num_channels is not None
+            ), "num_channels must be provided for b_yc_x_z format"
             B, YC, H, D = batched_tensor.shape
             W, _ = divmod(YC, num_channels)
             C = num_channels
@@ -164,7 +172,9 @@ class GridFeatures(Features):
             ), f"Input grid_shape ({grid_shape}) does not match inferred grid_shape ({H}, {W}, {D})"
 
         # Batch size check
-        assert B == offsets.shape[0] - 1, f"Batch size mismatch: {B} != {offsets.shape[0] - 1}"
+        assert (
+            B == offsets.shape[0] - 1
+        ), f"Batch size mismatch: {B} != {offsets.shape[0] - 1}"
 
         # Initialize the parent class and save the attributes
         super().__init__(batched_tensor, offsets)
@@ -221,7 +231,10 @@ class GridFeatures(Features):
             return self.batched_tensor
 
         return convert_to_standard_format(
-            self.batched_tensor, self.memory_format, self._num_channels, self._grid_shape
+            self.batched_tensor,
+            self.memory_format,
+            self._num_channels,
+            self._grid_shape,
         )
 
     def to_memory_format(self, target_format: GridMemoryFormat) -> "GridFeatures":
@@ -279,9 +292,13 @@ class GridFeatures(Features):
             and (self.offsets == other.offsets).all()
         )
 
-    def to(self, device: torch.device, dtype: Optional[torch.dtype] = None) -> "GridFeatures":
+    def to(
+        self, device: torch.device, dtype: Optional[torch.dtype] = None
+    ) -> "GridFeatures":
         """Move the features to the specified device and optionally convert dtype."""
-        tensor = self.batched_tensor.to(device=device, dtype=dtype if dtype is not None else None)
+        tensor = self.batched_tensor.to(
+            device=device, dtype=dtype if dtype is not None else None
+        )
         offsets = self.offsets.to(device)
         return GridFeatures(
             tensor, offsets, self.memory_format, self._grid_shape, self._num_channels
@@ -371,7 +388,9 @@ class GridFeatures(Features):
             ), f"Spatial dimension W does not match: {W} != {grid_shape[1]}"
         elif memory_format == GridMemoryFormat.b_c_x_y_z:
             B, C, H, W, D = conv_output.shape
-            assert C == num_channels, f"Number of channels does not match: {C} != {num_channels}"
+            assert (
+                C == num_channels
+            ), f"Number of channels does not match: {C} != {num_channels}"
         else:
             raise ValueError(f"Unsupported memory format: {memory_format}")
         assert rem == 0, "Number of channels does not divide evenly"
@@ -434,21 +453,33 @@ def init_grid_feature(
     H, W, D = grid_shape
 
     if memory_format == GridMemoryFormat.b_x_y_z_c:
-        return torch.zeros((batch_size, H, W, D, num_channels), device=device, dtype=dtype)
+        return torch.zeros(
+            (batch_size, H, W, D, num_channels), device=device, dtype=dtype
+        )
 
     if memory_format == GridMemoryFormat.b_c_x_y_z:
-        return torch.zeros((batch_size, num_channels, H, W, D), device=device, dtype=dtype)
+        return torch.zeros(
+            (batch_size, num_channels, H, W, D), device=device, dtype=dtype
+        )
 
     if memory_format == GridMemoryFormat.b_c_z_x_y:
-        return torch.zeros((batch_size, num_channels, D, H, W), device=device, dtype=dtype)
+        return torch.zeros(
+            (batch_size, num_channels, D, H, W), device=device, dtype=dtype
+        )
 
     if memory_format == GridMemoryFormat.b_zc_x_y:
-        return torch.zeros((batch_size, D * num_channels, H, W), device=device, dtype=dtype)
+        return torch.zeros(
+            (batch_size, D * num_channels, H, W), device=device, dtype=dtype
+        )
 
     if memory_format == GridMemoryFormat.b_xc_y_z:
-        return torch.zeros((batch_size, H * num_channels, W, D), device=device, dtype=dtype)
+        return torch.zeros(
+            (batch_size, H * num_channels, W, D), device=device, dtype=dtype
+        )
 
     if memory_format == GridMemoryFormat.b_yc_x_z:
-        return torch.zeros((batch_size, W * num_channels, H, D), device=device, dtype=dtype)
+        return torch.zeros(
+            (batch_size, W * num_channels, H, D), device=device, dtype=dtype
+        )
 
     raise ValueError(f"Unsupported memory format: {memory_format}")

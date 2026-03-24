@@ -74,7 +74,9 @@ def grid_to_points(
         batch_coords = point_coords[start_idx:end_idx]
 
         # Normalize to [-1, 1] for grid_sample
-        batch_norm_coords = 2.0 * (batch_coords - grid_min) / (grid_max - grid_min) - 1.0
+        batch_norm_coords = (
+            2.0 * (batch_coords - grid_min) / (grid_max - grid_min) - 1.0
+        )
 
         # Reshape for grid_sample
         batch_norm_coords = batch_norm_coords.unsqueeze(1).unsqueeze(1)  # [N, 1, 1, 3]
@@ -88,10 +90,18 @@ def grid_to_points(
             align_corners=True,
         )  # [1, C, N, 1, 1]
         # Assert the dimensions are correct
-        assert sampled_features.shape == (1, grid.num_channels, end_idx - start_idx, 1, 1)
+        assert sampled_features.shape == (
+            1,
+            grid.num_channels,
+            end_idx - start_idx,
+            1,
+            1,
+        )
 
         # Reshape to [N, C]
-        batch_point_features = sampled_features.squeeze(-1).squeeze(-1).squeeze(0).permute(1, 0)
+        batch_point_features = (
+            sampled_features.squeeze(-1).squeeze(-1).squeeze(0).permute(1, 0)
+        )
 
         # Set output features
         out_point_features[start_idx:end_idx] = batch_point_features

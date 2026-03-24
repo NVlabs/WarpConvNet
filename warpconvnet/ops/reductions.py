@@ -21,7 +21,9 @@ class REDUCTIONS(Enum):
     RANDOM = "random"
 
 
-REDUCTION_TYPES_STR = Literal["min", "max", "mean", "sum", "mul", "var", "std", "random"]
+REDUCTION_TYPES_STR = Literal[
+    "min", "max", "mean", "sum", "mul", "var", "std", "random"
+]
 
 
 def _var(
@@ -61,7 +63,9 @@ def row_reduction(
     elif reduction == REDUCTIONS.RANDOM:
         num_per_row = row_offsets.diff()
         rand_idx = (
-            (torch.rand(len(num_per_row), device=num_per_row.device) * num_per_row).floor().long()
+            (torch.rand(len(num_per_row), device=num_per_row.device) * num_per_row)
+            .floor()
+            .long()
         )
         sample_idx = rand_idx + row_offsets[:-1]
         out_feature = features[sample_idx.to(features.device)]

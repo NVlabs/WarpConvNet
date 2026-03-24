@@ -18,9 +18,9 @@ def random_sample_per_batch(
     num_points = offsets.diff()
     batch_size = len(num_points)
     # sample sample_points per batch. BxN
-    sampled_indices = torch.floor(torch.rand(batch_size, num_samples) * num_points.view(-1, 1)).to(
-        torch.int32
-    )
+    sampled_indices = torch.floor(
+        torch.rand(batch_size, num_samples) * num_points.view(-1, 1)
+    ).to(torch.int32)
     # Add offsets
     sampled_indices = sampled_indices + offsets[:-1].view(-1, 1)
     sampled_indices = sampled_indices.view(-1)

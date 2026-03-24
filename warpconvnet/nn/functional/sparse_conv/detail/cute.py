@@ -42,7 +42,9 @@ def _cute_implicit_gemm_forward_logic(
     # C/D output dtype: use min_dtype for 16-true, float32 for 16-mixed.
     # We match the output dtype to the compute dtype (min_dtype) so that
     # the kernel writes directly in the desired precision without extra casts.
-    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    out_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    )
 
     if iden_idx is not None:
         output_feature_tensor = torch.matmul(
@@ -84,7 +86,9 @@ def _cute_implicit_gemm_backward_logic(
     kernel_map: IntSearchResult,
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
-) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
+) -> Union[
+    Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]
+]:
     """Backward pass leveraging CuTe 3.x GEMM kernels with inner autotune."""
     assert (
         _C is not None and cute_gemm_AD_gather_scatter_autotuned is not None
@@ -101,7 +105,9 @@ def _cute_implicit_gemm_backward_logic(
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
     # Output dtype: match compute precision for 16-true, float32 for 16-mixed
-    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    out_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    )
     grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
 
     iden_idx = kernel_map.identity_map_index
@@ -213,8 +219,12 @@ class SpatiallySparseConvCuteImplicitGEMMFunction(Function):
         N_in, C_in = in_features.shape
         K, _, C_out = weight.shape
         if K == 0 or C_in == 0 or C_out == 0 or N_in == 0 or grad_output.shape[0] == 0:
-            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            grad_in_final = (
+                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            )
+            grad_weight_final = (
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            )
             return _pad_tuple(grad_in_final, grad_weight_final, 4)
 
         grad_in_features, grad_weight = _cute_implicit_gemm_backward_logic(

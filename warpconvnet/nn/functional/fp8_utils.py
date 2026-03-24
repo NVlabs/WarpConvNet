@@ -26,7 +26,9 @@ import torch
 # FP8 dtype availability check
 # ---------------------------------------------------------------------------
 
-_FP8_DTYPES_AVAILABLE = hasattr(torch, "float8_e4m3fn") and hasattr(torch, "float8_e5m2")
+_FP8_DTYPES_AVAILABLE = hasattr(torch, "float8_e4m3fn") and hasattr(
+    torch, "float8_e5m2"
+)
 
 # Maximum representable values for each FP8 format.
 # E4M3FN: sign(1) exp(4) mantissa(3), no inf/nan encoding => max = 448.0
@@ -88,7 +90,9 @@ def quantize_to_fp8(
     _check_fp8_available()
 
     if fp8_format not in _FP8_FORMAT_INFO:
-        raise ValueError(f"Unknown fp8_format '{fp8_format}'. Must be 'e4m3' or 'e5m2'.")
+        raise ValueError(
+            f"Unknown fp8_format '{fp8_format}'. Must be 'e4m3' or 'e5m2'."
+        )
 
     info = _FP8_FORMAT_INFO[fp8_format]
     fp8_dtype = info["dtype"]

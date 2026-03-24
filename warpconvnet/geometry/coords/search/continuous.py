@@ -9,7 +9,10 @@ from torch import Tensor
 
 from warpconvnet.geometry.coords.search.knn import batched_knn_search
 from warpconvnet.geometry.coords.search.radius import batched_radius_search
-from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig, RealSearchMode
+from warpconvnet.geometry.coords.search.search_configs import (
+    RealSearchConfig,
+    RealSearchMode,
+)
 from warpconvnet.geometry.coords.search.search_results import RealSearchResult
 
 
@@ -31,7 +34,9 @@ def neighbor_search(
         NeighborSearchReturn
     """
     if search_args.mode == RealSearchMode.RADIUS:
-        assert search_args.radius is not None, "Radius must be provided for radius search"
+        assert (
+            search_args.radius is not None
+        ), "Radius must be provided for radius search"
         neighbor_index, neighbor_distance, neighbor_split = batched_radius_search(
             ref_positions=ref_positions,
             ref_offsets=ref_offsets,

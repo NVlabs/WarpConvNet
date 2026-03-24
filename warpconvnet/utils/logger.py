@@ -55,7 +55,9 @@ class RankedLogger(logging.LoggerAdapter):
         self.rank_zero_only = rank_zero_only
         self.rank = _get_current_rank()  # Use consistent rank detection
 
-    def log(self, level: int, msg: str, rank: Optional[int] = None, *args, **kwargs) -> None:
+    def log(
+        self, level: int, msg: str, rank: Optional[int] = None, *args, **kwargs
+    ) -> None:
         if self.isEnabledFor(level):
             msg, kwargs = self.process(msg, kwargs)
             current_rank = _get_current_rank()  # Get rank dynamically for accuracy
@@ -125,7 +127,9 @@ def get_logger(name: str = None, rank_zero_only: bool = True) -> RankedLogger:
             "ERROR": logging.ERROR,
             "CRITICAL": logging.CRITICAL,
         }
-        level = log_levels.get(log_level_name, logging.INFO)  # Default to INFO if invalid
+        level = log_levels.get(
+            log_level_name, logging.INFO
+        )  # Default to INFO if invalid
         logger.setLevel(level)
 
         # Prevent propagation to avoid duplicate logs

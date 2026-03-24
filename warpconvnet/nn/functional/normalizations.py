@@ -38,7 +38,9 @@ class SegmentedRangeNormFunction(Function):
             d_offsets = row_offsets.to(features.device).int()
 
             numerator = torch.empty_like(features)
-            _C.utils.segmented_arithmetic(features, min_val, numerator, d_offsets, "sub")
+            _C.utils.segmented_arithmetic(
+                features, min_val, numerator, d_offsets, "sub"
+            )
 
             out = torch.empty_like(features)
             _C.utils.segmented_arithmetic(numerator, diff, out, d_offsets, "div")
@@ -69,19 +71,25 @@ class SegmentedRangeNormFunction(Function):
 
             # grad_features = grad_out / diff
             grad_features = torch.empty_like(grad_out)
-            _C.utils.segmented_arithmetic(grad_out, diff, grad_features, d_offsets, "div")
+            _C.utils.segmented_arithmetic(
+                grad_out, diff, grad_features, d_offsets, "div"
+            )
 
             # term for max gradient: -grad_out * out / diff
             term_max = grad_out * out
             term_max_div = torch.empty_like(term_max)
-            _C.utils.segmented_arithmetic(term_max, diff, term_max_div, d_offsets, "div")
+            _C.utils.segmented_arithmetic(
+                term_max, diff, term_max_div, d_offsets, "div"
+            )
 
             # grad_max = sum(-term_max_div)
             grad_max = segment_csr(-term_max_div, row_offsets, reduce="sum")
 
             # grad_min = sum(term_max_div - grad_features)
             # Derived from: (grad_out * out - grad_out) / diff
-            grad_min = segment_csr(term_max_div - grad_features, row_offsets, reduce="sum")
+            grad_min = segment_csr(
+                term_max_div - grad_features, row_offsets, reduce="sum"
+            )
 
         else:
             # CPU fallback
@@ -277,4 +285,6 @@ def segmented_range_norm(
     min_val = segment_csr(features, row_offsets, reduce="min")
     max_val = segment_csr(features, row_offsets, reduce="max")
 
-    return SegmentedRangeNormFunction.apply(features, min_val, max_val, row_offsets, eps)
+    return SegmentedRangeNormFunction.apply(
+        features, min_val, max_val, row_offsets, eps
+    )

@@ -157,7 +157,9 @@ class GridCoords(Coords):
         # Create the offset using the batch size and grid shape
         num_elements = np.prod(grid_shape)
         offsets = torch.tensor(
-            [i * num_elements for i in range(batch_size + 1)], dtype=torch.long, device="cpu"
+            [i * num_elements for i in range(batch_size + 1)],
+            dtype=torch.long,
+            device="cpu",
         )
 
         lazy_init = GridCoordsLazyInit(
@@ -274,7 +276,11 @@ class GridCoords(Coords):
         if not self.is_initialized:
             lazy_init = self._lazy_params.replace(dtype=torch.float16)
             return GridCoords.from_tensor(
-                self.batched_tensor.half(), self.offsets, self.grid_shape, self.bounds, lazy_init
+                self.batched_tensor.half(),
+                self.offsets,
+                self.grid_shape,
+                self.bounds,
+                lazy_init,
             )
         return super().half()
 
@@ -282,7 +288,11 @@ class GridCoords(Coords):
         if not self.is_initialized:
             lazy_init = self._lazy_params.replace(dtype=torch.float32)
             return GridCoords.from_tensor(
-                self.batched_tensor.float(), self.offsets, self.grid_shape, self.bounds, lazy_init
+                self.batched_tensor.float(),
+                self.offsets,
+                self.grid_shape,
+                self.bounds,
+                lazy_init,
             )
         return super().float()
 
@@ -290,7 +300,11 @@ class GridCoords(Coords):
         if not self.is_initialized:
             lazy_init = self._lazy_params.replace(dtype=torch.float64)
             return GridCoords.from_tensor(
-                self.batched_tensor.double(), self.offsets, self.grid_shape, self.bounds, lazy_init
+                self.batched_tensor.double(),
+                self.offsets,
+                self.grid_shape,
+                self.bounds,
+                lazy_init,
             )
         return super().double()
 

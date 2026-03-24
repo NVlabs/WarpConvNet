@@ -24,7 +24,11 @@ from warpconvnet.nn.modules.mlp import Linear
 from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.sequential import Sequential
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper, SparseMaxPool, SparseUnpool
+from warpconvnet.nn.modules.sparse_pool import (
+    PointToSparseWrapper,
+    SparseMaxPool,
+    SparseUnpool,
+)
 
 
 class MLP(nn.Module):
@@ -110,7 +114,9 @@ class PatchAttentionBlock(BaseSpatialModule):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(self, x: Geometry, order: Optional[POINT_ORDERING | str] = None) -> Geometry:
+    def forward(
+        self, x: Geometry, order: Optional[POINT_ORDERING | str] = None
+    ) -> Geometry:
         x = self.conv(x) + self.conv_shortcut(x)
 
         # Attention block

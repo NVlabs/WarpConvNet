@@ -130,7 +130,9 @@ class PointConv(BaseSpatialModule):
             assert (
                 pooling_reduction is None and pooling_voxel_size is None
             ), "pooling_reduction and pooling_voxel_size must be None for same type"
-            assert provided_in_channels is None, "provided_in_channels must be None for same type"
+            assert (
+                provided_in_channels is None
+            ), "provided_in_channels must be None for same type"
         if (
             pooling_reduction is not None
             and pooling_voxel_size is not None
@@ -151,7 +153,9 @@ class PointConv(BaseSpatialModule):
         self.neighbor_search_args = neighbor_search_args
         self.pooling_reduction = pooling_reduction
         self.pooling_voxel_size = pooling_voxel_size
-        self.positional_encoding = SinusoidalEncoding(pos_encode_dim, data_range=pos_encode_range)
+        self.positional_encoding = SinusoidalEncoding(
+            pos_encode_dim, data_range=pos_encode_range
+        )
         # When down voxel size is not None, there will be out_point_features will be provided as an additional input
         if provided_in_channels is None:
             provided_in_channels = in_channels

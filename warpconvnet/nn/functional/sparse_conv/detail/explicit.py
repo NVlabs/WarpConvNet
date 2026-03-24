@@ -155,7 +155,9 @@ def _explicit_gemm_forward_grouped(
         total_pairs = cat_in.shape[0]
 
         # Vectorized gather: scatter features into padded buffer via flat indices
-        gathered_flat = torch.zeros(B * max_m, C_in, device=device, dtype=comp_in_feats.dtype)
+        gathered_flat = torch.zeros(
+            B * max_m, C_in, device=device, dtype=comp_in_feats.dtype
+        )
         gathered_flat[flat_idx] = comp_in_feats[cat_in]
         gathered = gathered_flat.view(B, max_m, C_in)
 
@@ -231,8 +233,12 @@ def _explicit_gemm_backward_grouped(
         B = len(bucket_offsets)
 
         # Vectorized gather of grad_output and in_features
-        gathered_grad_flat = torch.zeros(B * max_m, C_out, device=device, dtype=dtype_to_use)
-        gathered_in_flat = torch.zeros(B * max_m, C_in, device=device, dtype=dtype_to_use)
+        gathered_grad_flat = torch.zeros(
+            B * max_m, C_out, device=device, dtype=dtype_to_use
+        )
+        gathered_in_flat = torch.zeros(
+            B * max_m, C_in, device=device, dtype=dtype_to_use
+        )
         gathered_grad_flat[flat_idx] = comp_grad_output[cat_out]
         gathered_in_flat[flat_idx] = comp_in_feats[cat_in]
 
@@ -307,8 +313,12 @@ class SpatiallySparseConvExplicitGEMMFunction(Function):
         K, _, C_out = weight.shape
         # Assuming num_out_coords was implicitly handled by grad_output.shape[0] in original explicit backward
         if K == 0 or C_in == 0 or C_out == 0 or N_in == 0 or grad_output.shape[0] == 0:
-            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            grad_in_final = (
+                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            )
+            grad_weight_final = (
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            )
             return _pad_tuple(grad_in_final, grad_weight_final, 5)
 
         grad_in_features, grad_weight = _explicit_gemm_backward_logic(

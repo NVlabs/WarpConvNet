@@ -40,7 +40,9 @@ class RealSearchResult:
                 0, M * K + 1, K, device=args[0].device, dtype=torch.long
             )
         else:
-            raise ValueError("NeighborSearchReturn must be initialized with 1 or 2 arguments")
+            raise ValueError(
+                "NeighborSearchReturn must be initialized with 1 or 2 arguments"
+            )
 
     def to(self, device: str | int | torch.device):
         self.neighbor_indices.to(device)
@@ -77,7 +79,9 @@ class IntSearchResult:
         self.identity_map_index = identity_map_index
 
     @torch.no_grad()
-    def __getitem__(self, idx: int) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821
         start, end = self.offsets[idx], self.offsets[idx + 1]
         return self.in_maps[start:end], self.out_maps[start:end]
 

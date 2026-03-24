@@ -8,14 +8,14 @@ import torch.distributed as dist
 
 def _get_current_rank() -> int:
     """Get current process rank for distributed training.
-    
+
     This function checks multiple sources for rank information in order of preference:
     1. RANK environment variable (set by torchrun)
     2. LOCAL_RANK + WORLD_SIZE environment variables
     3. SLURM_PROCID environment variable (for SLURM environments)
     4. PyTorch distributed rank (if initialized)
     5. Default to 0
-    
+
     Returns:
         int: The current process rank
     """
@@ -39,7 +39,7 @@ def _is_rank_zero() -> bool:
 
 def get_world_size() -> int:
     """Get the total number of processes in distributed training.
-    
+
     Returns:
         int: The world size (total number of processes)
     """
@@ -53,7 +53,7 @@ def get_world_size() -> int:
 
 def is_distributed() -> bool:
     """Check if we're running in distributed mode.
-    
+
     Returns:
         bool: True if running in distributed mode, False otherwise
     """

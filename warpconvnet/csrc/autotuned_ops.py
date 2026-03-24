@@ -7,7 +7,10 @@ import math
 import torch
 
 import warpconvnet._C as _C
-from warpconvnet.utils.benchmark_cache import make_autotuned_op, make_status_timing_runner
+from warpconvnet.utils.benchmark_cache import (
+    make_autotuned_op,
+    make_status_timing_runner,
+)
 
 
 def _dtype_name(dtype: torch.dtype) -> str:
@@ -167,7 +170,9 @@ if _HAS_CUTLASS_GEMM:
         c_fn=_C.gemm.cutlass_gemm_trAB_gather,
         param_space=_BENCHMARK_TRAB_GATHER_PARAMS,
         key_fn=_key_trAB_gather,
-        run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_trAB_gather, (2, 3)),
+        run_and_time_fn=_status_runner_factory(
+            _C.gemm.cutlass_gemm_trAB_gather, (2, 3)
+        ),
         record_failures_as_inf=False,
     )
 
@@ -176,7 +181,9 @@ if _HAS_CUTLASS_GEMM:
         c_fn=_C.gemm.cutlass_gemm_AD_gather_scatter,
         param_space=_BENCHMARK_AD_GATHER_SCATTER_PARAMS,
         key_fn=_key_AD_gather_scatter,
-        run_and_time_fn=_status_runner_factory(_C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)),
+        run_and_time_fn=_status_runner_factory(
+            _C.gemm.cutlass_gemm_AD_gather_scatter, (2, 3)
+        ),
         record_failures_as_inf=False,
     )
 else:
@@ -225,7 +232,16 @@ def _key_cute_AD_gather_scatter(
     len_d = int(indices_d.numel())
     log_len_a = int(math.ceil(math.log2(len_a))) if len_a > 0 else 0
     log_len_d = int(math.ceil(math.log2(len_d))) if len_d > 0 else 0
-    return ("cute_gemm_AD_gather_scatter", sm, dtype, out_dtype, K, N, log_len_a, log_len_d)
+    return (
+        "cute_gemm_AD_gather_scatter",
+        sm,
+        dtype,
+        out_dtype,
+        K,
+        N,
+        log_len_a,
+        log_len_d,
+    )
 
 
 def _key_cute_trAB_gather(
@@ -268,7 +284,9 @@ def _build_cute_staged_params() -> list:
                 for cp in [False, True]:
                     if s == 2 and not cp:
                         continue  # Already covered by base params
-                    staged.append({"mma_tile": tile, "num_stages": s, "use_cp_async": cp})
+                    staged.append(
+                        {"mma_tile": tile, "num_stages": s, "use_cp_async": cp}
+                    )
     return staged
 
 
@@ -411,11 +429,22 @@ def _key_cute_sm90_AD_gather_scatter(
     len_d = int(indices_d.numel())
     log_len_a = int(math.ceil(math.log2(len_a))) if len_a > 0 else 0
     log_len_d = int(math.ceil(math.log2(len_d))) if len_d > 0 else 0
-    return ("cute_gemm_sm90_AD_gather_scatter", sm, dtype, out_dtype, K, N, log_len_a, log_len_d)
+    return (
+        "cute_gemm_sm90_AD_gather_scatter",
+        sm,
+        dtype,
+        out_dtype,
+        K,
+        N,
+        log_len_a,
+        log_len_d,
+    )
 
 
 # SM90 tile options: 100 (64x128x64), 101 (128x128x64), 102 (128x256x64), 103 (256x128x64)
-_BENCHMARK_SM90_AD_GATHER_SCATTER_PARAMS = [{"mma_tile": tile} for tile in [100, 101, 102, 103]]
+_BENCHMARK_SM90_AD_GATHER_SCATTER_PARAMS = [
+    {"mma_tile": tile} for tile in [100, 101, 102, 103]
+]
 
 if _HAS_CUTE_SM90:
     cute_gemm_sm90_AD_gather_scatter_autotuned = make_autotuned_op(
@@ -423,7 +452,9 @@ if _HAS_CUTE_SM90:
         c_fn=_C.gemm.cute_gemm_sm90_AD_gather_scatter,
         param_space=_BENCHMARK_SM90_AD_GATHER_SCATTER_PARAMS,
         key_fn=_key_cute_sm90_AD_gather_scatter,
-        run_and_time_fn=_status_runner_factory(_C.gemm.cute_gemm_sm90_AD_gather_scatter, (2, 3)),
+        run_and_time_fn=_status_runner_factory(
+            _C.gemm.cute_gemm_sm90_AD_gather_scatter, (2, 3)
+        ),
         record_failures_as_inf=False,
     )
 else:

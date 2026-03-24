@@ -7,7 +7,9 @@ from typing import List, Tuple, Union, Any
 import torch
 
 
-def ntuple(x: Union[int, List[int], Tuple[int, ...], torch.Tensor], ndim: int) -> Tuple[int, ...]:
+def ntuple(
+    x: Union[int, List[int], Tuple[int, ...], torch.Tensor], ndim: int
+) -> Tuple[int, ...]:
     if isinstance(x, int):
         x = tuple(repeat(x, ndim))
     elif isinstance(x, list):

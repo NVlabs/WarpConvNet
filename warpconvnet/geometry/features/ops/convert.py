@@ -27,7 +27,9 @@ def cat_to_pad_tensor(
     return copy_batch_torch(in_features, row_splits, pad_multiple)
 
 
-def cat_to_pad(cat_features: "CatFeatures", pad_multiple: Optional[int] = None) -> "PadFeatures":
+def cat_to_pad(
+    cat_features: "CatFeatures", pad_multiple: Optional[int] = None
+) -> "PadFeatures":
     """Convert concatenated features to padded format."""
     from ..pad import PadFeatures
     from ..cat import CatFeatures
@@ -60,9 +62,9 @@ def pad_to_cat_tensor(
         device=in_features.device,
     )
     for batch_idx, num_points_in_batch in enumerate(num_points):
-        out_features[row_splits[batch_idx] : row_splits[batch_idx + 1]] = in_features[batch_idx][
-            :num_points_in_batch
-        ]
+        out_features[row_splits[batch_idx] : row_splits[batch_idx + 1]] = in_features[
+            batch_idx
+        ][:num_points_in_batch]
     return out_features
 
 
@@ -70,7 +72,9 @@ def pad_to_cat(pad_features: "PadFeatures") -> "CatFeatures":
     """Convert padded features to concatenated format."""
     from ..cat import CatFeatures
 
-    batched_tensor = pad_to_cat_tensor(pad_features.batched_tensor, pad_features.offsets)
+    batched_tensor = pad_to_cat_tensor(
+        pad_features.batched_tensor, pad_features.offsets
+    )
     return CatFeatures(batched_tensor, pad_features.offsets)
 
 
@@ -100,5 +104,6 @@ def to_batched_features(
         else:
             valid_types_str = ", ".join([t.__name__ for t in valid_types])
             raise TypeError(
-                f"Features must be a tensor or one of {valid_types_str}, " f"got {type(features)}"
+                f"Features must be a tensor or one of {valid_types_str}, "
+                f"got {type(features)}"
             )

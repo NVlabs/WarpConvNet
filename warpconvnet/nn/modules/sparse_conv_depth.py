@@ -157,7 +157,9 @@ class SpatiallySparseDepthwiseConv(BaseSpatialModule):
         fan_in, fan_out = self._calculate_fan_in_and_fan_out()
         return fan_in if mode == "fan_in" else fan_out
 
-    def _custom_kaiming_uniform_(self, tensor, a=0.0, mode="fan_in", nonlinearity="leaky_relu"):
+    def _custom_kaiming_uniform_(
+        self, tensor, a=0.0, mode="fan_in", nonlinearity="leaky_relu"
+    ):
         """Custom Kaiming uniform initialization for depthwise convolution."""
         fan = self._calculate_correct_fan(mode)
         gain = calculate_gain(nonlinearity, a)
@@ -196,16 +198,18 @@ class SpatiallySparseDepthwiseConv(BaseSpatialModule):
             Output sparse tensor
         """
         # Generate output coordinates and kernel map
-        batch_indexed_out_coords, out_offsets, kernel_map = generate_output_coords_and_kernel_map(
-            input_sparse_tensor=input_sparse_tensor,
-            kernel_size=self.kernel_size,
-            kernel_dilation=self.dilation,
-            stride=self.stride,
-            generative=self.generative,
-            transposed=self.transposed,
-            output_spatially_sparse_tensor=output_spatially_sparse_tensor,
-            stride_mode=self.stride_mode,
-            order=self.order,
+        batch_indexed_out_coords, out_offsets, kernel_map = (
+            generate_output_coords_and_kernel_map(
+                input_sparse_tensor=input_sparse_tensor,
+                kernel_size=self.kernel_size,
+                kernel_dilation=self.dilation,
+                stride=self.stride,
+                generative=self.generative,
+                transposed=self.transposed,
+                output_spatially_sparse_tensor=output_spatially_sparse_tensor,
+                stride_mode=self.stride_mode,
+                order=self.order,
+            )
         )
 
         num_out_coords = batch_indexed_out_coords.shape[0]
@@ -231,7 +235,9 @@ class SpatiallySparseDepthwiseConv(BaseSpatialModule):
             in_tensor_stride = (1,) * self.num_spatial_dims
 
         if not self.transposed:
-            out_tensor_stride = tuple(o * s for o, s in zip(self.stride, in_tensor_stride))
+            out_tensor_stride = tuple(
+                o * s for o, s in zip(self.stride, in_tensor_stride)
+            )
         else:
             if (
                 output_spatially_sparse_tensor is not None

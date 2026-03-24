@@ -9,7 +9,9 @@ from torch.utils.data import Dataset
 
 from warpconvnet.geometry.coords.ops.voxel import voxel_downsample_np
 
-SCANNET_URL = "https://cvg-data.inf.ethz.ch/openscene/data/scannet_processed/scannet_3d.zip"
+SCANNET_URL = (
+    "https://cvg-data.inf.ethz.ch/openscene/data/scannet_processed/scannet_3d.zip"
+)
 
 
 class ScanNetDataset(Dataset):
@@ -63,7 +65,9 @@ class ScanNetDataset(Dataset):
         # All to tensor
         if self.voxel_size is not None:
             # Use cpu for downsampling in dataloader. Should use multiple workers.
-            unique_coords, to_unique_indices = voxel_downsample_np(coords, self.voxel_size)
+            unique_coords, to_unique_indices = voxel_downsample_np(
+                coords, self.voxel_size
+            )
             if self.out_type == "point":
                 unique_coords = coords[to_unique_indices]
             return {

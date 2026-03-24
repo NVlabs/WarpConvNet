@@ -181,7 +181,9 @@ class PointUnpool(BaseSpatialModule):
 
     def __init__(
         self,
-        unpooling_mode: Union[str, FEATURE_UNPOOLING_MODE] = FEATURE_UNPOOLING_MODE.REPEAT,
+        unpooling_mode: Union[
+            str, FEATURE_UNPOOLING_MODE
+        ] = FEATURE_UNPOOLING_MODE.REPEAT,
         concat_unpooled_pc: bool = False,
     ):
         super().__init__()

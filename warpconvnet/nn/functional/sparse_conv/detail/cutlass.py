@@ -52,7 +52,9 @@ def _cutlass_implicit_gemm_forward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
+        output_feature_tensor = torch.matmul(
+            _in_features_detached, _weight_detached[iden_idx]
+        )
     else:
         output_feature_tensor = torch.zeros(
             num_out_coords, weight.shape[-1], device=device, dtype=min_dtype
@@ -91,7 +93,9 @@ def _cutlass_implicit_gemm_backward_logic(
     accumulator_type: torch.dtype = torch.float32,
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
-) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
+) -> Union[
+    Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]
+]:
     """Backward pass leveraging CUTLASS implicit GEMM kernels with inner autotune."""
     assert (
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
@@ -115,8 +119,12 @@ def _cutlass_implicit_gemm_backward_logic(
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
-        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
-        grad_weight[iden_idx] = torch.matmul(_in_features_detached.T, _grad_output_detached)
+        grad_in_features = torch.matmul(
+            _grad_output_detached, _weight_detached[iden_idx].T
+        )
+        grad_weight[iden_idx] = torch.matmul(
+            _in_features_detached.T, _grad_output_detached
+        )
     else:
         grad_in_features = torch.zeros_like(_in_features_detached, device=device)
 
@@ -194,7 +202,9 @@ def _cutlass_implicit_gemm_forward_grouped(
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx])
+        output_feature_tensor = torch.matmul(
+            _in_features_detached, _weight_detached[iden_idx]
+        )
     else:
         output_feature_tensor = torch.zeros(
             num_out_coords, weight.shape[-1], device=device, dtype=min_dtype
@@ -268,7 +278,9 @@ def _cutlass_implicit_gemm_backward_grouped(
     device: torch.device = None,
     grouping_threshold: float = 0.1,
     saturation_m: int = 5000,
-) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
+) -> Union[
+    Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]
+]:
     """Backward: CUTLASS for large offsets, torch.bmm for grouped small offsets."""
     assert (
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
@@ -294,8 +306,12 @@ def _cutlass_implicit_gemm_backward_grouped(
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
-        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
-        grad_weight[iden_idx] = torch.matmul(_in_features_detached.T, _grad_output_detached)
+        grad_in_features = torch.matmul(
+            _grad_output_detached, _weight_detached[iden_idx].T
+        )
+        grad_weight[iden_idx] = torch.matmul(
+            _in_features_detached.T, _grad_output_detached
+        )
     else:
         grad_in_features = torch.zeros_like(_in_features_detached, device=device)
 
@@ -354,7 +370,9 @@ def _cutlass_implicit_gemm_backward_grouped(
         B = len(bucket_offsets)
 
         # Vectorized gather of grad_output and in_features
-        gathered_grad_flat = torch.zeros(B * max_m, C_out, device=device, dtype=min_dtype)
+        gathered_grad_flat = torch.zeros(
+            B * max_m, C_out, device=device, dtype=min_dtype
+        )
         gathered_in_flat = torch.zeros(B * max_m, C_in, device=device, dtype=min_dtype)
         gathered_grad_flat[flat_idx] = _grad_output_detached[cat_out]
         gathered_in_flat[flat_idx] = _in_features_detached[cat_in]
@@ -437,8 +455,12 @@ class SpatiallySparseConvCutlassImplicitGEMMFunction(Function):
         K, _, C_out = weight.shape
         # Assuming num_out_coords was implicitly handled by grad_output.shape[0] in original explicit backward
         if K == 0 or C_in == 0 or C_out == 0 or N_in == 0 or grad_output.shape[0] == 0:
-            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            grad_in_final = (
+                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            )
+            grad_weight_final = (
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            )
             return _pad_tuple(grad_in_final, grad_weight_final, 9)
 
         grad_in_features, grad_weight = _cutlass_implicit_gemm_backward_logic(

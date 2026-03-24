@@ -38,7 +38,9 @@ class RealCoords(Coords):
         """
         Downsample the coordinates to the specified number of points
         """
-        sampled_indices, sample_offsets = random_sample_per_batch(self.offsets, sample_points)
+        sampled_indices, sample_offsets = random_sample_per_batch(
+            self.offsets, sample_points
+        )
         return self.__class__(
             batched_tensor=self.batched_tensor[sampled_indices], offsets=sample_offsets
         )
@@ -54,7 +56,9 @@ class RealCoords(Coords):
         if query_coords is None:
             query_coords = self
 
-        assert isinstance(query_coords, Coords), "query_coords must be BatchedCoordinates"
+        assert isinstance(
+            query_coords, Coords
+        ), "query_coords must be BatchedCoordinates"
 
         return neighbor_search(
             self.batched_tensor,

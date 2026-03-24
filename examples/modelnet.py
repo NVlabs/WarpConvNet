@@ -91,11 +91,15 @@ class UseAllConvNet(nn.Module):
         )
 
     def forward(self, x: Float[Tensor, "B N 3"]) -> Float[Tensor, "B 40"]:
-        pc: Points = Points.from_list_of_coordinates(x, encoding_channels=8, encoding_range=1)
+        pc: Points = Points.from_list_of_coordinates(
+            x, encoding_channels=8, encoding_range=1
+        )
         pc = self.point_conv(pc)
         st: Voxels = pc.to_voxels(reduction=REDUCTIONS.MEAN, voxel_size=self.voxel_size)
         st = self.sparse_conv(st)
-        dt: Tensor = st.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=(4, 4, 4))
+        dt: Tensor = st.to_dense(
+            channel_dim=1, min_coords=(-5, -5, -5), max_coords=(4, 4, 4)
+        )
         return self.dense_conv(dt)
 
 
@@ -118,7 +122,9 @@ def test(model, device, test_loader):
     correct = 0
     with torch.no_grad():
         for data_dict in tqdm(test_loader):
-            data, target = data_dict["coords"].to(device), data_dict["labels"].to(device)
+            data, target = data_dict["coords"].to(device), data_dict["labels"].to(
+                device
+            )
             output = model(data)
             test_loss += F.cross_entropy(output, target, reduction="sum").item()
             pred = output.argmax(dim=1, keepdim=True)
@@ -143,7 +149,9 @@ def main(
     device: str = "cuda",
 ):
     wp.init()
-    device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
+    device = torch.device(
+        device if torch.cuda.is_available() and device == "cuda" else "cpu"
+    )
 
     train_dataset = ModelNet40Dataset(root_dir, split="train")
     test_dataset = ModelNet40Dataset(root_dir, split="test")

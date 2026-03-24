@@ -30,5 +30,7 @@ def random_sample(
     rand_indices = (num_points.view(B, 1) * rand_ratios).floor().int()
     rand_indices = rand_indices + batch_offsets[:-1].view(B, 1)
     indices = rand_indices.view(-1)
-    sample_offsets = torch.arange(B + 1, device=num_points.device) * num_samples_per_batch
+    sample_offsets = (
+        torch.arange(B + 1, device=num_points.device) * num_samples_per_batch
+    )
     return indices, sample_offsets
