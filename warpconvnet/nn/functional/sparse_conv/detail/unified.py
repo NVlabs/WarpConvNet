@@ -37,6 +37,10 @@ from .cutlass import (
     _cutlass_implicit_gemm_forward_grouped,
     _cutlass_implicit_gemm_backward_grouped,
 )
+from .mask_gemm import (
+    _mask_implicit_gemm_forward_logic,
+    _mask_implicit_gemm_backward_logic,
+)
 from .algo_params import (
     SPARSE_CONV_FWD_ALGO_MODE,
     SPARSE_CONV_BWD_ALGO_MODE,
@@ -233,13 +237,24 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
             chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
 
-        # Step 5: Execute with optimal algorithm and parameters
+        # Step 5: Pre-cast weight once (avoids per-algorithm re-casting)
+        if compute_dtype is not None:
+            _weight_cast = weight.contiguous().to(dtype=compute_dtype)
+        else:
+            _weight_cast = weight.contiguous()
+
+        logger.debug(
+            f"[dispatch] FWD algo={chosen_fwd_algo} params={chosen_fwd_params} "
+            f"N_in={in_features.shape[0]} N_out={num_out_coords} "
+            f"C_in={in_features.shape[1]} C_out={weight.shape[2]} "
+            f"kv={weight.shape[0]} dtype={in_features.dtype}"
+        )
         try:
             output_feature_tensor = _execute_forward(
                 chosen_fwd_algo,
                 chosen_fwd_params,
                 in_features,
-                weight,
+                _weight_cast,
                 kernel_map,
                 num_out_coords,
                 compute_dtype,
@@ -258,7 +273,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 "explicit_gemm",
                 {},
                 in_features,
-                weight,
+                _weight_cast,
                 kernel_map,
                 num_out_coords,
                 compute_dtype,
@@ -453,6 +468,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
             chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]
 
+        logger.debug(
+            f"[dispatch] BWD algo={chosen_bwd_algo} params={chosen_bwd_params} "
+            f"N_in={in_features.shape[0]} N_out={num_out_coords} "
+            f"C_in={in_features.shape[1]} C_out={weight.shape[2]} "
+            f"kv={weight.shape[0]} dtype={in_features.dtype}"
+        )
         try:
             grad_in_features, grad_weight = _execute_backward(
                 chosen_bwd_algo,
@@ -633,6 +654,16 @@ def _execute_forward(
                 f"Error in _cute_grouped_sm90_forward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
             )
         return result
+    elif algo == "mask_implicit_gemm":
+        return _mask_implicit_gemm_forward_logic(
+            in_features,
+            weight,
+            kernel_map,
+            num_out_coords,
+            compute_dtype,
+            block_size=params.get("block_size", 16),
+            mma_tile=params.get("mma_tile", 3),
+        )
     else:
         raise ValueError(f"Unsupported forward algorithm: {algo}")
 
@@ -782,5 +813,16 @@ def _execute_backward(
                 f"Error in _cute_grouped_sm90_backward_logic: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
             )
         return result
+    elif algo == "mask_implicit_gemm":
+        return _mask_implicit_gemm_backward_logic(
+            grad_output,
+            in_features,
+            weight,
+            kernel_map,
+            num_out_coords,
+            compute_dtype,
+            needs_input_grad=needs_input_grad,
+            block_size=params.get("block_size", 16),
+        )
     else:
         raise ValueError(f"Unsupported backward algorithm: {algo}")

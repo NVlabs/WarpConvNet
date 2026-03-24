@@ -31,3 +31,5 @@ data/
 # Temporary ignores. Restore before committing.
 figconvnet/
 scratch/
+plans/
+internal/
