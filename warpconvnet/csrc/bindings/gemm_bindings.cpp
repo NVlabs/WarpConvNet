@@ -2108,6 +2108,8 @@ static int dispatch_cute_gemm_mask_dgrad(
 }
 #undef CUTE_MASK_DGRAD_CASE
 
+// Expects weight pre-transposed from [K, C_in, C_out] to [K, C_out, C_in]
+// by the Python dispatch for vectorized 128-bit cp.async B loads in the kernel.
 int cute_gemm_mask_dgrad(
     torch::Tensor grad_output, torch::Tensor weight, torch::Tensor grad_input,
     torch::Tensor pair_table, torch::Tensor pair_mask, torch::Tensor mask_argsort,
@@ -2118,6 +2120,8 @@ int cute_gemm_mask_dgrad(
 
   int N_in = grad_input.size(0);
   int N_out = grad_output.size(0);
+  // With pre-transposed weight [K, C_out, C_in], weight.size(2) = C_in, weight.size(1) = C_out
+  // But we read C_in and C_out from grad_input/grad_output which are the ground truth dimensions.
   int C_in = grad_input.size(1);
   int C_out = grad_output.size(1);
 

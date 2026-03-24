@@ -345,8 +345,9 @@ private:
 //
 // Same structure as forward but:
 //   A = grad_output (gathered via mask_argsort, reduction over C_out)
-//   B = weight[k] with layout [C_in, C_out] — B^T gives [C_out, C_in]
+//   B = weight[k] pre-transposed to [C_out, C_in] by Python dispatch
 //   The MMA computes A[M,K] @ B[N,K]^T where K=C_out, N=C_in
+//   With pre-transposed weight, B loads are contiguous (128-bit cp.async)
 //   Output: atomicAdd scatter to grad_input via pair_table
 // =====================================================================
 
@@ -386,7 +387,7 @@ struct CuteGemmMaskDgradKernel {
 
   __device__ void operator()(
       const ElementInput *ptr_GO,   // grad_output [N_out, C_out]
-      const ElementInput *ptr_B,    // weight [K, C_in, C_out]
+      const ElementInput *ptr_B,    // weight pre-transposed [K, C_out, C_in]
       ElementOutput *ptr_GI,        // grad_input [N_in, C_in]
       const int *pair_table,
       const uint32_t *pair_mask,
@@ -450,41 +451,53 @@ struct CuteGemmMaskDgradKernel {
       // Reset accumulator per offset (each offset scatters to different input rows)
       clear(accum);
 
-      // Weight pointer: B[k, :, :] has layout [C_in, C_out]
-      // MMA B operand tiles [N=C_in, K=C_out]
+      // Weight pointer: B[k] is pre-transposed to [C_out, C_in].
+      // MMA B operand tiles [N=C_in, K=C_out].
+      // Memory layout [C_out, C_in] => ptr_Bk[k_global * C_in + n_global]
+      // which matches the forward kernel's dense B load pattern.
       const ElementInput *ptr_Bk = ptr_B + k_off * C_in * C_out;
 
       int num_k_tiles = (C_out + tK - 1) / tK;
       if (num_k_tiles == 0) continue;
 
-      // Load A = grad_output rows (gathered, reduction over C_out)
+      // Prolog: load first k-tile using vectorized cp.async
       _load_GO_masked(ptr_GO, pair_mask, mask_argsort,
                       sA(_, _, 0), m_start, 0, N_out, C_out, k_off, K);
-      // Load B = weight[k]^T: ptr_B is pre-transposed to [C_out, C_in]
-      // so we load as dense [N=C_in, K=C_out] by reading rows of C_in at each C_out position
-      _load_Bt_sync(ptr_Bk, sB(_, _, 0), n_start, 0, C_in, C_out);
+      _load_dense_B_cpasync(ptr_Bk, sB(_, _, 0), n_start, 0, C_in, C_out);
+      cute::cp_async_fence();
+      cute::cp_async_wait<0>();
       __syncthreads();
 
-      // Simple single-stage mainloop (no pipelining for dgrad due to sync B loads)
-      CUTLASS_PRAGMA_UNROLL
-      for (int kb = 0; kb < K_BLOCK_MAX; ++kb) {
-        copy(smem_tiled_copy_A, tCsA(_, _, kb, 0), tCrA_copy_view(_, _, kb));
-        copy(smem_tiled_copy_B, tCsB(_, _, kb, 0), tCrB_copy_view(_, _, kb));
-        cute::gemm(tiled_mma, tCrA(_, _, kb), tCrB(_, _, kb), accum);
-      }
-
+      // Pipelined mainloop
+      CUTLASS_PRAGMA_NO_UNROLL
       for (int ktile = 1; ktile < num_k_tiles; ++ktile) {
-        int k_start = ktile * tK;
-        __syncthreads();
+        int curr_stage = (ktile - 1) % NumStages;
+        int next_stage = ktile % NumStages;
+        int k_start_cout = ktile * tK;
+
         _load_GO_masked(ptr_GO, pair_mask, mask_argsort,
-                        sA(_, _, 0), m_start, k_start, N_out, C_out, k_off, K);
-        _load_Bt_sync(ptr_Bk, sB(_, _, 0), n_start, k_start, C_in, C_out);
-        __syncthreads();
+                        sA(_, _, next_stage), m_start, k_start_cout, N_out, C_out, k_off, K);
+        _load_dense_B_cpasync(ptr_Bk, sB(_, _, next_stage), n_start, k_start_cout, C_in, C_out);
+        cute::cp_async_fence();
 
         CUTLASS_PRAGMA_UNROLL
         for (int kb = 0; kb < K_BLOCK_MAX; ++kb) {
-          copy(smem_tiled_copy_A, tCsA(_, _, kb, 0), tCrA_copy_view(_, _, kb));
-          copy(smem_tiled_copy_B, tCsB(_, _, kb, 0), tCrB_copy_view(_, _, kb));
+          copy(smem_tiled_copy_A, tCsA(_, _, kb, curr_stage), tCrA_copy_view(_, _, kb));
+          copy(smem_tiled_copy_B, tCsB(_, _, kb, curr_stage), tCrB_copy_view(_, _, kb));
+          cute::gemm(tiled_mma, tCrA(_, _, kb), tCrB(_, _, kb), accum);
+        }
+
+        cute::cp_async_wait<NumStages - 2>();
+        __syncthreads();
+      }
+
+      // Epilog: last k-tile
+      {
+        int last_stage = (num_k_tiles - 1) % NumStages;
+        CUTLASS_PRAGMA_UNROLL
+        for (int kb = 0; kb < K_BLOCK_MAX; ++kb) {
+          copy(smem_tiled_copy_A, tCsA(_, _, kb, last_stage), tCrA_copy_view(_, _, kb));
+          copy(smem_tiled_copy_B, tCsB(_, _, kb, last_stage), tCrB_copy_view(_, _, kb));
           cute::gemm(tiled_mma, tCrA(_, _, kb), tCrB(_, _, kb), accum);
         }
       }
@@ -540,41 +553,43 @@ private:
     }
   }
 
-  /// Load weight^T tile — B[k] has layout [C_in, C_out].
-  /// SmemB expects [N=C_in, K=C_out] with consecutive N elements.
-  /// Since weight is row-major [C_in, C_out], consecutive elements are along
-  /// C_out (K), but we need them consecutive along C_in (N).
-  /// Solution: scalar loads with strided access.
+  /// Load B (weight) tile — dense, vectorized 128-bit cp.async loads.
+  /// Weight is pre-transposed to [C_out, C_in], so memory layout is
+  /// ptr_Bk[k_global * N + n_global] with N=C_in, K_dim=C_out.
   template <class SmemTensor>
-  __device__ void _load_Bt_sync(
-      const ElementInput *ptr_Bk,
+  __device__ void _load_dense_B_cpasync(
+      const ElementInput *ptr_B,
       SmemTensor smem_tile,
-      int n_start, int k_start,
-      int C_in, int C_out) const {
+      int n_start,
+      int k_start,
+      int N,
+      int K_dim) const {
 
-    // Total elements to load: tN * tK
-    constexpr int total_elems = tN * tK;
+    static_assert(tN % kVec == 0, "tN must be a multiple of vector width");
+    constexpr int n_vecs = tN / kVec;
+    constexpr int total_vecs = tK * n_vecs;
 
     CUTLASS_PRAGMA_UNROLL
-    for (int idx = threadIdx.x; idx < total_elems; idx += MaxThreadsPerBlock) {
-      int n_local = idx % tN;
-      int k_local = idx / tN;
-      int n_global = n_start + n_local;  // C_in index
-      int k_global = k_start + k_local;  // C_out index
+    for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
+      int k_local = idx / n_vecs;
+      int nv = idx % n_vecs;
+      int n_local = nv * kVec;
+      int n_global = n_start + n_local;
+      int k_global = k_start + k_local;
 
-      ElementInput val;
-      if (n_global < C_in && k_global < C_out) {
-        // B[k] layout: ptr_Bk[c_in * C_out + c_out]
-        val = ptr_Bk[n_global * C_out + k_global];
+      uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
+      bool pred = (k_global < K_dim) && (n_global + kVec <= N);
+
+      if (pred) {
+        const void *gmem_src = &ptr_B[k_global * N + n_global];
+        asm volatile(
+            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
+            ::"r"(smem_addr), "l"(gmem_src), "n"(16));
       } else {
-        if constexpr (std::is_same_v<ElementInput, cutlass::half_t>)
-          val = cutlass::half_t(0);
-        else if constexpr (std::is_same_v<ElementInput, cutlass::bfloat16_t>)
-          val = cutlass::bfloat16_t(0);
-        else
-          val = static_cast<ElementInput>(0);
+        asm volatile(
+            "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n"
+            ::"r"(smem_addr), "l"(ptr_B), "n"(16), "r"(0));
       }
-      smem_tile(n_local, k_local) = val;
     }
   }
 
