@@ -302,6 +302,15 @@ def _run_forward_benchmarks(
     if dtype_to_check == torch.float64:
         params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
 
+    # Filter out mask_implicit_gemm when channels are unaligned for CuTe
+    # (the SIMT fallback is disabled due to OOB bugs)
+    C_in_val = in_features.shape[1]
+    C_out_val = weight.shape[2]
+    elem_size = in_features.element_size()
+    vec_width = 16 // max(elem_size, 1)
+    if C_in_val % vec_width != 0 or C_out_val % vec_width != 0:
+        params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "mask_implicit_gemm"]
+
     global _AUTOTUNE_BANNER_SHOWN
     num_candidates = len(params_to_use)
     N_in = in_features.shape[0]
@@ -331,11 +340,13 @@ def _run_forward_benchmarks(
             torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
-            # Reset CUDA error state to prevent corruption of subsequent candidates
+            # Clear CUDA error state to prevent corruption of subsequent candidates.
+            # cudaGetLastError() resets the error flag; synchronize() then succeeds.
+            torch.cuda.cudart().cudaGetLastError()
             try:
                 torch.cuda.synchronize()
             except Exception:
-                pass
+                torch.cuda.cudart().cudaGetLastError()  # Clear again after sync failure
             continue
 
         if isinstance(status, int) and status != 0:
@@ -356,10 +367,11 @@ def _run_forward_benchmarks(
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
             )
+            torch.cuda.cudart().cudaGetLastError()
             try:
                 torch.cuda.synchronize()
             except Exception:
-                pass
+                torch.cuda.cudart().cudaGetLastError()
             continue
 
         if current_algo_min_time_ms != float("inf"):
@@ -585,10 +597,11 @@ def _run_backward_benchmarks(
             torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            torch.cuda.cudart().cudaGetLastError()
             try:
                 torch.cuda.synchronize()
             except Exception:
-                pass
+                torch.cuda.cudart().cudaGetLastError()
             continue
 
         if isinstance(status, int) and status != 0:
@@ -612,10 +625,11 @@ def _run_backward_benchmarks(
                 logger.debug(
                     f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
                 )
+                torch.cuda.cudart().cudaGetLastError()
                 try:
                     torch.cuda.synchronize()
                 except Exception:
-                    pass
+                    torch.cuda.cudart().cudaGetLastError()
                 continue
 
         if current_algo_min_time_ms != float("inf"):
