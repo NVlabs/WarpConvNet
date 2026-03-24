@@ -282,6 +282,17 @@ def _run_forward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
+        elif algo_mode == "mask_implicit_gemm":
+            from .mask_gemm import _mask_implicit_gemm_forward_logic
+            _ = _mask_implicit_gemm_forward_logic(
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                compute_dtype,
+                block_size=params_config.get("block_size", 16),
+                mma_tile=params_config.get("mma_tile", 3),
+            )
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
 
@@ -513,6 +524,18 @@ def _run_backward_benchmarks(
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
+        elif algo_mode == "mask_implicit_gemm":
+            from .mask_gemm import _mask_implicit_gemm_backward_logic
+            _ = _mask_implicit_gemm_backward_logic(
+                grad_output,
+                in_features,
+                weight,
+                kernel_map,
+                num_out_coords,
+                compute_dtype,
+                needs_input_grad=(True, True),
+                block_size=params_config.get("block_size", 16),
+            )
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
 

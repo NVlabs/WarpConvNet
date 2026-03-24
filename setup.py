@@ -209,6 +209,7 @@ ext_modules = [
             "warpconvnet/csrc/bindings/utils_bindings.cpp",
             "warpconvnet/csrc/cutlass_gemm_gather_scatter.cu",
             "warpconvnet/csrc/cutlass_cute_gemm_gather_scatter.cu",
+            "warpconvnet/csrc/cutlass_cute_gemm_mask.cu",
             "warpconvnet/csrc/cutlass_cute_gemm_staged.cu",
             "warpconvnet/csrc/cutlass_cute_gemm_sm90.cu",  # SM90 (Hopper) WGMMA GEMM
             "warpconvnet/csrc/cutlass_gemm_gather_scatter_sm80_fp32.cu",
@@ -218,6 +219,8 @@ ext_modules = [
             "warpconvnet/csrc/implicit_reduction.cu",
             "warpconvnet/csrc/segmented_arithmetic.cu",
             "warpconvnet/csrc/implicit_gemm.cu",
+            "warpconvnet/csrc/mask_implicit_gemm.cu",
+            "warpconvnet/csrc/mask_data_kernels.cu",
             "warpconvnet/csrc/implicit_gemm_split_k.cu",
             "warpconvnet/csrc/bindings/sampling_bindings.cpp",
             "warpconvnet/csrc/farthest_point_sampling.cu",

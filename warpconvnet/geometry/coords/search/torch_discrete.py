@@ -357,12 +357,16 @@ def _kernel_map_from_size(
                 num_query_coords,
             )
 
-        return IntSearchResult(
+        result = IntSearchResult(
             in_maps,
             out_maps,
             offsets,
             identity_map_index=identity_map_index,
         )
+        # Cache the pair_table (found_in_coord_index) for mask-based GEMM.
+        # This avoids expensive Python reconstruction in _kernel_map_to_mask_data.
+        result._pair_table = found_in_coord_index  # [K, N_out], int32, -1=invalid
+        return result
 
     # --- Generic Case (Fallback to offset method) ---
     else:

@@ -94,6 +94,7 @@ class SPARSE_CONV_FWD_ALGO_MODE(Enum):
     CUTE_GROUPED = "cute_grouped"
     CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
     CUTE_GROUPED_SM90 = "cute_grouped_sm90"
+    MASK_IMPLICIT_GEMM = "mask_implicit_gemm"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
 
@@ -109,6 +110,7 @@ class SPARSE_CONV_BWD_ALGO_MODE(Enum):
     CUTE_GROUPED = "cute_grouped"
     CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
     CUTE_GROUPED_SM90 = "cute_grouped_sm90"
+    MASK_IMPLICIT_GEMM = "mask_implicit_gemm"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
 
@@ -189,6 +191,12 @@ _FWD_IMPLICIT_GEMM_GROUPED = [
     ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 2000}),
     ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 5000}),
 ]
+_FWD_MASK_IMPLICIT_GEMM = [
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
+]
 _FWD_CUTE_IMPLICIT = [] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]
 _FWD_EXPLICIT = [("explicit_gemm", {})]
 _FWD_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]]
@@ -223,9 +231,11 @@ def _get_adaptive_forward_params(
     # kv=125 (5x5x5): only implicit_gemm variants win
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_FWD_CUTE_GROUPED)  # May win for large kv via fused launch
         params.extend(_FWD_IMPLICIT_GEMM_16)
         params.extend(_FWD_IMPLICIT_GEMM_32)
         params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
+        params.extend(_FWD_MASK_IMPLICIT_GEMM)
         return params
 
     # --- kv <= 27 (3x3x3 or 2x2x2) below ---
@@ -236,6 +246,7 @@ def _get_adaptive_forward_params(
         params = []
         params.extend(_FWD_CUTE_GROUPED)
         params.extend(_FWD_IMPLICIT_GEMM_16)
+        params.extend(_FWD_MASK_IMPLICIT_GEMM)  # Wins at small-medium C
         if max_ch <= 64:
             params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
         params.extend(_FWD_CUTE_SM90)
@@ -249,6 +260,7 @@ def _get_adaptive_forward_params(
         params.extend(_FWD_CUTLASS_IMPLICIT)
         params.extend(_FWD_CUTLASS_GROUPED)
         params.extend(_FWD_IMPLICIT_GEMM_16)
+        params.extend(_FWD_MASK_IMPLICIT_GEMM)  # Competitive at C<=96
         if max_ch <= 64:
             params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
             params.extend(_FWD_CUTE_IMPLICIT)
@@ -261,6 +273,7 @@ def _get_adaptive_forward_params(
     params.extend(_FWD_CUTLASS_IMPLICIT)  # dominates this range
     params.extend(_FWD_CUTLASS_GROUPED)
     params.extend(_FWD_IMPLICIT_GEMM_16)
+    params.extend(_FWD_MASK_IMPLICIT_GEMM)  # Competitive at C<=64
     if max_ch <= 64:
         # implicit_gemm_grouped: 10.7ms removal impact at 64K-512K, ch<=64
         params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
@@ -321,6 +334,11 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
             for cp in [True, False]
         ]
     ),
+    # Mask-based fused implicit GEMM (all tile configs)
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
 ]
 
 # ---------------------------------------------------------------------------
@@ -371,6 +389,7 @@ _BWD_IMPLICIT_GEMM = [
         {"gemm_block_size": 16, "split_k_threads_per_block": 256, "split_k_factor": 2},
     ),
 ]
+_BWD_MASK_IMPLICIT_GEMM = [("mask_implicit_gemm", {"block_size": 16})]
 # SM90 WGMMA backward building blocks
 _BWD_CUTE_SM90 = (
     []
@@ -430,12 +449,16 @@ def _get_adaptive_backward_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # kv=125 (5x5x5): explicit_gemm + explicit_gemm_grouped + implicit_gemm
+    # kv=125 (5x5x5): include cute_grouped (2.9x faster than implicit_gemm)
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_BWD_CUTE_GROUPED)  # 0.72ms vs implicit_gemm 2.09ms at kv=125
         params.extend(_BWD_EXPLICIT)
         params.extend(_BWD_EXPLICIT_GROUPED)
         params.extend(_BWD_IMPLICIT_GEMM)
+        # Note: mask_implicit_gemm backward has SIMT-only kernel with OOB bug at large N
+        # Disabled until CuTe backward is implemented
+        # params.extend(_BWD_MASK_IMPLICIT_GEMM)
         return params
 
     # --- kv <= 27 below ---
@@ -544,6 +567,8 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
             for cp in [True, False]
         ]
     ),
+    # Mask-based fused implicit GEMM backward disabled (SIMT kernel has OOB at large N)
+    # TODO: Re-enable once CuTe backward mask kernel is implemented
 ]
 
 # ---------------------------------------------------------------------------
