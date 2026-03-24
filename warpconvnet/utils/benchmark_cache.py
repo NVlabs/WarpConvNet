@@ -58,11 +58,32 @@ _SPARSE_CONV_CONFIG_DTYPE_TO_INT = {
 
 
 def _atomic_msgpack_replace(target_path: Path, data: Any) -> None:
-    """Atomically write msgpack data to target by writing to a temp file then renaming."""
-    temp_file = target_path.with_suffix(".tmp")
+    """Atomically write msgpack data to target by writing to a temp file then renaming.
+
+    Uses a PID-suffixed temp file to avoid conflicts between concurrent processes.
+    """
+    temp_file = target_path.with_suffix(f".tmp.{os.getpid()}")
     with open(temp_file, "wb") as f:
         f.write(msgpack.packb(data, use_bin_type=True))
     temp_file.replace(target_path)
+
+
+class _FileLock:
+    """Cross-process file lock using fcntl for atomic cache read-modify-write."""
+
+    def __init__(self, lock_path: Path):
+        self.lock_path = lock_path
+
+    def __enter__(self):
+        import fcntl
+        self._fd = open(self.lock_path, "w")
+        fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *args):
+        import fcntl
+        fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+        self._fd.close()
 
 
 def _sanitize_for_pickle(value: Any) -> Any:
@@ -327,6 +348,9 @@ class GenericBenchmarkCache(Generic[K, V]):
         self._results: Dict[str, Dict[K, V]] = {}
         # Optional namespace -> validator function(value) that raises on invalid
         self._validators: Dict[str, Callable[[V], None]] = {}
+        # Callbacks invoked after disk merge so consumers can refresh their in-memory state.
+        # Signature: callback(namespace: str, merged_dict: Dict[K, V])
+        self._on_merge_callbacks: List[Callable[[str, Dict], None]] = []
 
         # Periodic save settings
         self.save_interval = 60.0
@@ -357,11 +381,25 @@ class GenericBenchmarkCache(Generic[K, V]):
                 f"[Rank {current_rank}] No existing cache found, will create: {self.cache_file}"
             )
 
-        # Start background save thread only for rank 0
-        if _is_rank_zero():
-            self._start_background_saver()
-            atexit.register(self._save_on_exit)
-            logger.debug(f"[Rank {current_rank}] Started background saver (rank 0)")
+        # All ranks run background saver — each rank auto-tunes independently
+        # and writes results to disk with file locking. On save, the full disk
+        # cache is read back into memory so all ranks benefit from each other's
+        # auto-tune results.
+        self._start_background_saver()
+        atexit.register(self._save_on_exit)
+        logger.debug(f"[Rank {current_rank}] Started background saver")
+
+    def register_on_merge_callback(self, callback: Callable[[str, Dict], None]) -> None:
+        """Register a callback invoked after disk cache is merged into memory.
+
+        This allows consumers (e.g., the autotune module) to refresh their
+        in-memory caches when other ranks' auto-tune results become available.
+
+        Args:
+            callback: Called with (namespace, merged_namespace_dict) for each
+                namespace that was updated from disk.
+        """
+        self._on_merge_callbacks.append(callback)
 
     def register_value_validator(self, namespace: str, validator: Callable[[V], None]) -> None:
         """Register a validator for a namespace. Validator should raise ValueError/TypeError on invalid value."""
@@ -439,25 +477,42 @@ class GenericBenchmarkCache(Generic[K, V]):
             return
         try:
             current_time = time.time()
-            # Merge with on-disk cache to avoid clobbering writes from other processes
-            on_disk = self._load_disk_namespaces()
+            lock_path = self.cache_file.with_suffix(".lock")
 
-            merged: Dict[str, Dict[K, V]] = {}
-            for ns, kv in on_disk.items():
-                merged[ns] = dict(kv)
-            for ns, kv in self._results.items():
-                base = merged.get(ns, {})
-                base.update(kv)
-                merged[ns] = base
+            with _FileLock(lock_path):
+                # Under file lock: read disk, merge our results, write back.
+                # This ensures no updates from other ranks are lost.
+                on_disk = self._load_disk_namespaces()
 
+                merged: Dict[str, Dict[K, V]] = {}
+                # Start with disk contents (includes other ranks' results)
+                for ns, kv in on_disk.items():
+                    merged[ns] = dict(kv)
+                # Overlay our in-memory results (our auto-tune wins)
+                for ns, kv in self._results.items():
+                    base = merged.get(ns, {})
+                    base.update(kv)
+                    merged[ns] = base
+
+                self._write_cache_to_disk(merged, current_time)
+
+            # Update in-memory cache with the full merged result.
+            # This picks up auto-tune results from other ranks.
             self._results = merged
-            self._write_cache_to_disk(merged, current_time)
             self.last_save_time = current_time
             self.pending_changes = False
             total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
             logger.info(
                 f"Background saved generic benchmark cache: {len(self._results)} namespaces, {total_entries} total entries"
             )
+
+            # Notify consumers so they refresh their in-memory caches
+            for cb in self._on_merge_callbacks:
+                try:
+                    for ns, ns_dict in merged.items():
+                        cb(ns, ns_dict)
+                except Exception as cb_err:
+                    logger.debug(f"on_merge callback error: {cb_err}")
         except Exception as e:
             logger.warning(f"Failed to save generic benchmark cache in background: {e}")
 
@@ -513,8 +568,6 @@ class GenericBenchmarkCache(Generic[K, V]):
         force: bool = False,
         suppress_logging: bool = False,
     ) -> None:
-        if not _is_rank_zero():
-            return
         if not force:
             with self._save_condition:
                 # Merge incoming results into in-memory results
