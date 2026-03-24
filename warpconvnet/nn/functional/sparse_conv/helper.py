@@ -63,7 +63,9 @@ def _apply_generative_policy(
     stride: Tuple[int, ...],
     stride_mode: STRIDED_CONV_MODE,
     transposed: bool,
-) -> Tuple[Int[Tensor, "N D+1"], Int[Tensor, "B+1"], Int[Tensor, "N D+1"]]:  # noqa: F821
+) -> Tuple[
+    Int[Tensor, "N D+1"], Int[Tensor, "B+1"], Int[Tensor, "N D+1"]
+]:  # noqa: F821
     """
     Resolve generative output coordinates using IntCoords primitives.
 
@@ -93,8 +95,13 @@ def _apply_generative_policy(
             batch_indexed_in_coords,
         )
 
-    if stride_mode not in (STRIDED_CONV_MODE.STRIDE_ONLY, STRIDED_CONV_MODE.REDUCE_AND_STRIDE):
-        raise ValueError(f"Unsupported stride_mode {stride_mode} for generative convolution")
+    if stride_mode not in (
+        STRIDED_CONV_MODE.STRIDE_ONLY,
+        STRIDED_CONV_MODE.REDUCE_AND_STRIDE,
+    ):
+        raise ValueError(
+            f"Unsupported stride_mode {stride_mode} for generative convolution"
+        )
 
     if transposed:
         # Transposed with stride > 1: upsampling + densification
@@ -162,9 +169,15 @@ def spatially_sparse_conv(
     stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
     stride_reduce: str = "max",
     order: POINT_ORDERING = POINT_ORDERING.RANDOM,
-    compute_dtype: Optional[torch.dtype] = None,  # Use None to default to in_features.dtype
-    implicit_matmul_fwd_block_size: Optional[int] = 16,  # Default, can be None if not implicit
-    implicit_matmul_bwd_block_size: Optional[int] = 16,  # Default, can be None if not implicit
+    compute_dtype: Optional[
+        torch.dtype
+    ] = None,  # Use None to default to in_features.dtype
+    implicit_matmul_fwd_block_size: Optional[
+        int
+    ] = 16,  # Default, can be None if not implicit
+    implicit_matmul_bwd_block_size: Optional[
+        int
+    ] = 16,  # Default, can be None if not implicit
 ) -> Geometry:  # Should return Voxels or a base Geometry type compatible with Voxels
     """
     Perform spatially sparse convolution on the input tensor
@@ -236,10 +249,14 @@ def spatially_sparse_conv(
 
     # Determine effective compute_dtype
     effective_compute_dtype = (
-        compute_dtype if compute_dtype is not None else input_sparse_tensor.feature_tensor.dtype
+        compute_dtype
+        if compute_dtype is not None
+        else input_sparse_tensor.feature_tensor.dtype
     )
 
-    if stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and any(s != 1 for s in _stride):
+    if stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and any(
+        s != 1 for s in _stride
+    ):
         reduced_input_voxels = sparse_reduce(
             input_sparse_tensor,
             kernel_size=_stride,
@@ -255,16 +272,18 @@ def spatially_sparse_conv(
     else:
         current_input_features_for_gemm = input_sparse_tensor.feature_tensor
 
-    batch_indexed_out_coords, out_offsets, kernel_map = generate_output_coords_and_kernel_map(
-        input_sparse_tensor=input_sparse_tensor,
-        kernel_size=_kernel_size,
-        kernel_dilation=_kernel_dilation,
-        stride=_stride,
-        generative=generative,
-        transposed=transposed,
-        output_spatially_sparse_tensor=output_spatially_sparse_tensor,
-        stride_mode=stride_mode,
-        order=order,
+    batch_indexed_out_coords, out_offsets, kernel_map = (
+        generate_output_coords_and_kernel_map(
+            input_sparse_tensor=input_sparse_tensor,
+            kernel_size=_kernel_size,
+            kernel_dilation=_kernel_dilation,
+            stride=_stride,
+            generative=generative,
+            transposed=transposed,
+            output_spatially_sparse_tensor=output_spatially_sparse_tensor,
+            stride_mode=stride_mode,
+            order=order,
+        )
     )
     num_out_coords = batch_indexed_out_coords.shape[0]
 
@@ -338,7 +357,9 @@ def generate_output_coords_and_kernel_map(
         assert (
             not generative
         ), "Output spatially sparse tensor is not supported with generative convolution"
-        batch_indexed_out_coords = output_spatially_sparse_tensor.batch_indexed_coordinates
+        batch_indexed_out_coords = (
+            output_spatially_sparse_tensor.batch_indexed_coordinates
+        )
         out_offsets = output_spatially_sparse_tensor.offsets
     elif generative:
         (

@@ -70,7 +70,9 @@ if not _HAS_SM80_HARDWARE:
 
 # SM90 WGMMA backends — available when compiled with SM90 support and running on SM90+ hardware
 try:
-    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(_C.gemm, "cute_gemm_sm90_AD_gather_scatter")
+    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(
+        _C.gemm, "cute_gemm_sm90_AD_gather_scatter"
+    )
     _HAS_CUTE_GROUPED_SM90 = _HAS_SM90_HARDWARE and hasattr(
         _C.gemm, "cute_gemm_sm90_grouped_AD_gather_scatter"
     )
@@ -199,7 +201,9 @@ _FWD_MASK_IMPLICIT_GEMM = [
 ]
 _FWD_CUTE_IMPLICIT = [] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]
 _FWD_EXPLICIT = [("explicit_gemm", {})]
-_FWD_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]]
+_FWD_EXPLICIT_GROUPED = [
+    ("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]
+]
 
 
 import math as _math
@@ -322,7 +326,8 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
         []
         if not _HAS_CUTE_SM90
         else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile})
+            for tile in [100, 101, 102, 103, 104]
         ]
     ),
     *(
@@ -555,7 +560,8 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
         []
         if not _HAS_CUTE_SM90
         else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile})
+            for tile in [100, 101, 102, 103, 104]
         ]
     ),
     *(
@@ -629,7 +635,9 @@ def _filter_benchmark_params_by_env_config(
     if env_config == "all":
         # When "all", use the full exhaustive candidate set
         full_params = (
-            _ALL_BENCHMARK_FORWARD_PARAMS if is_forward else _ALL_BENCHMARK_BACKWARD_PARAMS
+            _ALL_BENCHMARK_FORWARD_PARAMS
+            if is_forward
+            else _ALL_BENCHMARK_BACKWARD_PARAMS
         )
         return [(str(algo), params) for algo, params in full_params]
 

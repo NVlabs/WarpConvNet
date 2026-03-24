@@ -217,7 +217,9 @@ def morton_code(
             coords_normalized = coords_normalized[:, perm]
         elif coords_normalized.shape[1] == 4:  # batched coordinates [b, x, y, z]
             # Create permutation for batched coordinates: [b, x, y, z] -> [b, perm[0], perm[1], perm[2]]
-            batch_perm = [0] + [p + 1 for p in perm]  # [0, perm[0]+1, perm[1]+1, perm[2]+1]
+            batch_perm = [0] + [
+                p + 1 for p in perm
+            ]  # [0, perm[0]+1, perm[1]+1, perm[2]+1]
             coords_normalized = coords_normalized[:, batch_perm]
 
     device = coords_normalized.device

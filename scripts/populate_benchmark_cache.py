@@ -87,22 +87,20 @@ CHANNEL_PAIRS_COMMON = [
 
 # Voxel counts spanning typical indoor (ScanNet ~50K-500K) and outdoor
 # (nuScenes/Waymo ~100K-2M) point clouds. Values are chosen so that
-# ceil(log2(N)) covers the range [15..21] which is the log-N cache bucket space.
+# max(ceil(log10(N)), 4) covers the cache bucket space:
+#   N<10K → bucket 4, N=10K-100K → bucket 5, N=100K-1M → bucket 6, N=1M+ → bucket 7
 NUM_VOXELS_DEFAULT = [
-    30_000,  # log2 ~ 15
-    65_000,  # log2 ~ 16
-    130_000,  # log2 ~ 17
-    260_000,  # log2 ~ 18
-    500_000,  # log2 ~ 19
-    1_000_000,  # log2 ~ 20
-    2_000_000,  # log2 ~ 21
+    5_000,    # log10 bucket 4 (N < 10K)
+    50_000,   # log10 bucket 5 (10K-100K)
+    500_000,  # log10 bucket 6 (100K-1M)
+    2_000_000,  # log10 bucket 7 (1M+)
 ]
 
 KERNEL_SIZES_DEFAULT = [3]  # 3^3=27
 DTYPES_DEFAULT = [torch.float16, torch.bfloat16]
 
 # Quick preset: minimal grid for smoke testing
-NUM_VOXELS_QUICK = [100_000, 500_000]
+NUM_VOXELS_QUICK = [50_000, 500_000]  # log10 buckets 5 and 6
 CHANNEL_PAIRS_QUICK = [
     (32, 32),
     (64, 128),
@@ -470,11 +468,12 @@ def main():
     ):
         configs.append((nv, c_in, c_out, ks, dt))
 
-    # Deduplicate by cache key (log2(N), c_in, c_out, kv, dtype)
+    # Deduplicate by cache key — must match SpatiallySparseConvConfig:
+    # max(ceil(log10(N)), 4) for N dimension, (c_in, c_out, kv, dtype) for the rest
     seen = set()
     unique_configs = []
     for nv, c_in, c_out, ks, dt in configs:
-        log_n = math.ceil(math.log2(nv)) if nv > 0 else 0
+        log_n = max(math.ceil(math.log10(max(nv, 1))), 4)
         kv = ks**3
         key = (log_n, c_in, c_out, kv, dt)
         if key not in seen:
@@ -489,7 +488,7 @@ def main():
     print(f"GPU: {gpu_name} (SM {sm[0]}.{sm[1]})")
     print(f"Algo mode: {args.algo_mode}")
     print(f"Directions: {'fwd' if do_forward else ''}{'+bwd' if do_backward else ''}")
-    print(f"Configs: {len(configs)} unique (after log2-dedup)")
+    print(f"Configs: {len(configs)} unique (after log10-dedup)")
     print(f"  Voxel counts: {sorted({nv for nv, *_ in configs})}")
     print(f"  Channel pairs: {sorted({(c, co) for _, c, co, *_ in configs})}")
     print(f"  Kernel sizes: {sorted({ks for *_, ks, _ in configs})}")
@@ -499,9 +498,9 @@ def main():
     if args.dry_run:
         print("Dry run -- listing all configurations:")
         for i, (nv, c_in, c_out, ks, dt) in enumerate(configs, 1):
-            log_n = math.ceil(math.log2(nv)) if nv > 0 else 0
+            log_n = max(math.ceil(math.log10(max(nv, 1))), 4)
             print(
-                f"  [{i:4d}] N={nv:>9,d} (log2={log_n:2d})  "
+                f"  [{i:4d}] N={nv:>9,d} (log10={log_n})  "
                 f"C={c_in:3d}->{c_out:3d}  ks={ks}  dtype={dt}"
             )
         return
@@ -537,9 +536,9 @@ def main():
     start_time = time.time()
 
     for i, (nv, c_in, c_out, ks, dt) in enumerate(configs, 1):
-        log_n = math.ceil(math.log2(nv)) if nv > 0 else 0
+        log_n = max(math.ceil(math.log10(max(nv, 1))), 4)
         tag = (
-            f"[{i:4d}/{total}] N={nv:>9,d} (log2={log_n:2d}) "
+            f"[{i:4d}/{total}] N={nv:>9,d} (log10={log_n}) "
             f"C={c_in:3d}->{c_out:3d} ks={ks} {dt}"
         )
 

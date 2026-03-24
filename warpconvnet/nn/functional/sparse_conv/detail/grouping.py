@@ -172,7 +172,9 @@ def prepare_grouped_kernel_map(
             n = in_map.shape[0]
             in_parts.append(in_map)
             out_parts.append(out_map)
-            widx_parts.append(torch.full((n,), local_k, dtype=torch.int32, device=device))
+            widx_parts.append(
+                torch.full((n,), local_k, dtype=torch.int32, device=device)
+            )
             # Flat index: batch_idx * max_m + position_within_batch
             flat_idx_parts.append(
                 torch.arange(n, dtype=torch.long, device=device) + local_k * max_m

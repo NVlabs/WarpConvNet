@@ -98,9 +98,13 @@ class DataToTensor:
     ):
         self.device = device
 
-    def __call__(self, batch_dict: Dict[str, Tensor]) -> Tuple[Geometry, Dict[str, Tensor]]:
+    def __call__(
+        self, batch_dict: Dict[str, Tensor]
+    ) -> Tuple[Geometry, Dict[str, Tensor]]:
         # cat all features into a single tensor
-        cat_batch_dict = {k: torch.cat(v, dim=0).to(self.device) for k, v in batch_dict.items()}
+        cat_batch_dict = {
+            k: torch.cat(v, dim=0).to(self.device) for k, v in batch_dict.items()
+        }
         return (
             Points.from_list_of_coordinates(
                 batch_dict["coords"],

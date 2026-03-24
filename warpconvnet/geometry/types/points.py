@@ -71,7 +71,9 @@ class Points(Geometry):
             assert (
                 isinstance(batched_features, Tensor) and offsets is not None
             ), "If coordinate is a tensor, features must be a tensor and offsets must be provided."
-            batched_coordinates = RealCoords(batched_coordinates, offsets=offsets, device=device)
+            batched_coordinates = RealCoords(
+                batched_coordinates, offsets=offsets, device=device
+            )
 
         if isinstance(batched_features, list):
             batched_features = CatFeatures(batched_features, device=device)
@@ -178,7 +180,9 @@ class Points(Geometry):
                 batched_tensor=self.coordinate_tensor[to_unique.to_unique_indices],
                 offsets=unique_offsets,
             ),
-            batched_features=CatFeatures(batched_tensor=down_features, offsets=unique_offsets),
+            batched_features=CatFeatures(
+                batched_tensor=down_features, offsets=unique_offsets
+            ),
             **extra_args,
         )
 
@@ -188,7 +192,9 @@ class Points(Geometry):
 
         If the batch size is N, the total number of output points is N * num_sample_points.
         """
-        sampled_indices, sample_offsets = random_sample_per_batch(self.offsets, num_sample_points)
+        sampled_indices, sample_offsets = random_sample_per_batch(
+            self.offsets, num_sample_points
+        )
         return self.__class__(
             batched_coordinates=RealCoords(
                 batched_tensor=self.coordinate_tensor[sampled_indices],
@@ -210,7 +216,10 @@ class Points(Geometry):
         Returns:
             Points: A new Points instance with contiguous tensors
         """
-        if self.coordinate_tensor.is_contiguous() and self.feature_tensor.is_contiguous():
+        if (
+            self.coordinate_tensor.is_contiguous()
+            and self.feature_tensor.is_contiguous()
+        ):
             return self
 
         return self.__class__(
@@ -236,7 +245,9 @@ class Points(Geometry):
         if query_coords is None:
             query_coords = self.batched_coordinates
 
-        assert isinstance(query_coords, Coords), "query_coords must be BatchedCoordinates"
+        assert isinstance(
+            query_coords, Coords
+        ), "query_coords must be BatchedCoordinates"
 
         # cache the neighbor search result
         if self.cache is not None:
@@ -255,7 +266,9 @@ class Points(Geometry):
         )
         if self.cache is None:
             self._extra_attributes["_cache"] = RealSearchCache()
-        self.cache.put(search_args, self.offsets, query_coords.offsets, neighbor_search_result)
+        self.cache.put(
+            search_args, self.offsets, query_coords.offsets, neighbor_search_result
+        )
         return neighbor_search_result
 
     @property
@@ -280,14 +293,18 @@ class Points(Geometry):
         """
         # if the input is a tensor, expand it to a list of tensors
         if isinstance(coordinates, Tensor):
-            coordinates = list(coordinates)  # this expands the tensor to a list of tensors
+            coordinates = list(
+                coordinates
+            )  # this expands the tensor to a list of tensors
 
         if features is None:
             assert (
                 encoding_range is not None
             ), "Encoding range must be provided if encoding channels are provided"
             features = [
-                sinusoidal_encoding(coordinates, encoding_channels, encoding_range, encoding_dim)
+                sinusoidal_encoding(
+                    coordinates, encoding_channels, encoding_range, encoding_dim
+                )
                 for coordinates in coordinates
             ]
 

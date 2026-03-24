@@ -30,12 +30,14 @@ def _cute_implicit_gemm_sm90_forward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    out_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    )
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
-            dtype=out_dtype
-        )
+        output_feature_tensor = torch.matmul(
+            _in_features_detached, _weight_detached[iden_idx]
+        ).to(dtype=out_dtype)
     else:
         output_feature_tensor = torch.zeros(
             num_out_coords, weight.shape[-1], device=device, dtype=out_dtype
@@ -74,7 +76,9 @@ def _cute_implicit_gemm_sm90_backward_logic(
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
     mma_tile: int = 100,
-) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
+) -> Union[
+    Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]
+]:
     """Backward pass using SM90 WGMMA CuTe GEMM kernels."""
     if device is None:
         device = in_features.device
@@ -86,17 +90,19 @@ def _cute_implicit_gemm_sm90_backward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    out_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    )
     grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
-        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T).to(
-            dtype=out_dtype
-        )
-        grad_weight[iden_idx] = torch.matmul(_in_features_detached.T, _grad_output_detached).to(
-            dtype=out_dtype
-        )
+        grad_in_features = torch.matmul(
+            _grad_output_detached, _weight_detached[iden_idx].T
+        ).to(dtype=out_dtype)
+        grad_weight[iden_idx] = torch.matmul(
+            _in_features_detached.T, _grad_output_detached
+        ).to(dtype=out_dtype)
     else:
         grad_in_features = torch.zeros(
             _in_features_detached.shape[0],

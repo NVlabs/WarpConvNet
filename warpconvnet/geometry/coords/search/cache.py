@@ -8,10 +8,16 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
-from warpconvnet.geometry.coords.search.torch_discrete import _int_sequence_hash, string_hash
+from warpconvnet.geometry.coords.search.torch_discrete import (
+    _int_sequence_hash,
+    string_hash,
+)
 from warpconvnet.geometry.coords.search.utils import _int_tensor_hash
 
-from warpconvnet.geometry.coords.search.search_results import IntSearchResult, RealSearchResult
+from warpconvnet.geometry.coords.search.search_results import (
+    IntSearchResult,
+    RealSearchResult,
+)
 from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig
 
 
@@ -22,7 +28,9 @@ class RealSearchCacheKey:
     ref_offsets: Int[Tensor, "B+1"]  # noqa: F821
     query_offsets: Int[Tensor, "B+1"]  # noqa: F821
 
-    def __init__(self, search_args: RealSearchConfig, ref_offsets: Tensor, query_offsets: Tensor):
+    def __init__(
+        self, search_args: RealSearchConfig, ref_offsets: Tensor, query_offsets: Tensor
+    ):
         self.search_args = search_args
         self.ref_offsets = ref_offsets.detach().cpu().int()
         self.query_offsets = query_offsets.detach().cpu().int()
@@ -55,7 +63,9 @@ class RealSearchCache:
     def __init__(self):
         self._search_cache = {}
 
-    def get(self, search_args: RealSearchConfig, ref_offsets: Tensor, query_offsets: Tensor):
+    def get(
+        self, search_args: RealSearchConfig, ref_offsets: Tensor, query_offsets: Tensor
+    ):
         key = RealSearchCacheKey(search_args, ref_offsets, query_offsets)
         return self._search_cache.get(key)
 

@@ -118,10 +118,16 @@ class FactorGridIntraCommunication(BaseSpatialModule):
     This is equivalent to GridFeaturesGroupIntraCommunication but works with FactorGrid objects.
     """
 
-    def __init__(self, communication_types: List[Literal["sum", "mul"]] = ["sum"]) -> None:
+    def __init__(
+        self, communication_types: List[Literal["sum", "mul"]] = ["sum"]
+    ) -> None:
         super().__init__()
-        assert len(communication_types) > 0, "At least one communication type must be provided"
-        assert len(communication_types) <= 2, "At most two communication types can be provided"
+        assert (
+            len(communication_types) > 0
+        ), "At least one communication type must be provided"
+        assert (
+            len(communication_types) <= 2
+        ), "At most two communication types can be provided"
         self.communication_types = communication_types
 
     def forward(self, factor_grid: FactorGrid) -> FactorGrid:
@@ -135,7 +141,9 @@ class FactorGridPadToMatch(BaseSpatialModule):
     def __init__(self):
         super().__init__()
 
-    def forward(self, up_factor_grid: FactorGrid, down_factor_grid: FactorGrid) -> FactorGrid:
+    def forward(
+        self, up_factor_grid: FactorGrid, down_factor_grid: FactorGrid
+    ) -> FactorGrid:
         """Pad up_factor_grid to match down_factor_grid spatial dimensions."""
         assert len(up_factor_grid) == len(
             down_factor_grid
@@ -158,11 +166,15 @@ class FactorGridPadToMatch(BaseSpatialModule):
                 # Calculate padding needed
                 pad_h = max(0, down_shape[0] - up_shape[0])
                 pad_w = max(0, down_shape[1] - up_shape[1])
-                pad_d = max(0, down_shape[2] - up_shape[2]) if len(down_shape) > 2 else 0
+                pad_d = (
+                    max(0, down_shape[2] - up_shape[2]) if len(down_shape) > 2 else 0
+                )
 
                 # Apply padding
                 if len(down_shape) == 2:  # 2D case
-                    padded_features = F.pad(up_features, (0, pad_w, 0, pad_h), mode="replicate")
+                    padded_features = F.pad(
+                        up_features, (0, pad_w, 0, pad_h), mode="replicate"
+                    )
                 else:  # 3D case
                     padded_features = F.pad(
                         up_features, (0, pad_d, 0, pad_w, 0, pad_h), mode="replicate"
@@ -260,7 +272,9 @@ class FactorGridToPoint(BaseSpatialModule):
         )  # Shape: B, C, N, 1, 1
 
         # Reshape to (B*N, C)
-        sampled_features = sampled_features.squeeze(-1).squeeze(-1).transpose(1, 2)  # B, N, C
+        sampled_features = (
+            sampled_features.squeeze(-1).squeeze(-1).transpose(1, 2)
+        )  # B, N, C
         sampled_features = sampled_features.flatten(start_dim=0, end_dim=1)  # B*N, C
         return sampled_features
 
@@ -291,14 +305,20 @@ class FactorGridToPoint(BaseSpatialModule):
             # Use bounds from the first grid for relative position calculation
             bounds_min, bounds_max = factor_grid[0].bounds
             rel_pos = point_coords - ((bounds_max + bounds_min) / 2.0)
-            pos_encoding = sinusoidal_encoding(rel_pos, self.pos_embed_dim, data_range=2)
-            combined_features = torch.cat([point_feats, grid_feat_per_point, pos_encoding], dim=-1)
+            pos_encoding = sinusoidal_encoding(
+                rel_pos, self.pos_embed_dim, data_range=2
+            )
+            combined_features = torch.cat(
+                [point_feats, grid_feat_per_point, pos_encoding], dim=-1
+            )
         elif self.use_rel_pos:
             # Use raw relative positions
             # Use bounds from the first grid for relative position calculation
             bounds_min, bounds_max = factor_grid[0].bounds
             rel_pos = point_coords - ((bounds_max + bounds_min) / 2.0)
-            combined_features = torch.cat([point_feats, grid_feat_per_point, rel_pos], dim=-1)
+            combined_features = torch.cat(
+                [point_feats, grid_feat_per_point, rel_pos], dim=-1
+            )
         else:
             # Just concatenate point and grid features
             combined_features = torch.cat([point_feats, grid_feat_per_point], dim=-1)
@@ -371,7 +391,9 @@ class PointToFactorGrid(BaseSpatialModule):
 
     def forward(self, points: Points) -> FactorGrid:
         """Convert point features to FactorGrid."""
-        from warpconvnet.geometry.types.conversion.to_factor_grid import points_to_factor_grid
+        from warpconvnet.geometry.types.conversion.to_factor_grid import (
+            points_to_factor_grid,
+        )
 
         # Convert points to FactorGrid using the existing function
         factor_grid = points_to_factor_grid(
@@ -439,7 +461,11 @@ class _FactorGridConvNormAct(BaseSpatialModule):
                     bias=True,
                 )
             ),
-            norm(out_channels * compressed_spatial_dim) if norm is not None else nn.Identity(),
+            (
+                norm(out_channels * compressed_spatial_dim)
+                if norm is not None
+                else nn.Identity()
+            ),
             activation() if activation is not None else nn.Identity(),
         )
 
@@ -474,8 +500,12 @@ class _FactorGridConvNormAct(BaseSpatialModule):
             if self.up_stride is not None:
                 non_compressed_axes = [i for i in range(3) if i != axis]
                 # Pad the features to match the grid shape
-                pad_h = max(0, grid_shape[non_compressed_axes[0]] - processed_features.shape[2])
-                pad_w = max(0, grid_shape[non_compressed_axes[1]] - processed_features.shape[3])
+                pad_h = max(
+                    0, grid_shape[non_compressed_axes[0]] - processed_features.shape[2]
+                )
+                pad_w = max(
+                    0, grid_shape[non_compressed_axes[1]] - processed_features.shape[3]
+                )
                 processed_features = F.pad(
                     processed_features, (0, pad_w, 0, pad_h), mode="replicate"
                 )

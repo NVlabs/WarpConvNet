@@ -104,7 +104,9 @@ def _prepare_grouped_trAB_params(
         return None
 
     # gather_sizes: number of matching pairs per group
-    gather_sizes_list = [int(offsets_cpu[k + 1] - offsets_cpu[k]) for k in group_indices]
+    gather_sizes_list = [
+        int(offsets_cpu[k + 1] - offsets_cpu[k]) for k in group_indices
+    ]
     gather_sizes = torch.tensor(gather_sizes_list, dtype=torch.int32, device=device)
 
     # map_offsets: start offset into in_map/out_map per group
@@ -153,28 +155,43 @@ def _cute_grouped_forward_logic(
     _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    out_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    )
 
     # The C++ binding downcasts float32 inputs to float16 for the CuTe kernel.
     # Weight data is passed as raw device pointers, so we must cast weights
     # to the same compute dtype here to avoid type mismatch (root cause of
     # garbage output / NaN with float32 inputs).
-    compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
+    compute_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
+    )
     _weight_compute = _weight.to(dtype=compute_dtype).contiguous()
 
     # Initialize output
     if iden_idx is not None:
         output = torch.matmul(_in_features, _weight[iden_idx]).to(dtype=out_dtype)
     else:
-        output = torch.zeros(num_out_coords, weight.shape[-1], device=device, dtype=out_dtype)
+        output = torch.zeros(
+            num_out_coords, weight.shape[-1], device=device, dtype=out_dtype
+        )
 
     tile_m = _TILE_M_SIZES.get(mma_tile, 64)
-    params = _prepare_grouped_params(kernel_map, _weight_compute, iden_idx, tile_m, device)
+    params = _prepare_grouped_params(
+        kernel_map, _weight_compute, iden_idx, tile_m, device
+    )
 
     if params is None:
         return output
 
-    weight_ptrs, tile_offsets, group_sizes, map_offsets, group_indices, total_m_tiles = params
+    (
+        weight_ptrs,
+        tile_offsets,
+        group_sizes,
+        map_offsets,
+        group_indices,
+        total_m_tiles,
+    ) = params
 
     in_map = kernel_map.in_maps.to(device).int().contiguous()
     out_map = kernel_map.out_maps.to(device).int().contiguous()
@@ -222,10 +239,14 @@ def _cute_grouped_backward_logic(
     _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    out_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
+    )
 
     # Match the C++ binding's float32→float16 downcast for weight pointers
-    compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
+    compute_dtype = (
+        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
+    )
 
     iden_idx = kernel_map.identity_map_index
     grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
@@ -233,7 +254,9 @@ def _cute_grouped_backward_logic(
     # --- Input gradient: fused grouped GEMM ---
     if requires_grad[0]:
         if iden_idx is not None:
-            grad_in_features = torch.matmul(_grad_output, _weight[iden_idx].T).to(dtype=out_dtype)
+            grad_in_features = torch.matmul(_grad_output, _weight[iden_idx].T).to(
+                dtype=out_dtype
+            )
         else:
             grad_in_features = torch.zeros(
                 _in_features.shape[0],
@@ -252,9 +275,14 @@ def _cute_grouped_backward_logic(
         params = _prepare_grouped_params(kernel_map, weight_t, iden_idx, tile_m, device)
 
         if params is not None:
-            weight_ptrs, tile_offsets, group_sizes, map_offsets, group_indices, total_m_tiles = (
-                params
-            )
+            (
+                weight_ptrs,
+                tile_offsets,
+                group_sizes,
+                map_offsets,
+                group_indices,
+                total_m_tiles,
+            ) = params
             out_map_dev = kernel_map.out_maps.to(device).int().contiguous()
             in_map_dev = kernel_map.in_maps.to(device).int().contiguous()
 
@@ -284,12 +312,18 @@ def _cute_grouped_backward_logic(
     # --- Weight gradient: fused grouped TrAB ---
     if requires_grad[1]:
         if iden_idx is not None:
-            grad_weight[iden_idx] = torch.matmul(_in_features.T, _grad_output).to(dtype=out_dtype)
+            grad_weight[iden_idx] = torch.matmul(_in_features.T, _grad_output).to(
+                dtype=out_dtype
+            )
 
-        trAB_params = _prepare_grouped_trAB_params(kernel_map, grad_weight, iden_idx, device)
+        trAB_params = _prepare_grouped_trAB_params(
+            kernel_map, grad_weight, iden_idx, device
+        )
 
         if trAB_params is not None:
-            output_ptrs, gather_sizes, map_offsets_t, in_map_dev, out_map_dev = trAB_params
+            output_ptrs, gather_sizes, map_offsets_t, in_map_dev, out_map_dev = (
+                trAB_params
+            )
             C_in = _in_features.shape[1]
             C_out = _grad_output.shape[1]
 

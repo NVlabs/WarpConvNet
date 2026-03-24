@@ -47,7 +47,9 @@ class Transform(BaseSpatialModule):
             Transformed point collection
         """
         if isinstance(sfs, Geometry):
-            return sfs.replace(batched_features=self.feature_transform_fn(sfs.feature_tensor))
+            return sfs.replace(
+                batched_features=self.feature_transform_fn(sfs.feature_tensor)
+            )
 
         # When input is not a single BatchedSpatialFeatures, we assume the inputs are features
         assert [isinstance(sf, Geometry) for sf in sfs] == [True] * len(sfs)

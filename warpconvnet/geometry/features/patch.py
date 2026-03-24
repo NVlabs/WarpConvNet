@@ -85,7 +85,9 @@ class CatPatchFeatures(CatFeatures):
 
     def __getitem__(self, idx: int) -> Float[Tensor, "N C"]:  # noqa: F722,F821
         N = self.offsets[idx + 1] - self.offsets[idx]
-        return self.batched_tensor[self.patch_offsets[idx] : self.patch_offsets[idx] + N, :]
+        return self.batched_tensor[
+            self.patch_offsets[idx] : self.patch_offsets[idx] + N, :
+        ]
 
     def to_cat(self) -> CatFeatures:
         batch_tensor = torch.empty(
@@ -106,12 +108,16 @@ class CatPatchFeatures(CatFeatures):
         patch_offsets: Optional[Int[Tensor, "B+1"]] = None,  # noqa: F821
         **kwargs,
     ):
-        batched_tensor = batched_tensor if batched_tensor is not None else self.batched_tensor
+        batched_tensor = (
+            batched_tensor if batched_tensor is not None else self.batched_tensor
+        )
         return self.__class__(
             batched_tensor=batched_tensor,
             offsets=(offsets if offsets is not None else self.offsets),
             patch_size=patch_size if patch_size is not None else self.patch_size,
-            patch_offsets=(patch_offsets if patch_offsets is not None else self.patch_offsets),
+            patch_offsets=(
+                patch_offsets if patch_offsets is not None else self.patch_offsets
+            ),
             **kwargs,
         )
 

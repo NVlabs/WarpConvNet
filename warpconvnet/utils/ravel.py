@@ -27,7 +27,8 @@ def ravel_multi_index(
     if isinstance(spatial_shape, torch.Tensor):
         spatial_shape = tuple(spatial_shape.cpu().tolist())
     strides = torch.tensor(
-        [np.prod(spatial_shape[i + 1 :]) for i in range(len(spatial_shape))], dtype=torch.int64
+        [np.prod(spatial_shape[i + 1 :]) for i in range(len(spatial_shape))],
+        dtype=torch.int64,
     ).to(multi_index.device)
     return (multi_index * strides).sum(dim=-1)
 

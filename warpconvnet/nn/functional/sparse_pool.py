@@ -85,7 +85,9 @@ def sparse_reduce(
     in_features = voxels.feature_tensor
     device = in_features.device
 
-    out_features = row_reduction(in_features[in_maps], map_offsets.to(device), reduction)
+    out_features = row_reduction(
+        in_features[in_maps], map_offsets.to(device), reduction
+    )
 
     if len(unique_out_maps) != batch_indexed_out_coords.shape[0]:
         warnings.warn(

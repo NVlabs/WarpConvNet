@@ -23,11 +23,13 @@ def batch_index_from_offset(
     `offsets` has B+1 elements, defining B batches.
     Output has N = offsets[B] elements.
     """
-    assert len(offsets) > 1, "offsets must have at least two elements. [0, N] for batch size 1"
+    assert (
+        len(offsets) > 1
+    ), "offsets must have at least two elements. [0, N] for batch size 1"
     count = torch.diff(offsets)
-    batch = torch.arange(len(count), device=offsets.device, dtype=torch.long).repeat_interleave(
-        count
-    )
+    batch = torch.arange(
+        len(count), device=offsets.device, dtype=torch.long
+    ).repeat_interleave(count)
     return batch
 
 
@@ -53,7 +55,9 @@ def batch_index_from_indices(
         elif offsets.is_cuda:
             _dev = str(offsets.device)
         else:
-            raise ValueError("At least one tensor must be on CUDA if device is not specified.")
+            raise ValueError(
+                "At least one tensor must be on CUDA if device is not specified."
+            )
 
     if not indices.is_cuda or str(indices.device) != _dev:
         indices = indices.to(_dev)
@@ -70,7 +74,9 @@ def batch_index_from_indices(
         return torch.empty(0, dtype=torch.int32, device=_dev)
     if M_len == 0:  # No offsets defined, cannot determine batch
         raise ValueError("Offsets cannot be empty.")
-    if M_len == 1:  # Only one offset value, e.g. offsets=[limit]. All indices < limit are batch 0.
+    if (
+        M_len == 1
+    ):  # Only one offset value, e.g. offsets=[limit]. All indices < limit are batch 0.
         return torch.zeros(N_indices, dtype=torch.int32, device=_dev)
 
     batch_index_buffer = torch.empty(N_indices, dtype=torch.int32, device=_dev)
@@ -160,7 +166,9 @@ def offsets_from_offsets(
         else:
             # if no device is specified, use the device of sorted_indices
             batch_index = batch_index.to(sorted_indices.device)
-        _, batch_counts = torch.unique_consecutive(batch_index[sorted_indices], return_counts=True)
+        _, batch_counts = torch.unique_consecutive(
+            batch_index[sorted_indices], return_counts=True
+        )
         batch_counts = batch_counts.cpu()
         new_offsets = torch.cat((batch_counts.new_zeros(1), batch_counts.cumsum(dim=0)))
     return new_offsets

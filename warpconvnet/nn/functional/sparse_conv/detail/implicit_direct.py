@@ -40,9 +40,9 @@ def _implicit_gemm_forward_logic(
     iden_idx = kernel_map.identity_map_index
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
-            dtype=min_dtype
-        )
+        output_feature_tensor = torch.matmul(
+            _in_features_detached, _weight_detached[iden_idx]
+        ).to(dtype=min_dtype)
     else:
         output_feature_tensor = torch.zeros(
             (num_out_coords, C_out), dtype=min_dtype, device=device
@@ -105,7 +105,9 @@ def _implicit_gemm_backward_logic(
 
     grad_weight_tensor = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
     if iden_idx is not None:
-        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
+        grad_in_features = torch.matmul(
+            _grad_output_detached, _weight_detached[iden_idx].T
+        )
         grad_weight_tensor[iden_idx] = torch.matmul(
             _in_features_detached.T, _grad_output_detached
         ).to(dtype=min_dtype)
@@ -153,7 +155,9 @@ def _implicit_gemm_backward_logic(
             block_size=split_k_threads_per_block,
         )
 
-    return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(dtype=weight.dtype)
+    return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(
+        dtype=weight.dtype
+    )
 
 
 def _implicit_gemm_forward_grouped(
@@ -184,9 +188,9 @@ def _implicit_gemm_forward_grouped(
     iden_idx = kernel_map.identity_map_index
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
-            dtype=min_dtype
-        )
+        output_feature_tensor = torch.matmul(
+            _in_features_detached, _weight_detached[iden_idx]
+        ).to(dtype=min_dtype)
     else:
         output_feature_tensor = torch.zeros(
             (num_out_coords, C_out), dtype=min_dtype, device=device
@@ -287,7 +291,9 @@ def _implicit_gemm_backward_grouped(
 
     grad_weight_tensor = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
     if iden_idx is not None:
-        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T)
+        grad_in_features = torch.matmul(
+            _grad_output_detached, _weight_detached[iden_idx].T
+        )
         grad_weight_tensor[iden_idx] = torch.matmul(
             _in_features_detached.T, _grad_output_detached
         ).to(dtype=min_dtype)
@@ -346,7 +352,9 @@ def _implicit_gemm_backward_grouped(
 
         if has_grouped_kernel:
             # Grouped kernel for grad_in
-            bucket_weight_T = _weight_detached[bucket_offsets].transpose(-1, -2).contiguous()
+            bucket_weight_T = (
+                _weight_detached[bucket_offsets].transpose(-1, -2).contiguous()
+            )
             _C.gemm.implicit_gemm_grouped(
                 _grad_output_detached,
                 bucket_weight_T,
@@ -375,7 +383,9 @@ def _implicit_gemm_backward_grouped(
             for k_idx in bucket_offsets:
                 _process_offset_backward(k_idx)
 
-    return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(dtype=weight.dtype)
+    return grad_in_features.to(dtype=in_features.dtype), grad_weight_tensor.to(
+        dtype=weight.dtype
+    )
 
 
 class SpatiallySparseConvImplicitGEMMFunction(Function):
@@ -437,8 +447,12 @@ class SpatiallySparseConvImplicitGEMMFunction(Function):
             or N_in == 0
             or grad_output.shape[0] == 0
         ):
-            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            grad_in_final = (
+                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            )
+            grad_weight_final = (
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            )
             return _pad_tuple(grad_in_final, grad_weight_final, 7)
 
         grad_in_features, grad_weight = _implicit_gemm_backward_logic(

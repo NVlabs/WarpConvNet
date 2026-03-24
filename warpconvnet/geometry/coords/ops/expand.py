@@ -32,7 +32,9 @@ def expand_coords(
     if target_device.type != "cuda":
         raise ValueError(f"expand_coords requires CUDA tensors, got {target_device}")
 
-    coords = batch_indexed_coords.to(dtype=torch.int32, device=target_device).contiguous()
+    coords = batch_indexed_coords.to(
+        dtype=torch.int32, device=target_device
+    ).contiguous()
     num_input = coords.shape[0]
 
     num_total_kernels = int(np.prod(kernel_size))
@@ -41,7 +43,9 @@ def expand_coords(
     else:
         kernel_batch = max(1, min(kernel_batch, num_total_kernels))
 
-    offsets = kernel_offsets_from_size(kernel_size, kernel_dilation, device=target_device)
+    offsets = kernel_offsets_from_size(
+        kernel_size, kernel_dilation, device=target_device
+    )
     offsets = offsets.to(dtype=torch.int32).contiguous()
 
     # Start with a moderate load factor and grow as needed.

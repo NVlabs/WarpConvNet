@@ -131,11 +131,17 @@ class TorchHashTable:
             ValueError: If input is not 2D or not on a CUDA device.
         """
         if not isinstance(vec_keys, torch.Tensor):
-            raise TypeError(f"Input vec_keys must be a PyTorch Tensor, got {type(vec_keys)}")
+            raise TypeError(
+                f"Input vec_keys must be a PyTorch Tensor, got {type(vec_keys)}"
+            )
         if not vec_keys.is_cuda:
-            raise ValueError(f"Input vec_keys must be on a CUDA device, got {vec_keys.device}")
+            raise ValueError(
+                f"Input vec_keys must be on a CUDA device, got {vec_keys.device}"
+            )
         if vec_keys.ndim != 2:
-            raise ValueError(f"Input vec_keys must be 2D, got {vec_keys.ndim} dimensions")
+            raise ValueError(
+                f"Input vec_keys must be 2D, got {vec_keys.ndim} dimensions"
+            )
 
         # Ensure correct device and dtype
         if vec_keys.device != self.device:
@@ -164,7 +170,9 @@ class TorchHashTable:
         ), f"Number of keys {num_keys} exceeds recommended capacity/2 ({self._capacity / 2}) for table size {self._capacity}"
 
         # Allocate table on the target device
-        self._table_kvs = torch.empty((self._capacity, 2), dtype=torch.int32, device=self.device)
+        self._table_kvs = torch.empty(
+            (self._capacity, 2), dtype=torch.int32, device=self.device
+        )
         # Allocate storage for vector keys to allow future growth
         self._vector_keys = torch.empty(
             (storage_capacity, key_dim), dtype=torch.int32, device=self.device
@@ -241,10 +249,14 @@ class TorchHashTable:
 
         num_keys = len(vec_keys)
         # Constructor enforces power-of-2 for bitwise AND hash slot computation
-        chosen_capacity = capacity if capacity is not None else max(16, int(num_keys * 2))
+        chosen_capacity = (
+            capacity if capacity is not None else max(16, int(num_keys * 2))
+        )
         storage_capacity = vector_capacity if vector_capacity is not None else num_keys
         # Pass the hash_method and device to the constructor
-        obj = cls(capacity=chosen_capacity, hash_method=hash_method, device=target_device)
+        obj = cls(
+            capacity=chosen_capacity, hash_method=hash_method, device=target_device
+        )
         obj.insert(vec_keys, storage_capacity=storage_capacity)
         return obj
 
@@ -289,7 +301,9 @@ class TorchHashTable:
             search_keys = search_keys.to(table_device)
 
         if search_keys.ndim != 2:
-            raise ValueError(f"Input search_keys must be 2D, got {search_keys.ndim} dimensions")
+            raise ValueError(
+                f"Input search_keys must be 2D, got {search_keys.ndim} dimensions"
+            )
         if search_keys.shape[1] != self._key_dim:
             raise ValueError(
                 f"Search keys dimension ({search_keys.shape[1]}) must match "
@@ -408,7 +422,9 @@ class TorchHashTable:
                 "TorchHashTable.expand_with_offsets exceeded vector storage capacity."
             )
         if status == _EXPAND_STATUS_TABLE_FULL:
-            raise RuntimeError("TorchHashTable.expand_with_offsets ran out of hash table slots.")
+            raise RuntimeError(
+                "TorchHashTable.expand_with_offsets ran out of hash table slots."
+            )
 
         self._num_entries = int(num_entries_tensor.item())
 
@@ -513,7 +529,9 @@ class TorchHashTable:
             "vector_capacity",
         }
         if not required_keys.issubset(data.keys()):
-            raise ValueError(f"Data dictionary missing required keys. Need: {required_keys}")
+            raise ValueError(
+                f"Data dictionary missing required keys. Need: {required_keys}"
+            )
 
         capacity = data["capacity"]
         hash_method_value = data["hash_method_value"]
@@ -527,7 +545,9 @@ class TorchHashTable:
 
         # Re-initialize the object with the correct capacity, hash method, and device
         self.__init__(
-            capacity=capacity, hash_method=HashMethod(hash_method_value), device=target_device
+            capacity=capacity,
+            hash_method=HashMethod(hash_method_value),
+            device=target_device,
         )
 
         self._key_dim = key_dim
@@ -547,9 +567,13 @@ class TorchHashTable:
         if vec_keys_np is not None:
             # Allocate full storage and copy populated rows.
             self._vector_keys = torch.empty(
-                (self._vector_capacity, self._key_dim), dtype=torch.int32, device=target_device
+                (self._vector_capacity, self._key_dim),
+                dtype=torch.int32,
+                device=target_device,
             )
-            vec_keys_t = torch.as_tensor(vec_keys_np, dtype=torch.int32, device=target_device)
+            vec_keys_t = torch.as_tensor(
+                vec_keys_np, dtype=torch.int32, device=target_device
+            )
             assert vec_keys_t.ndim == 2
             assert vec_keys_t.shape[1] == self._key_dim
             self._vector_keys[: self._num_entries] = vec_keys_t

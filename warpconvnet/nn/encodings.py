@@ -31,7 +31,9 @@ def normalize_coordinates(
 
 
 class SinusoidalEncoding(nn.Module):
-    def __init__(self, num_channels: int, data_range: float = 2.0, concat_input: bool = True):
+    def __init__(
+        self, num_channels: int, data_range: float = 2.0, concat_input: bool = True
+    ):
         """
         Initialize a sinusoidal encoding layer.
 
@@ -41,7 +43,9 @@ class SinusoidalEncoding(nn.Module):
             concat_input: Whether to concatenate the input to the output.
         """
         super().__init__()
-        assert num_channels % 2 == 0, f"num_channels must be even for sin/cos, got {num_channels}"
+        assert (
+            num_channels % 2 == 0
+        ), f"num_channels must be even for sin/cos, got {num_channels}"
         self.num_channels = num_channels
         self.concat_input = concat_input
         self.register_buffer("freqs", get_freqs(num_channels // 2, data_range))
@@ -52,7 +56,9 @@ class SinusoidalEncoding(nn.Module):
         else:
             return num_input_channels * self.num_channels
 
-    def forward(self, x: Float[Tensor, "* C"]) -> Float[Tensor, "* num_channels*C"]:  # noqa: F821
+    def forward(
+        self, x: Float[Tensor, "* C"]
+    ) -> Float[Tensor, "* num_channels*C"]:  # noqa: F821
         return sinusoidal_encoding(x, freqs=self.freqs, concat_input=self.concat_input)
 
 

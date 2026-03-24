@@ -28,7 +28,9 @@ class BatchedTensor:
 
     def __init__(
         self,
-        batched_tensor: List[Float[Tensor, "N C"]] | Float[Tensor, "N C"],  # noqa: F722,F821
+        batched_tensor: (
+            List[Float[Tensor, "N C"]] | Float[Tensor, "N C"]
+        ),  # noqa: F722,F821
         offsets: Optional[List[int] | Tensor] = None,
         device: Optional[str] = None,
     ):
@@ -45,7 +47,9 @@ class BatchedTensor:
             AssertionError: If invalid combination of inputs is provided or if tensor format is incorrect.
         """
         if isinstance(batched_tensor, Sequence):
-            assert offsets is None, "If batched_tensors is a list, offsets must be None."
+            assert (
+                offsets is None
+            ), "If batched_tensors is a list, offsets must be None."
             batched_tensor, offsets, _ = list_to_cat_tensor(batched_tensor)
         else:
             assert isinstance(
@@ -172,7 +176,10 @@ class BatchedTensor:
     def equal_rigorous(self, value: "BatchedTensor") -> bool:
         if not isinstance(value, BatchedTensor):
             return False
-        return self.equal_shape(value) and (self.batched_tensor == value.batched_tensor).all()
+        return (
+            self.equal_shape(value)
+            and (self.batched_tensor == value.batched_tensor).all()
+        )
 
     def __eq__(self, value: "BatchedTensor") -> bool:
         """
@@ -195,7 +202,9 @@ class BatchedTensor:
         Raises:
             AssertionError: If operating with a BatchedTensor of different shape
         """
-        if isinstance(value, (int, float)) or (torch.is_tensor(value) and value.numel() == 1):
+        if isinstance(value, (int, float)) or (
+            torch.is_tensor(value) and value.numel() == 1
+        ):
             return self.__class__(
                 batched_tensor=getattr(self.batched_tensor, op)(value),
                 offsets=self.offsets,
@@ -230,9 +239,7 @@ class BatchedTensor:
 
     def __str__(self) -> str:
         """Short representation of the object."""
-        return (
-            f"{self.__class__.__name__}(offsets={self.offsets}, shape={self.batched_tensor.shape})"
-        )
+        return f"{self.__class__.__name__}(offsets={self.offsets}, shape={self.batched_tensor.shape})"
 
     def __repr__(self) -> str:
         """Detailed representation of the object."""

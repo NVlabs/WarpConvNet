@@ -47,9 +47,9 @@ def unique_inverse(
     """
     unique, to_orig_indices = torch.unique(x, dim=dim, sorted=True, return_inverse=True)
     to_unique_indices = torch.arange(x.size(dim), dtype=x.dtype, device=x.device)
-    to_unique_indices = torch.empty(unique.size(dim), dtype=x.dtype, device=x.device).scatter_(
-        dim, to_orig_indices, to_unique_indices
-    )
+    to_unique_indices = torch.empty(
+        unique.size(dim), dtype=x.dtype, device=x.device
+    ).scatter_(dim, to_orig_indices, to_unique_indices)
     return to_unique_indices, to_orig_indices
 
 
@@ -91,9 +91,9 @@ def unique_torch(
     if return_to_unique_indices:
         dtype_ind, device = to_orig_indices.dtype, to_orig_indices.device
         to_unique_indices = torch.arange(x.size(dim), dtype=dtype_ind, device=device)
-        to_unique_indices = torch.empty(unique.size(dim), dtype=dtype_ind, device=device).scatter_(
-            dim, to_orig_indices, to_unique_indices
-        )
+        to_unique_indices = torch.empty(
+            unique.size(dim), dtype=dtype_ind, device=device
+        ).scatter_(dim, to_orig_indices, to_unique_indices)
     else:
         to_unique_indices = None
 
@@ -161,7 +161,9 @@ class ToUnique:
     ):
         # Ravel can be used only when the raveled coordinates is less than 2**31
         self.unique_method = unique_method or "torch"
-        self.return_to_unique_indices = return_to_unique_indices or self.unique_method == "ravel"
+        self.return_to_unique_indices = (
+            return_to_unique_indices or self.unique_method == "ravel"
+        )
 
     def to_unique(self, x: Int[Tensor, "N C"], dim: int = 0) -> Int[Tensor, "M C"]:
         if self.unique_method == "ravel":

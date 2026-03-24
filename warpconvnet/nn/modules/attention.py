@@ -89,7 +89,9 @@ class ToAttention(BaseSpatialModule):
         self.out_type = out_type
         self.use_encoding = use_encoding
         if use_encoding:
-            assert num_encoding_channels is not None, "num_encoding_channels must be provided"
+            assert (
+                num_encoding_channels is not None
+            ), "num_encoding_channels must be provided"
             assert encoding_range is not None, "encoding_range must be provided"
             self.encoding = nn.Sequential(
                 SinusoidalEncoding(
@@ -367,7 +369,7 @@ class PatchAttention(BaseSpatialModule):
         """
         patch_size = patch_size or self.patch_size
         counts = torch.diff(offsets)
-        
+
         # Calculate number of patches per batch using ceil division
         num_patches_per_batch = (counts + patch_size - 1) // patch_size
 
@@ -427,7 +429,9 @@ class PatchAttention(BaseSpatialModule):
         if qkv.dtype not in [torch.float16, torch.bfloat16]:
             qkv = qkv.to(torch.float16)
 
-        attn_offsets = self._offset_to_attn_offset(x.offsets, K).to(device=qkv.device, dtype=torch.int32)
+        attn_offsets = self._offset_to_attn_offset(x.offsets, K).to(
+            device=qkv.device, dtype=torch.int32
+        )
         # Warning: When the loss is NaN, this module will fail during backward with
         # index out of bounds error.
         # e.g. /pytorch/aten/src/ATen/native/cuda/ScatterGatherKernel.cu:144: operator(): block: [192,0,0], thread: [32,0,0] Assertion `idx_dim >= 0 && idx_dim < index_size && "
@@ -502,7 +506,9 @@ class TransformerBlock(BaseSpatialModule):
         )
         # Even hidden dimension
         hidden_dim = int(
-            (ffn_multiplier * dim + ffn_multiple_of - 1) // ffn_multiple_of * ffn_multiple_of
+            (ffn_multiplier * dim + ffn_multiple_of - 1)
+            // ffn_multiple_of
+            * ffn_multiple_of
         )
         self.feed_forward = FeedForward(
             dim=dim,

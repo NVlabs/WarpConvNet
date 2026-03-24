@@ -36,7 +36,9 @@ class FactorGrid:
     """
 
     grids: List[Grid]
-    _extra_attributes: Dict[str, Any] = field(default_factory=dict, init=True)  # Store extra args
+    _extra_attributes: Dict[str, Any] = field(
+        default_factory=dict, init=True
+    )  # Store extra args
 
     def __init__(self, grids: List[Grid], **kwargs):
         self.grids = grids
@@ -49,7 +51,9 @@ class FactorGrid:
 
         # Verify all geometries have the same batch size, channels, and grid shape
         for geo in grids:
-            assert geo.batch_size == batch_size, "All geometries must have the same batch size"
+            assert (
+                geo.batch_size == batch_size
+            ), "All geometries must have the same batch size"
             assert (
                 geo.num_channels == num_channels
             ), "All geometries must have the same number of channels"
@@ -71,7 +75,9 @@ class FactorGrid:
         # First check _extra_attributes in kwargs. This happens when we use dataclasses.replace
         if "_extra_attributes" in kwargs:
             attr = kwargs.pop("_extra_attributes")
-            assert isinstance(attr, dict), f"_extra_attributes must be a dictionary, got {attr}"
+            assert isinstance(
+                attr, dict
+            ), f"_extra_attributes must be a dictionary, got {attr}"
             # Update kwargs
             for k, v in attr.items():
                 kwargs[k] = v
@@ -180,7 +186,8 @@ class FactorGrid:
         for grid_a, grid_b in zip(self.grids, other.grids):
             # Add features together using Grid.replace()
             new_features = (
-                grid_a.grid_features.batched_tensor + grid_b.grid_features.batched_tensor
+                grid_a.grid_features.batched_tensor
+                + grid_b.grid_features.batched_tensor
             )
             new_grid = grid_a.replace(batched_features=new_features)
             new_grids.append(new_grid)

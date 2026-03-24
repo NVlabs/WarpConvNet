@@ -133,7 +133,9 @@ class SpatiallySparseConv(BaseSpatialModule):
 
         self.bias: Optional[nn.Parameter] = None
 
-        self.weight = nn.Parameter(torch.randn(np.prod(_kernel_size), in_channels, out_channels))
+        self.weight = nn.Parameter(
+            torch.randn(np.prod(_kernel_size), in_channels, out_channels)
+        )
         if bias:
             self.bias = nn.Parameter(torch.randn(out_channels))
         else:
@@ -169,7 +171,9 @@ class SpatiallySparseConv(BaseSpatialModule):
         fan_in, fan_out = self._calculate_fan_in_and_fan_out()
         return fan_in if mode == "fan_in" else fan_out
 
-    def _custom_kaiming_uniform_(self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"):
+    def _custom_kaiming_uniform_(
+        self, tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"
+    ):
         fan = self._calculate_correct_fan(mode)
         gain = calculate_gain(nonlinearity, a)
         std = gain / math.sqrt(fan)

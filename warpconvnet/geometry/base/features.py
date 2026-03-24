@@ -29,6 +29,4 @@ class Features(BatchedTensor):
         return f"{self.__class__.__name__}(offsets={self.offsets}, shape={self.batched_tensor.shape}, device={self.device}, dtype={self.dtype})"
 
     def __str__(self) -> str:
-        return (
-            f"{self.__class__.__name__}(offsets={self.offsets}, shape={self.batched_tensor.shape})"
-        )
+        return f"{self.__class__.__name__}(offsets={self.offsets}, shape={self.batched_tensor.shape})"

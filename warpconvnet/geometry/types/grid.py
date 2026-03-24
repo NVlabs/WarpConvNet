@@ -283,7 +283,9 @@ class Grid(Geometry):
             # Assert that the grid shape is consistent with the feature tensor shape
             # Only the channel dim can change when using .replace()
             # e.g. in_H, in_W, in_D == self.grid_shape[0], self.grid_shape[1], self.grid_shape[2]
-            compressed_dim = batched_features.shape[1]  # this is the compressed_dim * channels
+            compressed_dim = batched_features.shape[
+                1
+            ]  # this is the compressed_dim * channels
             new_channel_dim = None
             if self.memory_format == GridMemoryFormat.b_zc_x_y:
                 assert batched_features.shape[2] == self.grid_shape[0]
@@ -311,6 +313,8 @@ class Grid(Geometry):
             # no action needed
             pass
         else:
-            raise ValueError(f"Unsupported feature tensor shape: {batched_features.shape}")
+            raise ValueError(
+                f"Unsupported feature tensor shape: {batched_features.shape}"
+            )
 
         return super().replace(batched_coordinates, batched_features, **kwargs)

@@ -196,7 +196,9 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             compute_dtype,
                             custom_params=filtered_params,
                         )
-                        _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results[0]
+                        _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results[
+                            0
+                        ]
                         # Save a serialized copy (algo as string) to the generic cache
                         generic_benchmark_update_entry(
                             "sparse_conv_forward",
@@ -204,7 +206,9 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             _serialize_benchmark_results(all_fwd_benchmark_results),
                             force=False,
                         )
-                        chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
+                        chosen_fwd_algo, chosen_fwd_params, _ = (
+                            all_fwd_benchmark_results[0]
+                        )
         else:
             # Step 4: No cache - always benchmark within filtered space
             if algorithm_filter in ("auto", "all"):
@@ -328,7 +332,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # Normalize input to strings
         if isinstance(initial_bwd_algo, list):
             initial_bwd_algo = [
-                str(a.value) if isinstance(a, Enum) else str(a) for a in initial_bwd_algo
+                str(a.value) if isinstance(a, Enum) else str(a)
+                for a in initial_bwd_algo
             ]
         else:
             initial_bwd_algo = (
@@ -352,8 +357,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
             or N_in == 0
             or grad_output.shape[0] == 0
         ):
-            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            grad_in_final = (
+                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            )
+            grad_weight_final = (
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
+            )
             return _pad_tuple(grad_in_final, grad_weight_final, 10)
 
         # UNIFIED APPROACH: Always benchmark within filtered algorithm space
@@ -426,14 +435,18 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             device,
                             custom_params=filtered_params,
                         )
-                        _BENCHMARK_BACKWARD_RESULTS[config] = all_bwd_benchmark_results[0]
+                        _BENCHMARK_BACKWARD_RESULTS[config] = all_bwd_benchmark_results[
+                            0
+                        ]
                         generic_benchmark_update_entry(
                             "sparse_conv_backward",
                             config,
                             _serialize_benchmark_results(all_bwd_benchmark_results),
                             force=False,
                         )
-                        chosen_bwd_algo, chosen_bwd_params, _ = all_bwd_benchmark_results[0]
+                        chosen_bwd_algo, chosen_bwd_params, _ = (
+                            all_bwd_benchmark_results[0]
+                        )
         else:
             # Step 4: No cache - always benchmark within filtered space
             if algorithm_filter in ("auto", "all"):
@@ -542,7 +555,9 @@ def _execute_forward(
     elif algo == "implicit_gemm":
         current_fwd_block_size = params.get("fwd_block_size")
         if current_fwd_block_size is None:
-            current_fwd_block_size = fwd_block_size if fwd_block_size is not None else 16
+            current_fwd_block_size = (
+                fwd_block_size if fwd_block_size is not None else 16
+            )
             logger.warning(
                 f"fwd_block_size not found in chosen_fwd_params for IMPLICIT_GEMM, using fallback {current_fwd_block_size}"
             )

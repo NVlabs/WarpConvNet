@@ -39,7 +39,9 @@ def kernel_offsets_from_size(
     num_spatial_dims = len(kernel_size)
 
     # Create meshgrid for arbitrary dimensions
-    ranges = [torch.arange(size, dtype=torch.int32, device="cpu") for size in kernel_size]
+    ranges = [
+        torch.arange(size, dtype=torch.int32, device="cpu") for size in kernel_size
+    ]
     grids = torch.meshgrid(*ranges, indexing="ij")
     flattened_grids = [grid.flatten() for grid in grids]
 
@@ -50,7 +52,8 @@ def kernel_offsets_from_size(
 
     # Create offsets for each dimension
     offsets = [
-        (grid - center_offset[i]) * kernel_dilation[i] for i, grid in enumerate(flattened_grids)
+        (grid - center_offset[i]) * kernel_dilation[i]
+        for i, grid in enumerate(flattened_grids)
     ]
 
     # Add batch dimension (zeros)
@@ -84,11 +87,16 @@ def _kernel_map_search_to_result(
 
     # get the index of the non zero elements
     mapped_indices = (
-        torch.cumsum(found_in_coord_index_bool.to(torch.int32), dim=1, dtype=torch.int32) - 1
+        torch.cumsum(
+            found_in_coord_index_bool.to(torch.int32), dim=1, dtype=torch.int32
+        )
+        - 1
     )
     # Need to handle rows with zero valid maps correctly (cumsum results in -1)
     # Clamp minimum value to 0 after subtracting 1
-    mapped_indices = torch.clamp(mapped_indices, min=-1)  # Keep -1 for rows with no hits
+    mapped_indices = torch.clamp(
+        mapped_indices, min=-1
+    )  # Keep -1 for rows with no hits
 
     # Count valid maps per kernel offset row
     # If mapped_indices is -1 everywhere in a row, max will be -1, add 1 -> 0 count.
@@ -96,7 +104,9 @@ def _kernel_map_search_to_result(
 
     # Calculate offsets
     offsets = torch.cumsum(num_valid_maps, dim=0, dtype=torch.int32)
-    offsets = torch.cat([torch.zeros(1, dtype=torch.int32, device=target_device), offsets], dim=0)
+    offsets = torch.cat(
+        [torch.zeros(1, dtype=torch.int32, device=target_device), offsets], dim=0
+    )
     num_total_maps = offsets[-1].item()
 
     # Allocate output tensors
@@ -145,7 +155,9 @@ def _kernel_map_from_offsets(
     assert (
         target_device == batched_query_coords.device
     ), f"{target_device} != {batched_query_coords.device}"
-    assert target_device == kernel_offsets.device, f"{target_device} != {kernel_offsets.device}"
+    assert (
+        target_device == kernel_offsets.device
+    ), f"{target_device} != {kernel_offsets.device}"
     assert batched_query_coords.shape[1] == kernel_offsets.shape[1]
     assert batched_query_coords.ndim == 2
     assert kernel_offsets.ndim == 2
@@ -254,7 +266,9 @@ def _kernel_map_from_size(
                 assert identity_map_index == num_offsets
 
         # Prepare kernel size tensor
-        kernel_size_tensor = torch.tensor(kernel_sizes, dtype=torch.int32, device=target_device)
+        kernel_size_tensor = torch.tensor(
+            kernel_sizes, dtype=torch.int32, device=target_device
+        )
 
         if return_type == "indices":
             # For "indices" return type, use the original search kernel
@@ -346,7 +360,9 @@ def _kernel_map_from_size(
 
         if num_total_maps > 0:
             # Step 4: Fused scatter on intermediate (sequential scan, no hash access)
-            scatter_counters = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
+            scatter_counters = torch.zeros(
+                num_offsets, dtype=torch.int32, device=target_device
+            )
             _C.coords.postprocess_scatter(
                 found_in_coord_index,
                 offsets,
@@ -446,7 +462,9 @@ def generate_kernel_map(
     identity_map_index = None
     # Check if kernel is odd and potentially symmetric
     is_odd_kernel = all(k % 2 == 1 for k in kernel_size)
-    same_in_out_coords = batch_indexed_in_coords.shape[0] == batch_indexed_out_coords.shape[0]
+    same_in_out_coords = (
+        batch_indexed_in_coords.shape[0] == batch_indexed_out_coords.shape[0]
+    )
     if is_odd_kernel and same_in_out_coords:
         total_kernels = int(np.prod(kernel_size))
         center_idx = total_kernels // 2
@@ -462,7 +480,10 @@ def generate_kernel_map(
             kernel_dilation = (1,) * num_spatial_dims
 
         kernel_offsets_tensor = kernel_offsets_from_size(
-            kernel_size, kernel_dilation, center_offset=kernel_center_offset, device=target_device
+            kernel_size,
+            kernel_dilation,
+            center_offset=kernel_center_offset,
+            device=target_device,
         )
         if identity_map_index is not None:
             kernel_offsets_tensor = kernel_offsets_tensor[:center_idx]
