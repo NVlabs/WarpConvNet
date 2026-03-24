@@ -340,13 +340,9 @@ def _run_forward_benchmarks(
             (algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"
         ]
 
-    # Filter out mask_implicit_gemm when channels are unaligned for CuTe
-    # (the SIMT fallback is disabled due to OOB bugs)
-    C_in_val = in_features.shape[1]
-    C_out_val = weight.shape[2]
-    elem_size = in_features.element_size()
-    vec_width = 16 // max(elem_size, 1)
-    if C_in_val % vec_width != 0 or C_out_val % vec_width != 0:
+    # Note: no alignment filter for mask_implicit_gemm — both CUTLASS and mask
+    # kernels auto-pad unaligned channels internally (see cutlass.py, mask_gemm.py).
+    if False:
         params_to_use = [
             (algo, cfg) for (algo, cfg) in params_to_use if algo != "mask_implicit_gemm"
         ]

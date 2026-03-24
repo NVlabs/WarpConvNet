@@ -127,10 +127,19 @@ def _mask_implicit_gemm_forward_logic(
         kernel_map, num_out_coords, device
     )
 
-    # Try CuTe tensor-core path if available and channels are aligned to 8
+    # Auto-pad unaligned channels for CuTe tensor core eligibility
     _has_cute = hasattr(_C.gemm, "cute_gemm_mask_fwd")
     vec_width = 16 // _in_features.element_size()  # 8 for fp16/bf16
-    aligned = (C_in % vec_width == 0) and (C_out % vec_width == 0)
+    orig_C_in, orig_C_out = C_in, C_out
+    needs_padding = (C_in % vec_width != 0) or (C_out % vec_width != 0)
+    if needs_padding and _has_cute and min_dtype in (torch.float16, torch.bfloat16):
+        target_cin = ((C_in + vec_width - 1) // vec_width) * vec_width
+        target_cout = ((C_out + vec_width - 1) // vec_width) * vec_width
+        _in_features = torch.nn.functional.pad(_in_features, (0, target_cin - C_in))
+        _weight = torch.nn.functional.pad(_weight, (0, target_cout - C_out, 0, target_cin - C_in))
+        output = torch.zeros((num_out_coords, target_cout), dtype=min_dtype, device=device)
+        C_in, C_out = target_cin, target_cout
+    aligned = True  # After padding, always aligned
 
     if _has_cute and aligned and min_dtype in (torch.float16, torch.bfloat16):
         status = _C.gemm.cute_gemm_mask_fwd(
@@ -145,6 +154,8 @@ def _mask_implicit_gemm_forward_logic(
             1.0,
         )
         if status == 0:
+            if needs_padding:
+                output = output[:, :orig_C_out]
             return output.to(dtype=in_features.dtype)
         # CuTe failed — signal error so auto-tuner skips this algo
         raise RuntimeError(
@@ -189,20 +200,27 @@ def _mask_implicit_gemm_backward_logic(
     grad_weight = None
 
     if needs_input_grad[0]:
-        grad_in = torch.zeros((N_in, C_in), dtype=min_dtype, device=device)
-        # Try CuTe dgrad (tensor cores) if available and channels aligned
+        # Auto-pad for CuTe dgrad
         _has_cute_dgrad = hasattr(_C.gemm, "cute_gemm_mask_dgrad")
-        vec_width = 16 // _grad_output.element_size()
-        aligned = (C_in % vec_width == 0) and (C_out % vec_width == 0)
+        vec_width_bwd = 16 // _grad_output.element_size()
+        orig_C_in_bwd, orig_C_out_bwd = C_in, C_out
+        _go_bwd, _w_bwd = _grad_output, _weight
+        needs_padding_bwd = (C_in % vec_width_bwd != 0) or (C_out % vec_width_bwd != 0)
+        if needs_padding_bwd and _has_cute_dgrad and min_dtype in (torch.float16, torch.bfloat16):
+            tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
+            tco = ((C_out + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
+            _go_bwd = torch.nn.functional.pad(_grad_output, (0, tco - C_out))
+            _w_bwd = torch.nn.functional.pad(_weight, (0, tco - C_out, 0, tc - C_in))
+            grad_in = torch.zeros((N_in, tc), dtype=min_dtype, device=device)
+        else:
+            grad_in = torch.zeros((N_in, C_in), dtype=min_dtype, device=device)
         used_cute = False
 
-        if _has_cute_dgrad and aligned and min_dtype in (torch.float16, torch.bfloat16):
-            # Pre-transpose weight for vectorized B loads in dgrad kernel:
-            # [K, C_in, C_out] -> [K, C_out, C_in] so B[k] is contiguous [C_out, C_in]
-            # and the kernel can use 128-bit cp.async loads instead of scalar strided loads.
-            _weight_T = _weight.transpose(1, 2).contiguous()
+        if _has_cute_dgrad and min_dtype in (torch.float16, torch.bfloat16):
+            # Pre-transpose weight for vectorized B loads in dgrad kernel
+            _weight_T = _w_bwd.transpose(1, 2).contiguous()
             status = _C.gemm.cute_gemm_mask_dgrad(
-                _grad_output,
+                _go_bwd,
                 _weight_T,
                 grad_in,
                 pair_table,
@@ -230,6 +248,8 @@ def _mask_implicit_gemm_backward_logic(
             if status != 0:
                 raise RuntimeError(f"mask_implicit_gemm_bwd_dgrad failed: {status}")
 
+        if needs_padding_bwd:
+            grad_in = grad_in[:, :orig_C_in_bwd]
         grad_in = grad_in.to(dtype=in_features.dtype)
 
     if needs_input_grad[1]:
