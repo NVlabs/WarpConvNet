@@ -151,8 +151,27 @@ def _initialize_benchmark_cache():
         )
 
 
+def _on_cache_merge(namespace: str, merged_dict: dict) -> None:
+    """Callback from GenericBenchmarkCache when disk data is merged.
+
+    Refreshes the in-memory auto-tune results with entries from other ranks.
+    """
+    if namespace == "sparse_conv_forward":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_FORWARD_RESULTS:
+                _BENCHMARK_FORWARD_RESULTS[k] = _normalize_benchmark_results(v, is_forward=True)
+    elif namespace == "sparse_conv_backward":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_BACKWARD_RESULTS:
+                _BENCHMARK_BACKWARD_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
+
+
 # Initialize cache on module load
 _initialize_benchmark_cache()
+
+# Register callback so other ranks' results refresh our in-memory cache
+from warpconvnet.utils.benchmark_cache import get_generic_benchmark_cache as _get_cache
+_get_cache().register_on_merge_callback(_on_cache_merge)
 
 
 # ---------------------------------------------------------------------------
