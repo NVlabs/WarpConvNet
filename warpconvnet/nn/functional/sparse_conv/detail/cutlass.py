@@ -26,6 +26,30 @@ from warpconvnet.nn.functional.sparse_conv.detail.grouping import (
 _CUTLASS_ALIGNMENT = 8  # CUTLASS tensor ops require channels aligned to 8
 
 
+def _align_to(x: int, alignment: int) -> int:
+    """Round up x to the next multiple of alignment."""
+    return ((x + alignment - 1) // alignment) * alignment
+
+
+def _pad_features(features: Tensor, target_channels: int) -> Tensor:
+    """Zero-pad features along the channel dimension."""
+    if features.shape[-1] >= target_channels:
+        return features
+    pad_size = target_channels - features.shape[-1]
+    return torch.nn.functional.pad(features, (0, pad_size))
+
+
+def _pad_weight(weight: Tensor, target_cin: int, target_cout: int) -> Tensor:
+    """Zero-pad weight [K, C_in, C_out] along both channel dimensions."""
+    K, C_in, C_out = weight.shape
+    if C_in >= target_cin and C_out >= target_cout:
+        return weight
+    pad_cin = target_cin - C_in
+    pad_cout = target_cout - C_out
+    # Pad: (C_out_left, C_out_right, C_in_left, C_in_right)
+    return torch.nn.functional.pad(weight, (0, pad_cout, 0, pad_cin))
+
+
 def _cutlass_implicit_gemm_forward_logic(
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
@@ -38,10 +62,16 @@ def _cutlass_implicit_gemm_forward_logic(
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available. Please install warpconvnet with cutlass support."
 
-    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
+    # Pad unaligned channels so CUTLASS tensor ops can be used
     C_in, C_out = weight.shape[1], weight.shape[2]
-    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
-        return -1  # kErrorProblemNotSupported
+    needs_padding = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    orig_C_out = C_out
+    if needs_padding:
+        target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
+        target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)
+        in_features = _pad_features(in_features, target_cin)
+        weight = _pad_weight(weight, target_cin, target_cout)
+        C_in, C_out = target_cin, target_cout
 
     device = in_features.device
     iden_idx = kernel_map.identity_map_index
@@ -82,6 +112,9 @@ def _cutlass_implicit_gemm_forward_logic(
         )
         if status != 0:
             return status
+    # Slice off padding if channels were padded
+    if needs_padding:
+        output_feature_tensor = output_feature_tensor[:, :orig_C_out]
     return output_feature_tensor.to(dtype=in_features.dtype)
 
 
@@ -101,10 +134,16 @@ def _cutlass_implicit_gemm_backward_logic(
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available. Please install warpconvnet with cutlass support."
 
-    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
     C_in, C_out = weight.shape[1], weight.shape[2]
-    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
-        return -1, 0  # kErrorProblemNotSupported
+    orig_C_in, orig_C_out = C_in, C_out
+    needs_padding_bwd = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    if needs_padding_bwd:
+        target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
+        target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)
+        in_features = _pad_features(in_features, target_cin)
+        grad_output = _pad_features(grad_output, target_cout)
+        weight = _pad_weight(weight, target_cin, target_cout)
+        C_in, C_out = target_cin, target_cout
 
     if device is None:
         device = in_features.device
@@ -168,6 +207,10 @@ def _cutlass_implicit_gemm_backward_logic(
             if status != 0:
                 return status, i
 
+    # Slice off padding from gradients
+    if needs_padding_bwd:
+        grad_in_features = grad_in_features[:, :orig_C_in]
+        grad_weight = grad_weight[:, :orig_C_in, :orig_C_out]
     return (
         grad_in_features.to(dtype=in_features.dtype),
         grad_weight.to(dtype=weight.dtype),
@@ -188,10 +231,15 @@ def _cutlass_implicit_gemm_forward_grouped(
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available."
 
-    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
     C_in, C_out = weight.shape[1], weight.shape[2]
-    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
-        return -1  # kErrorProblemNotSupported
+    orig_C_out_grp = C_out
+    needs_padding_grp = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    if needs_padding_grp:
+        target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
+        target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)
+        in_features = _pad_features(in_features, target_cin)
+        weight = _pad_weight(weight, target_cin, target_cout)
+        C_in, C_out = target_cin, target_cout
 
     device = in_features.device
     iden_idx = kernel_map.identity_map_index
@@ -265,6 +313,8 @@ def _cutlass_implicit_gemm_forward_grouped(
             result_flat[flat_idx].to(dtype=output_feature_tensor.dtype),
         )
 
+    if needs_padding_grp:
+        output_feature_tensor = output_feature_tensor[:, :orig_C_out_grp]
     return output_feature_tensor.to(dtype=in_features.dtype)
 
 
@@ -286,10 +336,16 @@ def _cutlass_implicit_gemm_backward_grouped(
         _C is not None and cutlass_gemm_AD_gather_scatter_autotuned is not None
     ), "CUTLASS autotuned ops are not available."
 
-    # CUTLASS tensor ops require channels aligned to 8 for half/bfloat16
     C_in, C_out = weight.shape[1], weight.shape[2]
-    if C_in % _CUTLASS_ALIGNMENT != 0 or C_out % _CUTLASS_ALIGNMENT != 0:
-        return -1, 0  # kErrorProblemNotSupported
+    orig_C_in_grpb, orig_C_out_grpb = C_in, C_out
+    needs_padding_grpb = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    if needs_padding_grpb:
+        target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
+        target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)
+        in_features = _pad_features(in_features, target_cin)
+        grad_output = _pad_features(grad_output, target_cout)
+        weight = _pad_weight(weight, target_cin, target_cout)
+        C_in, C_out = target_cin, target_cout
 
     if device is None:
         device = in_features.device
@@ -394,6 +450,9 @@ def _cutlass_implicit_gemm_backward_grouped(
             grad_w_result = torch.bmm(gathered_in.transpose(1, 2), gathered_grad)
             grad_weight[bucket_offsets] = grad_w_result.to(dtype=grad_weight.dtype)
 
+    if needs_padding_grpb:
+        grad_in_features = grad_in_features[:, :orig_C_in_grpb]
+        grad_weight = grad_weight[:, :orig_C_in_grpb, :orig_C_out_grpb]
     return (
         grad_in_features.to(dtype=in_features.dtype),
         grad_weight.to(dtype=weight.dtype),
