@@ -327,8 +327,15 @@ def _run_forward_benchmarks(
                 status = _execute_single_fwd_pass(algo_mode, params_config)
                 if isinstance(status, int) and status != 0:
                     break
+            # Sync to catch async CUDA errors from this candidate
+            torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            # Reset CUDA error state to prevent corruption of subsequent candidates
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             continue
 
         if isinstance(status, int) and status != 0:
@@ -343,10 +350,16 @@ def _run_forward_benchmarks(
                 with timer:
                     _execute_single_fwd_pass(algo_mode, params_config)
                 current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+            # Sync to catch async errors
+            torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
             )
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             continue
 
         if current_algo_min_time_ms != float("inf"):
@@ -569,8 +582,13 @@ def _run_backward_benchmarks(
                 status = _execute_single_bwd_pass(algo_mode, params_config)
                 if isinstance(status, int) and status != 0:
                     break
+            torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             continue
 
         if isinstance(status, int) and status != 0:
@@ -589,10 +607,15 @@ def _run_backward_benchmarks(
                     with timer:
                         _execute_single_bwd_pass(algo_mode, params_config)
                     current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+                torch.cuda.synchronize()
             except (RuntimeError, Exception) as e:
                 logger.debug(
                     f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
                 )
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
                 continue
 
         if current_algo_min_time_ms != float("inf"):

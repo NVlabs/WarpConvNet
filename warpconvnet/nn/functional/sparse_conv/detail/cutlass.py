@@ -251,7 +251,7 @@ def _cutlass_implicit_gemm_forward_grouped(
         result_flat = result.view(B * max_m, C_out)
         output_feature_tensor.scatter_add_(
             0,
-            cat_out.unsqueeze(1).expand(-1, C_out),
+            cat_out.unsqueeze(1).expand(-1, C_out).long(),
             result_flat[flat_idx].to(dtype=output_feature_tensor.dtype),
         )
 
@@ -368,7 +368,7 @@ def _cutlass_implicit_gemm_backward_grouped(
             grad_in_result_flat = grad_in_result.view(B * max_m, C_in)
             grad_in_features.scatter_add_(
                 0,
-                cat_in.unsqueeze(1).expand(-1, C_in),
+                cat_in.unsqueeze(1).expand(-1, C_in).long(),
                 grad_in_result_flat[flat_idx].to(dtype=grad_in_features.dtype),
             )
 
