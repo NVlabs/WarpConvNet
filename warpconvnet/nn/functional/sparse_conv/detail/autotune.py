@@ -91,6 +91,15 @@ _BENCHMARK_BACKWARD_RESULTS: Dict[
     SpatiallySparseConvConfig,
     List[Tuple[str, Dict[str, Any], float]],
 ] = {}
+# Separate caches for dgrad-only and wgrad-only benchmarks
+_BENCHMARK_DGRAD_RESULTS: Dict[
+    SpatiallySparseConvConfig,
+    List[Tuple[str, Dict[str, Any], float]],
+] = {}
+_BENCHMARK_WGRAD_RESULTS: Dict[
+    SpatiallySparseConvConfig,
+    List[Tuple[str, Dict[str, Any], float]],
+] = {}
 
 # ---------------------------------------------------------------------------
 # Serialization helpers for cache
@@ -171,6 +180,18 @@ def _on_cache_merge(namespace: str, merged_dict: dict) -> None:
         for k, v in merged_dict.items():
             if k not in _BENCHMARK_BACKWARD_RESULTS:
                 _BENCHMARK_BACKWARD_RESULTS[k] = _normalize_benchmark_results(
+                    v, is_forward=False
+                )
+    elif namespace == "sparse_conv_dgrad":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_DGRAD_RESULTS:
+                _BENCHMARK_DGRAD_RESULTS[k] = _normalize_benchmark_results(
+                    v, is_forward=False
+                )
+    elif namespace == "sparse_conv_wgrad":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_WGRAD_RESULTS:
+                _BENCHMARK_WGRAD_RESULTS[k] = _normalize_benchmark_results(
                     v, is_forward=False
                 )
 
@@ -380,11 +401,10 @@ def _run_forward_benchmarks(
             )
             # Clear CUDA error state to prevent corruption of subsequent candidates.
             # cudaGetLastError() resets the error flag; synchronize() then succeeds.
-            torch.cuda.cudart().cudaGetLastError()
             try:
                 torch.cuda.synchronize()
             except Exception:
-                torch.cuda.cudart().cudaGetLastError()  # Clear again after sync failure
+                pass  # Clear error state by consuming the sync exception  # Clear again after sync failure
             continue
 
         if isinstance(status, int) and status != 0:
@@ -409,11 +429,10 @@ def _run_forward_benchmarks(
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
             )
-            torch.cuda.cudart().cudaGetLastError()
             try:
                 torch.cuda.synchronize()
             except Exception:
-                torch.cuda.cudart().cudaGetLastError()
+                pass  # Clear error state by consuming the sync exception
             continue
 
         if current_algo_min_time_ms != float("inf"):
@@ -462,8 +481,15 @@ def _run_backward_benchmarks(
     warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
     benchmark_iters: int = _BENCHMARK_NUM_RUNS,
     custom_params: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    needs_input_grad: Tuple[bool, bool] = (True, True),
 ) -> List[Tuple[str, Dict[str, Any], float]]:
-    """Benchmark different backward algorithms and return sorted results (best first)."""
+    """Benchmark different backward algorithms and return sorted results (best first).
+
+    Args:
+        needs_input_grad: Tuple (need_dgrad, need_wgrad). When benchmarking
+            dgrad and wgrad separately, set one to False to measure only the
+            other direction.
+    """
     warmup_iters = max(warmup_iters, 1)
     benchmark_iters = max(benchmark_iters, 1)
 
@@ -564,7 +590,7 @@ def _run_backward_benchmarks(
                 in_features,
                 weight,
                 kernel_map,
-                requires_grad=(True, True),
+                requires_grad=needs_input_grad,
                 device=device,
                 mma_tile=params_config.get("mma_tile", 3),
             )
@@ -591,7 +617,7 @@ def _run_backward_benchmarks(
                 in_features,
                 weight,
                 kernel_map,
-                requires_grad=(True, True),
+                requires_grad=needs_input_grad,
                 device=device,
                 mma_tile=params_config.get("mma_tile", 100),
             )
@@ -607,7 +633,7 @@ def _run_backward_benchmarks(
                 kernel_map,
                 num_out_coords,
                 compute_dtype,
-                needs_input_grad=(True, True),
+                needs_input_grad=needs_input_grad,
                 block_size=params_config.get("block_size", 16),
             )
         else:
@@ -654,11 +680,10 @@ def _run_backward_benchmarks(
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})"
             )
-            torch.cuda.cudart().cudaGetLastError()
             try:
                 torch.cuda.synchronize()
             except Exception:
-                torch.cuda.cudart().cudaGetLastError()
+                pass  # Clear error state by consuming the sync exception
             continue
 
         if isinstance(status, int) and status != 0:

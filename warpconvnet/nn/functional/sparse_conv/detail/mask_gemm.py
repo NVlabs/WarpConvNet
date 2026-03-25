@@ -136,8 +136,12 @@ def _mask_implicit_gemm_forward_logic(
         target_cin = ((C_in + vec_width - 1) // vec_width) * vec_width
         target_cout = ((C_out + vec_width - 1) // vec_width) * vec_width
         _in_features = torch.nn.functional.pad(_in_features, (0, target_cin - C_in))
-        _weight = torch.nn.functional.pad(_weight, (0, target_cout - C_out, 0, target_cin - C_in))
-        output = torch.zeros((num_out_coords, target_cout), dtype=min_dtype, device=device)
+        _weight = torch.nn.functional.pad(
+            _weight, (0, target_cout - C_out, 0, target_cin - C_in)
+        )
+        output = torch.zeros(
+            (num_out_coords, target_cout), dtype=min_dtype, device=device
+        )
         C_in, C_out = target_cin, target_cout
     aligned = True  # After padding, always aligned
 
@@ -206,7 +210,11 @@ def _mask_implicit_gemm_backward_logic(
         orig_C_in_bwd, orig_C_out_bwd = C_in, C_out
         _go_bwd, _w_bwd = _grad_output, _weight
         needs_padding_bwd = (C_in % vec_width_bwd != 0) or (C_out % vec_width_bwd != 0)
-        if needs_padding_bwd and _has_cute_dgrad and min_dtype in (torch.float16, torch.bfloat16):
+        if (
+            needs_padding_bwd
+            and _has_cute_dgrad
+            and min_dtype in (torch.float16, torch.bfloat16)
+        ):
             tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
             tco = ((C_out + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
             _go_bwd = torch.nn.functional.pad(_grad_output, (0, tco - C_out))
