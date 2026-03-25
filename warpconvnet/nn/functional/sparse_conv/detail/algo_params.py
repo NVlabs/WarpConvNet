@@ -178,8 +178,10 @@ _FWD_CUTE_GROUPED_SM90 = (
         ("cute_grouped_sm90", {"mma_tile": 104, "use_cp_async": True}),
     ]
 )
-_FWD_IMPLICIT_GEMM_16 = [("implicit_gemm", {"fwd_block_size": 16})]
-_FWD_IMPLICIT_GEMM_32 = [("implicit_gemm", {"fwd_block_size": 32})]
+# implicit_gemm: 0% forward wins in time-weighted analysis (208 configs).
+# Kept for backward (3.4% dgrad, 4.8% wgrad) but removed from forward.
+_FWD_IMPLICIT_GEMM_16 = []  # was [("implicit_gemm", {"fwd_block_size": 16})]
+_FWD_IMPLICIT_GEMM_32 = []  # was [("implicit_gemm", {"fwd_block_size": 32})]
 _FWD_CUTE_GROUPED = (
     []
     if not _HAS_CUTE_GROUPED
@@ -189,21 +191,20 @@ _FWD_CUTE_GROUPED = (
         ("cute_grouped", {"mma_tile": 1}),
     ]
 )
-_FWD_IMPLICIT_GEMM_GROUPED = [
-    ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 2000}),
-    ("implicit_gemm_grouped", {"fwd_block_size": 16, "saturation_m": 5000}),
-]
+# implicit_gemm_grouped: 0% wins in all directions (forward, dgrad, wgrad).
+_FWD_IMPLICIT_GEMM_GROUPED = []  # was 2 configs
 _FWD_MASK_IMPLICIT_GEMM = [
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
 ]
-_FWD_CUTE_IMPLICIT = [] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]
-_FWD_EXPLICIT = [("explicit_gemm", {})]
-_FWD_EXPLICIT_GROUPED = [
-    ("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000]
-]
+# cute_implicit_gemm: 0% wins in all directions. Dead weight.
+_FWD_CUTE_IMPLICIT = []  # was [("cute_implicit_gemm", {})]
+# explicit_gemm: 0% forward wins. Kept as fallback only, not in auto-tune candidates.
+_FWD_EXPLICIT = []  # was [("explicit_gemm", {})]
+# explicit_gemm_grouped: 0% forward wins, 2.4% dgrad, 1.4% wgrad.
+_FWD_EXPLICIT_GROUPED = []  # was 2 configs
 
 
 import math as _math
@@ -294,19 +295,17 @@ def _get_adaptive_forward_params(
     return params
 
 
-# Full forward benchmark candidates ("all"): exhaustive search including rarely-winning variants.
+# Full forward benchmark candidates ("all"): exhaustive search.
+# Trimmed based on time-weighted analysis of 208 configs:
+# Removed: cute_implicit_gemm (0%), implicit_gemm (0%), implicit_gemm_grouped (0%),
+#          explicit_gemm (0%), explicit_gemm_grouped (0%)
 _ALL_BENCHMARK_FORWARD_PARAMS = [
     *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
-    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
-    *[("implicit_gemm", {"fwd_block_size": block_size}) for block_size in [4, 16, 32]],
-    ("explicit_gemm", {}),
-    # Grouped variants: adaptive offset grouping with batched execution
-    *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    *[
-        ("implicit_gemm_grouped", {"fwd_block_size": bs, "saturation_m": m})
-        for bs in [16, 32]
-        for m in [2000, 5000]
-    ],
+    # cute_implicit_gemm: removed (0% wins across all directions)
+    # implicit_gemm: removed from forward (0% wins; kept for backward)
+    # explicit_gemm: removed from forward (0% wins; kept as fallback)
+    # explicit_gemm_grouped: removed from forward (0% wins)
+    # implicit_gemm_grouped: removed (0% wins across all directions)
     *(
         [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
         if _HAS_CUTLASS_BACKEND
@@ -508,9 +507,10 @@ def _get_adaptive_backward_params(
 
 
 # Full backward benchmark candidates ("all"): exhaustive search.
+# Trimmed: cute_implicit_gemm (0% all directions), implicit_gemm_grouped (0% all directions)
 _ALL_BENCHMARK_BACKWARD_PARAMS = [
     *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
-    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
+    # cute_implicit_gemm: removed (0% wins across all directions)
     *[
         (
             "implicit_gemm",
@@ -527,20 +527,7 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
     ("explicit_gemm", {}),
     # Grouped backward variants
     *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    *[
-        (
-            "implicit_gemm_grouped",
-            {
-                "gemm_block_size": bs,
-                "split_k_threads_per_block": 256,
-                "split_k_factor": sf,
-                "saturation_m": m,
-            },
-        )
-        for bs in [16, 32]
-        for sf in [4, 8]
-        for m in [2000, 5000]
-    ],
+    # implicit_gemm_grouped: removed (0% wins across all directions)
     *(
         [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
         if _HAS_CUTLASS_BACKEND

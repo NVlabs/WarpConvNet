@@ -87,10 +87,6 @@ _BENCHMARK_FORWARD_RESULTS: Dict[
     SpatiallySparseConvConfig,
     List[Tuple[str, Dict[str, Any], float]],
 ] = {}
-_BENCHMARK_BACKWARD_RESULTS: Dict[
-    SpatiallySparseConvConfig,
-    List[Tuple[str, Dict[str, Any], float]],
-] = {}
 # Separate caches for dgrad-only and wgrad-only benchmarks
 _BENCHMARK_DGRAD_RESULTS: Dict[
     SpatiallySparseConvConfig,
@@ -145,23 +141,32 @@ def _normalize_benchmark_results(
 def _initialize_benchmark_cache():
     """Load cached benchmark results and populate global dictionaries."""
     forward_ns = generic_benchmark_get_namespace("sparse_conv_forward")
-    backward_ns = generic_benchmark_get_namespace("sparse_conv_backward")
+    dgrad_ns = generic_benchmark_get_namespace("sparse_conv_dgrad")
+    wgrad_ns = generic_benchmark_get_namespace("sparse_conv_wgrad")
 
-    # Normalize any stored values to strings
     if isinstance(forward_ns, dict):
         for k, v in forward_ns.items():
             _BENCHMARK_FORWARD_RESULTS[k] = _normalize_benchmark_results(
                 v, is_forward=True
             )
-    if isinstance(backward_ns, dict):
-        for k, v in backward_ns.items():
-            _BENCHMARK_BACKWARD_RESULTS[k] = _normalize_benchmark_results(
+    if isinstance(dgrad_ns, dict):
+        for k, v in dgrad_ns.items():
+            _BENCHMARK_DGRAD_RESULTS[k] = _normalize_benchmark_results(
                 v, is_forward=False
             )
-    if forward_ns or backward_ns:
+    if isinstance(wgrad_ns, dict):
+        for k, v in wgrad_ns.items():
+            _BENCHMARK_WGRAD_RESULTS[k] = _normalize_benchmark_results(
+                v, is_forward=False
+            )
+
+    n_fwd = len(forward_ns) if forward_ns else 0
+    n_dgrad = len(dgrad_ns) if dgrad_ns else 0
+    n_wgrad = len(wgrad_ns) if wgrad_ns else 0
+    if n_fwd or n_dgrad or n_wgrad:
         logger.info(
-            f"Loaded {len(forward_ns)} forward and {len(backward_ns)} "
-            f"backward benchmark configurations from cache"
+            f"Loaded {n_fwd} forward, {n_dgrad} dgrad, {n_wgrad} wgrad "
+            f"benchmark configurations from cache"
         )
 
 
@@ -175,12 +180,6 @@ def _on_cache_merge(namespace: str, merged_dict: dict) -> None:
             if k not in _BENCHMARK_FORWARD_RESULTS:
                 _BENCHMARK_FORWARD_RESULTS[k] = _normalize_benchmark_results(
                     v, is_forward=True
-                )
-    elif namespace == "sparse_conv_backward":
-        for k, v in merged_dict.items():
-            if k not in _BENCHMARK_BACKWARD_RESULTS:
-                _BENCHMARK_BACKWARD_RESULTS[k] = _normalize_benchmark_results(
-                    v, is_forward=False
                 )
     elif namespace == "sparse_conv_dgrad":
         for k, v in merged_dict.items():
@@ -711,11 +710,10 @@ def _run_backward_benchmarks(
                 logger.debug(
                     f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
                 )
-                torch.cuda.cudart().cudaGetLastError()
                 try:
                     torch.cuda.synchronize()
                 except Exception:
-                    torch.cuda.cudart().cudaGetLastError()
+                    pass  # Clear error state by consuming the sync exception
                 continue
 
         if current_algo_min_time_ms != float("inf"):

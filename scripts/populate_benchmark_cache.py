@@ -297,7 +297,6 @@ def run_single_config(
     from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
     from warpconvnet.nn.functional.sparse_conv.detail.unified import (
         _BENCHMARK_FORWARD_RESULTS,
-        _BENCHMARK_BACKWARD_RESULTS,
         _BENCHMARK_DGRAD_RESULTS,
         _BENCHMARK_WGRAD_RESULTS,
         _get_adaptive_forward_params,
