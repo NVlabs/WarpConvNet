@@ -634,6 +634,7 @@ def _run_backward_benchmarks(
                 compute_dtype,
                 needs_input_grad=needs_input_grad,
                 block_size=params_config.get("block_size", 16),
+                mma_tile=params_config.get("mma_tile", 3),
             )
         else:
             raise ValueError(

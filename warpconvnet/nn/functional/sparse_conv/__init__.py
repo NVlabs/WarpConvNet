@@ -27,3 +27,11 @@ from .detail.unified import (
     SPARSE_CONV_BWD_ALGO_MODE,
     UnifiedSpatiallySparseConvFunction,
 )
+
+from .detail.autotune import (
+    _BENCHMARK_FORWARD_RESULTS,
+    _BENCHMARK_DGRAD_RESULTS,
+    _BENCHMARK_WGRAD_RESULTS,
+)
+
+from warpconvnet.utils.benchmark_cache import SpatiallySparseConvConfig

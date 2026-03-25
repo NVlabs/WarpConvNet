@@ -393,7 +393,12 @@ _BWD_IMPLICIT_GEMM = [
         {"gemm_block_size": 16, "split_k_threads_per_block": 256, "split_k_factor": 2},
     ),
 ]
-_BWD_MASK_IMPLICIT_GEMM = [("mask_implicit_gemm", {"block_size": 16})]
+_BWD_MASK_IMPLICIT_GEMM = [
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
+]
 # SM90 WGMMA backward building blocks
 _BWD_CUTE_SM90 = (
     []
@@ -460,9 +465,7 @@ def _get_adaptive_backward_params(
         params.extend(_BWD_EXPLICIT)
         params.extend(_BWD_EXPLICIT_GROUPED)
         params.extend(_BWD_IMPLICIT_GEMM)
-        # Note: mask_implicit_gemm backward has SIMT-only kernel with OOB bug at large N
-        # Disabled until CuTe backward is implemented
-        # params.extend(_BWD_MASK_IMPLICIT_GEMM)
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         return params
 
     # --- kv <= 27 below ---
@@ -472,6 +475,7 @@ def _get_adaptive_backward_params(
         params = []
         params.extend(_BWD_CUTE_GROUPED)
         params.extend(_BWD_CUTLASS_IMPLICIT)  # minor but covers edge cases
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_SM90)
         params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
@@ -484,6 +488,7 @@ def _get_adaptive_backward_params(
         params.extend(_BWD_CUTLASS_GROUPED)
         if max_ch <= 64:
             params.extend(_BWD_IMPLICIT_GEMM)  # 7.9ms removal at ch<=64
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_SM90)
         params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
@@ -498,6 +503,7 @@ def _get_adaptive_backward_params(
         params.extend(_BWD_EXPLICIT_GROUPED)
     else:
         params.extend(_BWD_EXPLICIT)  # 1.7ms removal at 65-128 channels
+    params.extend(_BWD_MASK_IMPLICIT_GEMM)
     if log_n <= 19 or log_n == 0:
         # cute_grouped still valuable up to ~512K
         params.extend(_BWD_CUTE_GROUPED)
@@ -560,8 +566,11 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
             for cp in [True, False]
         ]
     ),
-    # Mask-based fused implicit GEMM backward disabled (SIMT kernel has OOB at large N)
-    # TODO: Re-enable once CuTe backward mask kernel is implemented
+    # Mask-based fused implicit GEMM backward (CuTe tensor core dgrad via reverse forward kernel)
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
 ]
 
 # ---------------------------------------------------------------------------
