@@ -64,7 +64,9 @@ def _cutlass_implicit_gemm_forward_logic(
 
     # Pad unaligned channels so CUTLASS tensor ops can be used
     C_in, C_out = weight.shape[1], weight.shape[2]
-    needs_padding = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    needs_padding = (C_in % _CUTLASS_ALIGNMENT != 0) or (
+        C_out % _CUTLASS_ALIGNMENT != 0
+    )
     orig_C_out = C_out
     if needs_padding:
         target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
@@ -136,7 +138,9 @@ def _cutlass_implicit_gemm_backward_logic(
 
     C_in, C_out = weight.shape[1], weight.shape[2]
     orig_C_in, orig_C_out = C_in, C_out
-    needs_padding_bwd = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    needs_padding_bwd = (C_in % _CUTLASS_ALIGNMENT != 0) or (
+        C_out % _CUTLASS_ALIGNMENT != 0
+    )
     if needs_padding_bwd:
         target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
         target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)
@@ -233,7 +237,9 @@ def _cutlass_implicit_gemm_forward_grouped(
 
     C_in, C_out = weight.shape[1], weight.shape[2]
     orig_C_out_grp = C_out
-    needs_padding_grp = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    needs_padding_grp = (C_in % _CUTLASS_ALIGNMENT != 0) or (
+        C_out % _CUTLASS_ALIGNMENT != 0
+    )
     if needs_padding_grp:
         target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
         target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)
@@ -338,7 +344,9 @@ def _cutlass_implicit_gemm_backward_grouped(
 
     C_in, C_out = weight.shape[1], weight.shape[2]
     orig_C_in_grpb, orig_C_out_grpb = C_in, C_out
-    needs_padding_grpb = (C_in % _CUTLASS_ALIGNMENT != 0) or (C_out % _CUTLASS_ALIGNMENT != 0)
+    needs_padding_grpb = (C_in % _CUTLASS_ALIGNMENT != 0) or (
+        C_out % _CUTLASS_ALIGNMENT != 0
+    )
     if needs_padding_grpb:
         target_cin = _align_to(C_in, _CUTLASS_ALIGNMENT)
         target_cout = _align_to(C_out, _CUTLASS_ALIGNMENT)

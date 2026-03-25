@@ -298,6 +298,8 @@ def run_single_config(
     from warpconvnet.nn.functional.sparse_conv.detail.unified import (
         _BENCHMARK_FORWARD_RESULTS,
         _BENCHMARK_BACKWARD_RESULTS,
+        _BENCHMARK_DGRAD_RESULTS,
+        _BENCHMARK_WGRAD_RESULTS,
         _get_adaptive_forward_params,
         _BENCHMARK_BACKWARD_PARAMS,
         SpatiallySparseConvConfig,
@@ -320,15 +322,25 @@ def run_single_config(
         fwd_cached = _config_is_cached(
             "sparse_conv_forward", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
-        bwd_cached = _config_is_cached(
-            "sparse_conv_backward", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
+        dgrad_cached = _config_is_cached(
+            "sparse_conv_dgrad", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
+        wgrad_cached = _config_is_cached(
+            "sparse_conv_wgrad", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
+        )
+        bwd_cached = dgrad_cached and wgrad_cached
         if (not do_forward or fwd_cached) and (not do_backward or bwd_cached):
             return result
 
     # Generate voxels with c_in features
     voxels = make_voxels(num_voxels, c_in, dtype, device, batch_size)
     actual_n = voxels.feature_tensor.shape[0]
+
+    # Enable requires_grad on features so backward computes both dgrad and wgrad.
+    # Without this, dgrad is skipped (needs_input_grad[0]=False) and only wgrad
+    # gets auto-tuned.
+    if do_backward:
+        voxels.feature_tensor.requires_grad_(True)
 
     # Build conv layer
     conv = SpatiallySparseConv(
@@ -391,7 +403,8 @@ def run_single_config(
             kernel_volume=kernel_volume,
             in_dtype=dtype,
         )
-        had_bwd_cache = bwd_config in _BENCHMARK_BACKWARD_RESULTS
+        had_dgrad_cache = bwd_config in _BENCHMARK_DGRAD_RESULTS
+        had_wgrad_cache = bwd_config in _BENCHMARK_WGRAD_RESULTS
         num_bwd_candidates = len(_BENCHMARK_BACKWARD_PARAMS)
 
         loss = out.feature_tensor.sum()
@@ -401,13 +414,17 @@ def run_single_config(
         torch.cuda.synchronize(device)
         first_bwd_ms = (time.perf_counter() - t0) * 1000
 
-        # Extract chosen algo from cache
-        bwd_results = _BENCHMARK_BACKWARD_RESULTS.get(bwd_config)
-        if bwd_results:
-            best = bwd_results if isinstance(bwd_results, tuple) else bwd_results[0]
-            best_algo, best_params, _ = best
-            _param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
-            result["bwd_algo"] = best_algo + (f" ({_param_str})" if _param_str else "")
+        # Extract chosen algos from split dgrad/wgrad caches
+        dgrad_results = _BENCHMARK_DGRAD_RESULTS.get(bwd_config)
+        wgrad_results = _BENCHMARK_WGRAD_RESULTS.get(bwd_config)
+        algo_parts = []
+        if dgrad_results:
+            best = dgrad_results if isinstance(dgrad_results, tuple) else dgrad_results[0]
+            algo_parts.append(f"dgrad={best[0]}")
+        if wgrad_results:
+            best = wgrad_results if isinstance(wgrad_results, tuple) else wgrad_results[0]
+            algo_parts.append(f"wgrad={best[0]}")
+        result["bwd_algo"] = ", ".join(algo_parts) if algo_parts else None
         result["bwd_candidates"] = num_bwd_candidates
 
         # Measure steady-state backward
@@ -419,7 +436,7 @@ def run_single_config(
         torch.cuda.synchronize(device)
         result["backward_ms"] = (time.perf_counter() - t0) * 1000
 
-        if not had_bwd_cache:
+        if not (had_dgrad_cache and had_wgrad_cache):
             result["bwd_autotune_ms"] = first_bwd_ms - result["backward_ms"]
 
     return result
