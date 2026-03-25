@@ -17,15 +17,59 @@ from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.type_cast import _min_dtype
 
 
+def _build_pair_table(
+    kernel_map: IntSearchResult,
+    N_out: int,
+    device: torch.device,
+) -> Tensor:
+    """Build the forward pair_table [K * N_out] from kernel_map."""
+    K = len(kernel_map)
+    if hasattr(kernel_map, "_pair_table") and kernel_map._pair_table is not None:
+        return kernel_map._pair_table.reshape(-1).contiguous()
+
+    pair_table = torch.empty(K * N_out, dtype=torch.int32, device=device)
+    pair_table.fill_(-1)
+    L = kernel_map.in_maps.shape[0]
+    if L > 0 and hasattr(_C.gemm, "csr_to_pair_table_cuda"):
+        offsets_gpu = kernel_map.offsets.to(device=device, dtype=torch.int32)
+        _C.gemm.csr_to_pair_table_cuda(
+            kernel_map.in_maps.int(),
+            kernel_map.out_maps.int(),
+            offsets_gpu,
+            pair_table,
+            N_out,
+            K,
+        )
+    return pair_table
+
+
+def _build_mask_and_argsort(
+    pair_table: Tensor,
+    N: int,
+    K: int,
+    device: torch.device,
+) -> Tuple[Tensor, Tensor]:
+    """Build pair_mask and mask_argsort from a pair_table [K * N]."""
+    pair_mask = torch.zeros(N, dtype=torch.int32, device=device)
+    if K <= 32 and hasattr(_C.gemm, "build_pair_mask_cuda"):
+        _C.gemm.build_pair_mask_cuda(pair_table, pair_mask, K)
+    elif K <= 32:
+        pair_table_2d = pair_table.reshape(K, N)
+        valid = pair_table_2d >= 0
+        bit_positions = (
+            1 << torch.arange(K, device=device, dtype=torch.int32)
+        ).unsqueeze(1)
+        pair_mask = (valid.int() * bit_positions).sum(dim=0).int()
+    mask_argsort = torch.argsort(pair_mask, stable=True).int()
+    return pair_mask, mask_argsort
+
+
 def _kernel_map_to_mask_data(
     kernel_map: IntSearchResult,
     num_out_coords: int,
     device: torch.device,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Convert IntSearchResult to mask-based pair_table + mask + argsort.
-
-    Uses the cached _pair_table from kernel map generation if available,
-    avoiding the expensive Python reconstruction.
 
     Returns:
         pair_table: [K * N_out] int32, flattened
@@ -34,45 +78,48 @@ def _kernel_map_to_mask_data(
     """
     K = len(kernel_map)
     N_out = num_out_coords
-
-    # Fast path: use cached pair_table from kernel map generation
-    if hasattr(kernel_map, "_pair_table") and kernel_map._pair_table is not None:
-        pair_table = kernel_map._pair_table.reshape(-1).contiguous()  # [K*N_out]
-    else:
-        # Build pair_table from CSR using CUDA kernel
-        pair_table = torch.empty(K * N_out, dtype=torch.int32, device=device)
-        pair_table.fill_(-1)
-        L = kernel_map.in_maps.shape[0]
-        if L > 0 and hasattr(_C.gemm, "csr_to_pair_table_cuda"):
-            offsets_gpu = kernel_map.offsets.to(device=device, dtype=torch.int32)
-            _C.gemm.csr_to_pair_table_cuda(
-                kernel_map.in_maps.int(),
-                kernel_map.out_maps.int(),
-                offsets_gpu,
-                pair_table,
-                N_out,
-                K,
-            )
-
-    # Build pair_mask using CUDA kernel
-    pair_mask = torch.zeros(N_out, dtype=torch.int32, device=device)
-    if K <= 32 and hasattr(_C.gemm, "build_pair_mask_cuda"):
-        _C.gemm.build_pair_mask_cuda(pair_table, pair_mask, K)
-    elif K <= 32:
-        # Fallback: Python vectorized
-        pair_table_2d = pair_table.reshape(K, N_out)
-        valid = pair_table_2d >= 0
-        bit_positions = (
-            1 << torch.arange(K, device=device, dtype=torch.int32)
-        ).unsqueeze(1)
-        pair_mask = (valid.int() * bit_positions).sum(dim=0).int()
-
-    mask_argsort = torch.argsort(pair_mask, stable=True).int()
-
+    pair_table = _build_pair_table(kernel_map, N_out, device)
+    pair_mask, mask_argsort = _build_mask_and_argsort(pair_table, N_out, K, device)
     return pair_table, pair_mask, mask_argsort
 
 
-# Cache mask data per kernel_map to avoid recomputation
+def _build_reverse_mask_data(
+    pair_table: Tensor,
+    N_in: int,
+    N_out: int,
+    K: int,
+    device: torch.device,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Build reverse pair_table + mask + argsort for atomicAdd-free dgrad.
+
+    The forward pair_table maps (offset_k, out_row) -> in_row.
+    The reverse maps (offset_k, in_row) -> out_row, enabling the dgrad
+    kernel to iterate over input rows and gather from grad_output.
+
+    Returns:
+        reverse_pair_table: [K * N_in] int32
+        reverse_pair_mask: [N_in] int32 (uint32 bitmask)
+        reverse_mask_argsort: [N_in] int32 permutation
+    """
+    pair_table_2d = pair_table.reshape(K, N_out)
+    reverse_pair_table = torch.full((K, N_in), -1, dtype=torch.int32, device=device)
+
+    for k in range(K):
+        valid = pair_table_2d[k] >= 0
+        out_rows = torch.where(valid)[0].int()
+        in_rows = pair_table_2d[k, valid].long()
+        reverse_pair_table[k].scatter_(0, in_rows, out_rows)
+
+    reverse_flat = reverse_pair_table.reshape(-1).contiguous()
+    reverse_pair_mask, reverse_mask_argsort = _build_mask_and_argsort(
+        reverse_flat, N_in, K, device
+    )
+    return reverse_flat, reverse_pair_mask, reverse_mask_argsort
+
+
+# Cache mask data per kernel_map to avoid recomputation.
+# Keys: (id, num_out_coords, K) for forward data
+#        (id, num_out_coords, K, "reverse") for reverse dgrad data
 _MASK_DATA_CACHE = {}
 
 
@@ -81,19 +128,32 @@ def _get_mask_data(
     num_out_coords: int,
     device: torch.device,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """Get or compute cached mask data for a kernel_map.
-
-    Uses (id, num_out_coords) as cache key to avoid stale data from
-    id() collisions after garbage collection.
-    """
+    """Get or compute cached forward mask data for a kernel_map."""
     cache_key = (id(kernel_map), num_out_coords, len(kernel_map))
     if cache_key not in _MASK_DATA_CACHE:
-        # Evict stale entries with the same id (from GC'd objects)
         stale_keys = [k for k in _MASK_DATA_CACHE if k[0] == id(kernel_map)]
         for k in stale_keys:
             del _MASK_DATA_CACHE[k]
         _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(
             kernel_map, num_out_coords, device
+        )
+    return _MASK_DATA_CACHE[cache_key]
+
+
+def _get_reverse_mask_data(
+    kernel_map: IntSearchResult,
+    num_in_coords: int,
+    num_out_coords: int,
+    device: torch.device,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Get or compute cached reverse mask data for atomicAdd-free dgrad."""
+    K = len(kernel_map)
+    cache_key = (id(kernel_map), num_out_coords, K, "reverse")
+    if cache_key not in _MASK_DATA_CACHE:
+        # Ensure forward pair_table is built first
+        fwd_pair_table, _, _ = _get_mask_data(kernel_map, num_out_coords, device)
+        _MASK_DATA_CACHE[cache_key] = _build_reverse_mask_data(
+            fwd_pair_table, num_in_coords, num_out_coords, K, device
         )
     return _MASK_DATA_CACHE[cache_key]
 
@@ -183,6 +243,7 @@ def _mask_implicit_gemm_backward_logic(
     compute_dtype: Optional[torch.dtype] = None,
     needs_input_grad: Tuple[bool, ...] = (True, True),
     block_size: int = 16,
+    mma_tile: int = 3,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Backward pass using mask-based fused implicit GEMM."""
     device = in_features.device
@@ -204,15 +265,14 @@ def _mask_implicit_gemm_backward_logic(
     grad_weight = None
 
     if needs_input_grad[0]:
-        # Auto-pad for CuTe dgrad
-        _has_cute_dgrad = hasattr(_C.gemm, "cute_gemm_mask_dgrad")
+        _has_cute_fwd = hasattr(_C.gemm, "cute_gemm_mask_fwd")
         vec_width_bwd = 16 // _grad_output.element_size()
         orig_C_in_bwd, orig_C_out_bwd = C_in, C_out
         _go_bwd, _w_bwd = _grad_output, _weight
         needs_padding_bwd = (C_in % vec_width_bwd != 0) or (C_out % vec_width_bwd != 0)
         if (
             needs_padding_bwd
-            and _has_cute_dgrad
+            and _has_cute_fwd
             and min_dtype in (torch.float16, torch.bfloat16)
         ):
             tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
@@ -224,25 +284,35 @@ def _mask_implicit_gemm_backward_logic(
             grad_in = torch.zeros((N_in, C_in), dtype=min_dtype, device=device)
         used_cute = False
 
-        if _has_cute_dgrad and min_dtype in (torch.float16, torch.bfloat16):
-            # Pre-transpose weight for vectorized B loads in dgrad kernel
+        if _has_cute_fwd and min_dtype in (torch.float16, torch.bfloat16):
+            # AtomicAdd-free dgrad: reuse the forward kernel with reverse
+            # pair data. The reverse pair_table maps (offset_k, in_row) ->
+            # out_row, so the kernel iterates over input rows and gathers
+            # from grad_output — no scatter, no atomicAdd.
+            rev_pair_table, rev_pair_mask, rev_argsort = _get_reverse_mask_data(
+                kernel_map, N_in, num_out_coords, device
+            )
+            # Weight transposed: [K, C_in, C_out] -> [K, C_out, C_in]
+            # The forward kernel loads B[k] as [C_in_kernel, C_out_kernel].
+            # For dgrad: C_in_kernel=C_out, C_out_kernel=C_in, so B[k]
+            # should be [C_out, C_in] = weight.transpose(-1,-2).
             _weight_T = _w_bwd.transpose(1, 2).contiguous()
-            status = _C.gemm.cute_gemm_mask_dgrad(
-                _go_bwd,
-                _weight_T,
-                grad_in,
-                pair_table,
-                pair_mask,
-                mask_argsort,
+            status = _C.gemm.cute_gemm_mask_fwd(
+                _go_bwd,  # "input": grad_output [N_out, C_out]
+                _weight_T,  # "weight": [K, C_out, C_in]
+                grad_in,  # "output": grad_input [N_in, C_in]
+                rev_pair_table,
+                rev_pair_mask,
+                rev_argsort,
                 K,
-                3,
+                mma_tile,
                 1.0,
             )
             if status == 0:
                 used_cute = True
 
         if not used_cute:
-            # SIMT fallback
+            # SIMT fallback (still uses atomicAdd scatter)
             status = _C.gemm.mask_implicit_gemm_bwd_dgrad(
                 _grad_output,
                 _weight,

@@ -359,6 +359,7 @@ def _execute_backward(
             compute_dtype,
             needs_input_grad=needs_input_grad,
             block_size=params.get("block_size", 16),
+            mma_tile=params.get("mma_tile", 3),
         )
     else:
         raise ValueError(f"Unsupported backward algorithm: {algo}")

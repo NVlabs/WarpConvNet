@@ -180,8 +180,11 @@ def test_sparse_conv_auto_benchmark_and_correctness(setup_voxels, benchmark):
             and config_key.kernel_volume == num_kernels
         ):
             found_config_in_cache = True
-            assert _BENCHMARK_FORWARD_RESULTS[config_key] is not None
-            assert isinstance(_BENCHMARK_FORWARD_RESULTS[config_key][0], SPARSE_CONV_FWD_ALGO_MODE)
+            cached = _BENCHMARK_FORWARD_RESULTS[config_key]
+            assert cached is not None
+            # Cache stores (algo_str, params, time) tuples or lists thereof
+            first = cached[0] if isinstance(cached, list) else cached
+            assert isinstance(first[0], str), f"Expected algo string, got {type(first[0])}"
             break
     assert (
         found_config_in_cache
