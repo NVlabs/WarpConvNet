@@ -39,7 +39,6 @@ from .algo_params import (
 )
 from .autotune import (
     _BENCHMARK_FORWARD_RESULTS,
-    _BENCHMARK_BACKWARD_RESULTS,
     _BENCHMARK_DGRAD_RESULTS,
     _BENCHMARK_WGRAD_RESULTS,
     _serialize_benchmark_results,
@@ -301,7 +300,6 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
     ]:
-        global _BENCHMARK_BACKWARD_RESULTS  # noqa: F824
         in_features, weight = ctx.saved_tensors
         kernel_map = ctx.kernel_map
         config_params = ctx.config_params_for_bwd

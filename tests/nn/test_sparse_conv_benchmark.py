@@ -17,7 +17,8 @@ from warpconvnet.nn.functional.sparse_conv import (
     UnifiedSpatiallySparseConvFunction,
     spatially_sparse_conv,
     _BENCHMARK_FORWARD_RESULTS,
-    _BENCHMARK_BACKWARD_RESULTS,
+    _BENCHMARK_DGRAD_RESULTS,
+    _BENCHMARK_WGRAD_RESULTS,
     SpatiallySparseConvConfig,
 )
 from warpconvnet.nn.functional.sparse_pool import sparse_max_pool
@@ -269,7 +270,8 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
 
     # Clear benchmark caches
     _BENCHMARK_FORWARD_RESULTS.clear()
-    _BENCHMARK_BACKWARD_RESULTS.clear()
+    _BENCHMARK_DGRAD_RESULTS.clear()
+    _BENCHMARK_WGRAD_RESULTS.clear()
 
     num_kernels = kernel_size_val[0] * kernel_size_val[1] * kernel_size_val[2]
     weights = torch.randn(num_kernels, C_in, C_out, device=voxels.device, dtype=torch.float64)
@@ -333,8 +335,8 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
         len(_BENCHMARK_FORWARD_RESULTS) > 0
     ), "Forward benchmark cache not populated after AUTO gradcheck"
     assert (
-        len(_BENCHMARK_BACKWARD_RESULTS) > 0
-    ), "Backward benchmark cache not populated after AUTO gradcheck"
+        len(_BENCHMARK_DGRAD_RESULTS) > 0 or len(_BENCHMARK_WGRAD_RESULTS) > 0
+    ), "Dgrad/wgrad benchmark caches not populated after AUTO gradcheck"
 
     # Simplified check as before for test_sparse_conv
     found_fwd_config_in_cache_grad = False
@@ -351,14 +353,15 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
     ), "AUTO mode did not populate forward cache correctly during gradcheck."
 
     found_bwd_config_in_cache_grad = False
-    for config_key in _BENCHMARK_BACKWARD_RESULTS:
-        if (
-            config_key.in_channels == C_in
-            and config_key.out_channels == C_out
-            and config_key.kernel_volume == num_kernels
-        ):
-            found_bwd_config_in_cache_grad = True
-            break
+    for cache_dict in (_BENCHMARK_DGRAD_RESULTS, _BENCHMARK_WGRAD_RESULTS):
+        for config_key in cache_dict:
+            if (
+                config_key.in_channels == C_in
+                and config_key.out_channels == C_out
+                and config_key.kernel_volume == num_kernels
+            ):
+                found_bwd_config_in_cache_grad = True
+                break
     assert (
         found_bwd_config_in_cache_grad
-    ), "AUTO mode did not populate backward cache correctly during gradcheck."
+    ), "AUTO mode did not populate dgrad/wgrad cache correctly during gradcheck."
