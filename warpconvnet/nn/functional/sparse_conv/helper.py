@@ -301,7 +301,9 @@ def spatially_sparse_conv(
     )
 
     if bias is not None:
-        out_feature_tensor += bias
+        # Use non-in-place add to avoid "view modified inplace" error when
+        # the output is a view (e.g., from channel padding slice).
+        out_feature_tensor = out_feature_tensor + bias
 
     out_offsets_cpu = out_offsets.cpu().int()
     return input_sparse_tensor.replace(
