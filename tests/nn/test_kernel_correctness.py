@@ -86,17 +86,21 @@ _skip_fp16_cublas = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def _clear_cuda_errors():
-    """Clear stale CUDA error state before each test to prevent cascading."""
-    try:
-        torch.cuda.synchronize()
-    except RuntimeError:
-        pass
+def _clear_cuda_state():
+    """Clear CUDA error state and mask data cache before each test."""
+    from warpconvnet.nn.functional.sparse_conv.detail import mask_gemm
+    mask_gemm._MASK_DATA_CACHE.clear()
+    for _ in range(2):
+        try:
+            torch.cuda.synchronize()
+        except RuntimeError:
+            pass
     yield
-    try:
-        torch.cuda.synchronize()
-    except RuntimeError:
-        pass
+    for _ in range(2):
+        try:
+            torch.cuda.synchronize()
+        except RuntimeError:
+            pass
 
 
 def _make_test_data(N, C_in, C_out, stride=(1, 1, 1), seed=42):
