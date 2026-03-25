@@ -70,9 +70,7 @@ if not _HAS_SM80_HARDWARE:
 
 # SM90 WGMMA backends — available when compiled with SM90 support and running on SM90+ hardware
 try:
-    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(
-        _C.gemm, "cute_gemm_sm90_AD_gather_scatter"
-    )
+    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(_C.gemm, "cute_gemm_sm90_AD_gather_scatter")
     _HAS_CUTE_GROUPED_SM90 = _HAS_SM90_HARDWARE and hasattr(
         _C.gemm, "cute_gemm_sm90_grouped_AD_gather_scatter"
     )
@@ -219,93 +217,68 @@ def _get_adaptive_forward_params(
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get forward benchmark candidates adapted to the convolution dimensions.
 
-    Uses N (num_in_coords), max(C_in,C_out), and kernel_volume to select only
-    algorithms that have non-trivial removal impact in that region, based on
-    time-weighted analysis of 465 configs.
-
-    Args:
-        in_channels: Number of input channels.
-        out_channels: Number of output channels.
-        kernel_volume: Product of kernel dimensions (e.g. 27 for 3x3x3).
-        num_in_coords: Number of input voxels (0 = unknown).
-        voxel_size: Tensor stride / voxel size tuple (None = unknown).
+    Based on time-weighted analysis of 148 configs (SM 8.9, cuBLAS 12.9.1.4):
+      mask_implicit_gemm: 56% wins — dominates at ch<=256
+      cutlass_grouped_hybrid: 20% — wins at large N + large channels
+      cutlass_implicit_gemm: 17% — wins at large N + ch>256
+      cute_grouped: 6% — wins at small N + ch>256
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # kv=125 (5x5x5): only implicit_gemm variants win
+    # kv >= 64 (5x5x5): no benchmark data, include broad set
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
-        params.extend(_FWD_CUTE_GROUPED)  # May win for large kv via fused launch
-        params.extend(_FWD_IMPLICIT_GEMM_16)
-        params.extend(_FWD_IMPLICIT_GEMM_32)
-        params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
-        params.extend(_FWD_MASK_IMPLICIT_GEMM)
-        return params
-
-    # --- kv <= 27 (3x3x3 or 2x2x2) below ---
-
-    # Small N (N <= 4K, logN <= 12): cute_grouped + implicit_gemm dominate
-    # cutlass_implicit_gemm has zero removal impact at these sizes
-    if 0 < log_n <= 12:
-        params = []
         params.extend(_FWD_CUTE_GROUPED)
-        params.extend(_FWD_IMPLICIT_GEMM_16)
-        params.extend(_FWD_MASK_IMPLICIT_GEMM)  # Wins at small-medium C
-        if max_ch <= 64:
-            params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
-        params.extend(_FWD_CUTE_SM90)
-        params.extend(_FWD_CUTE_GROUPED_SM90)
-        return params
-
-    # Medium N (4K < N <= 64K, logN 13-16)
-    if 0 < log_n <= 16:
-        params = []
-        params.extend(_FWD_CUTE_GROUPED)  # highest removal impact in this range
+        params.extend(_FWD_MASK_IMPLICIT_GEMM)
         params.extend(_FWD_CUTLASS_IMPLICIT)
         params.extend(_FWD_CUTLASS_GROUPED)
-        params.extend(_FWD_IMPLICIT_GEMM_16)
-        params.extend(_FWD_MASK_IMPLICIT_GEMM)  # Competitive at C<=96
-        if max_ch <= 64:
-            params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
-            params.extend(_FWD_CUTE_IMPLICIT)
         params.extend(_FWD_CUTE_SM90)
         params.extend(_FWD_CUTE_GROUPED_SM90)
         return params
 
-    # Large N (N > 64K, logN > 16) or unknown N (num_in_coords=0)
-    params = []
-    params.extend(_FWD_CUTLASS_IMPLICIT)  # dominates this range
-    params.extend(_FWD_CUTLASS_GROUPED)
-    params.extend(_FWD_IMPLICIT_GEMM_16)
-    params.extend(_FWD_MASK_IMPLICIT_GEMM)  # Competitive at C<=64
-    if max_ch <= 64:
-        # implicit_gemm_grouped: 10.7ms removal impact at 64K-512K, ch<=64
-        params.extend(_FWD_IMPLICIT_GEMM_GROUPED)
-        params.extend(_FWD_IMPLICIT_GEMM_32)
-        params.extend(_FWD_CUTE_IMPLICIT)
-    if log_n > 19:
-        # explicit_gemm_grouped: 1.25ms removal impact at xlarge N, asymmetric channels
-        params.extend(_FWD_EXPLICIT_GROUPED)
-    if log_n <= 19 or log_n == 0:
-        # cute_grouped still contributes up to ~512K
+    # --- kv <= 27 below ---
+
+    # Small N (N <= 10K, log10 <= 4): mask dominates (92-100%), cute_grouped for ch>256
+    if 0 < log_n <= 14:
+        params = []
+        params.extend(_FWD_MASK_IMPLICIT_GEMM)
         params.extend(_FWD_CUTE_GROUPED)
+        if max_ch > 256:
+            params.extend(_FWD_CUTLASS_IMPLICIT)
+        params.extend(_FWD_CUTE_SM90)
+        params.extend(_FWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Medium N (10K < N <= 100K, log10 = 5): mask (69%), cutlass (27%)
+    if 0 < log_n <= 17:
+        params = []
+        params.extend(_FWD_MASK_IMPLICIT_GEMM)
+        params.extend(_FWD_CUTLASS_IMPLICIT)
+        if max_ch > 256:
+            params.extend(_FWD_CUTLASS_GROUPED)
+        params.extend(_FWD_CUTE_GROUPED)
+        params.extend(_FWD_CUTE_SM90)
+        params.extend(_FWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Large N (N > 100K) or unknown N: cutlass dominates ch>256,
+    # mask wins ch<=64, cutlass_grouped wins ch 65-256
+    params = []
+    params.extend(_FWD_MASK_IMPLICIT_GEMM)
+    params.extend(_FWD_CUTLASS_IMPLICIT)
+    params.extend(_FWD_CUTLASS_GROUPED)
+    params.extend(_FWD_CUTE_GROUPED)
     params.extend(_FWD_CUTE_SM90)
     params.extend(_FWD_CUTE_GROUPED_SM90)
     return params
 
 
-# Full forward benchmark candidates ("all"): exhaustive search.
-# Trimmed based on time-weighted analysis of 208 configs:
-# Removed: cute_implicit_gemm (0%), implicit_gemm (0%), implicit_gemm_grouped (0%),
-#          explicit_gemm (0%), explicit_gemm_grouped (0%)
-_ALL_BENCHMARK_FORWARD_PARAMS = [
+# Trimmed forward benchmark candidates ("trimmed"): excludes algorithms
+# that had 0% wins in earlier time-weighted analysis. Used by "all" mode
+# prior to the cuBLAS fix; may exclude algorithms that are now competitive.
+_TRIMMED_BENCHMARK_FORWARD_PARAMS = [
     *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
-    # cute_implicit_gemm: removed (0% wins across all directions)
-    # implicit_gemm: removed from forward (0% wins; kept for backward)
-    # explicit_gemm: removed from forward (0% wins; kept as fallback)
-    # explicit_gemm_grouped: removed from forward (0% wins)
-    # implicit_gemm_grouped: removed (0% wins across all directions)
     *(
         [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
         if _HAS_CUTLASS_BACKEND
@@ -320,13 +293,58 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
             ("cute_grouped", {"mma_tile": 1}),
         ]
     ),
-    # SM90 WGMMA candidates for exhaustive search
     *(
         []
         if not _HAS_CUTE_SM90
         else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile})
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+        ]
+    ),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED_SM90
+        else [
+            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
             for tile in [100, 101, 102, 103, 104]
+            for cp in [True, False]
+        ]
+    ),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
+]
+
+# Exhaustive forward benchmark candidates ("all"): every algorithm and
+# parameter combination. Nothing excluded.
+_ALL_BENCHMARK_FORWARD_PARAMS = [
+    # Explicit GEMM (per-offset matmul via cuBLAS)
+    ("explicit_gemm", {}),
+    *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    # Implicit GEMM (SIMT gather-scatter)
+    *[("implicit_gemm", {"fwd_block_size": bs}) for bs in [4, 16, 32]],
+    *[
+        ("implicit_gemm_grouped", {"fwd_block_size": bs, "saturation_m": m})
+        for bs in [16]
+        for m in [2000, 5000, 10000]
+    ],
+    # CUTLASS per-offset gather-scatter
+    *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
+    *(
+        [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
+        if _HAS_CUTLASS_BACKEND
+        else []
+    ),
+    # CuTe per-offset gather-scatter
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
+    # CuTe grouped fused multi-offset
+    *([] if not _HAS_CUTE_GROUPED else [("cute_grouped", {"mma_tile": t}) for t in [0, 1, 2, 3]]),
+    # SM90 WGMMA
+    *(
+        []
+        if not _HAS_CUTE_SM90
+        else [
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
         ]
     ),
     *(
@@ -339,10 +357,10 @@ _ALL_BENCHMARK_FORWARD_PARAMS = [
         ]
     ),
     # Mask-based fused implicit GEMM (all tile configs)
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
 ]
 
 # ---------------------------------------------------------------------------
@@ -424,12 +442,13 @@ _BWD_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": 2000})]
 
 # Static backward params (used by _get_filtered_backward_params for env var filtering)
 _BENCHMARK_BACKWARD_PARAMS = [
+    *_BWD_MASK_IMPLICIT_GEMM,
+    *_BWD_CUTE_GROUPED,
     *_BWD_CUTLASS_IMPLICIT,
+    *_BWD_CUTLASS_GROUPED,
     *_BWD_EXPLICIT,
     *_BWD_EXPLICIT_GROUPED,
     *_BWD_IMPLICIT_GEMM,
-    *_BWD_CUTLASS_GROUPED,
-    *_BWD_CUTE_GROUPED,
     *_BWD_CUTE_SM90,
     *_BWD_CUTE_GROUPED_SM90,
 ]
@@ -444,79 +463,83 @@ def _get_adaptive_backward_params(
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get backward benchmark candidates adapted to the convolution dimensions.
 
-    Uses N (num_in_coords), max(C_in,C_out), and kernel_volume to select only
-    algorithms with non-trivial removal impact in that region, based on
-    time-weighted analysis of 458 configs.
+    Dgrad and wgrad are auto-tuned independently, so candidates must cover
+    winners from both directions.
 
-    Args:
-        in_channels: Number of input channels.
-        out_channels: Number of output channels.
-        kernel_volume: Product of kernel dimensions (e.g. 27 for 3x3x3).
-        num_in_coords: Number of input voxels (0 = unknown).
-        voxel_size: Tensor stride / voxel size tuple (None = unknown).
+    Based on time-weighted analysis of 146 configs (SM 8.9, cuBLAS 12.9.1.4):
+      Dgrad: mask_implicit_gemm 74%, cute_grouped 21%, cutlass_implicit_gemm 5%
+      Wgrad: cute_grouped 64%, cutlass_grouped_hybrid 12%, explicit_gemm_grouped 10%,
+             implicit_gemm 5%, explicit_gemm 5%, cutlass_implicit_gemm 4%
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # kv=125 (5x5x5): include cute_grouped (2.9x faster than implicit_gemm)
+    # kv >= 64 (5x5x5): no benchmark data, include broad set
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
-        params.extend(_BWD_CUTE_GROUPED)  # 0.72ms vs implicit_gemm 2.09ms at kv=125
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
+        params.extend(_BWD_CUTE_GROUPED)
+        params.extend(_BWD_CUTLASS_IMPLICIT)
+        params.extend(_BWD_CUTLASS_GROUPED)
         params.extend(_BWD_EXPLICIT)
         params.extend(_BWD_EXPLICIT_GROUPED)
         params.extend(_BWD_IMPLICIT_GEMM)
-        params.extend(_BWD_MASK_IMPLICIT_GEMM)
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
 
     # --- kv <= 27 below ---
+    # All buckets include mask (dgrad winner) + cute_grouped (wgrad winner).
 
-    # Small N (N <= 4K, logN <= 12): cute_grouped dominates (100%)
-    if 0 < log_n <= 12:
+    # Small N (N <= 10K, log10 <= 4):
+    #   dgrad: mask 92-100%, cute_grouped at ch>256
+    #   wgrad: cute_grouped 57-100%, explicit_gemm_grouped 15%, implicit_gemm 8%
+    if 0 < log_n <= 14:
         params = []
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_GROUPED)
-        params.extend(_BWD_CUTLASS_IMPLICIT)  # minor but covers edge cases
-        params.extend(_BWD_MASK_IMPLICIT_GEMM)
-        params.extend(_BWD_CUTE_SM90)
-        params.extend(_BWD_CUTE_GROUPED_SM90)
-        return params
-
-    # Medium N (4K < N <= 64K, logN 13-16)
-    if 0 < log_n <= 16:
-        params = []
-        params.extend(_BWD_CUTE_GROUPED)  # 26.2ms removal impact
-        params.extend(_BWD_CUTLASS_IMPLICIT)
-        params.extend(_BWD_CUTLASS_GROUPED)
-        if max_ch <= 64:
-            params.extend(_BWD_IMPLICIT_GEMM)  # 7.9ms removal at ch<=64
-        params.extend(_BWD_MASK_IMPLICIT_GEMM)
-        params.extend(_BWD_CUTE_SM90)
-        params.extend(_BWD_CUTE_GROUPED_SM90)
-        return params
-
-    # Large N (N > 64K, logN > 16) or unknown N
-    params = []
-    params.extend(_BWD_CUTLASS_GROUPED)  # dominant: 119.2ms removal total
-    params.extend(_BWD_CUTLASS_IMPLICIT)
-    if max_ch <= 64:
-        params.extend(_BWD_IMPLICIT_GEMM)  # 11.9ms removal at 64K-512K ch<=64
-        params.extend(_BWD_EXPLICIT)  # minor but non-zero at ch<=32
         params.extend(_BWD_EXPLICIT_GROUPED)
-    else:
-        params.extend(_BWD_EXPLICIT)  # 1.7ms removal at 65-128 channels
-    params.extend(_BWD_MASK_IMPLICIT_GEMM)
-    if log_n <= 19 or log_n == 0:
-        # cute_grouped still valuable up to ~512K
+        if max_ch <= 64:
+            params.extend(_BWD_IMPLICIT_GEMM)
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Medium N (10K < N <= 100K, log10 = 5):
+    #   dgrad: mask 77%, cute_grouped 23% (at ch>256: cute_grouped 100%)
+    #   wgrad: cute_grouped 77%, explicit_gemm 23% (ch<=64: explicit_gemm_grouped 43%)
+    if 0 < log_n <= 17:
+        params = []
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_GROUPED)
+        params.extend(_BWD_EXPLICIT)
+        params.extend(_BWD_EXPLICIT_GROUPED)
+        params.extend(_BWD_CUTLASS_IMPLICIT)
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Large N (N > 100K) or unknown N:
+    #   dgrad: mask 95% (ch<=256), cutlass 75% (ch>256)
+    #   wgrad: cutlass_grouped 40%, cute_grouped 30%, cutlass 30% (ch<=256);
+    #          cute_grouped 100% (ch>256); cutlass_grouped 57% + explicit_grouped 36% (ch<=64)
+    params = []
+    params.extend(_BWD_MASK_IMPLICIT_GEMM)
+    params.extend(_BWD_CUTE_GROUPED)
+    params.extend(_BWD_CUTLASS_IMPLICIT)
+    params.extend(_BWD_CUTLASS_GROUPED)
+    params.extend(_BWD_EXPLICIT_GROUPED)
+    if max_ch <= 64:
+        params.extend(_BWD_EXPLICIT)
     params.extend(_BWD_CUTE_SM90)
     params.extend(_BWD_CUTE_GROUPED_SM90)
     return params
 
 
-# Full backward benchmark candidates ("all"): exhaustive search.
-# Trimmed: cute_implicit_gemm (0% all directions), implicit_gemm_grouped (0% all directions)
-_ALL_BENCHMARK_BACKWARD_PARAMS = [
+# Trimmed backward benchmark candidates ("trimmed"): excludes algorithms
+# that had 0% wins in earlier analysis (pre-cuBLAS fix).
+_TRIMMED_BENCHMARK_BACKWARD_PARAMS = [
     *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
-    # cute_implicit_gemm: removed (0% wins across all directions)
     *[
         (
             "implicit_gemm",
@@ -531,9 +554,7 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
         for split_k_factor in [2, 4, 8, 16]
     ],
     ("explicit_gemm", {}),
-    # Grouped backward variants
     *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    # implicit_gemm_grouped: removed (0% wins across all directions)
     *(
         [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
         if _HAS_CUTLASS_BACKEND
@@ -548,13 +569,11 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
             ("cute_grouped", {"mma_tile": 1}),
         ]
     ),
-    # SM90 WGMMA backward exhaustive candidates
     *(
         []
         if not _HAS_CUTE_SM90
         else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile})
-            for tile in [100, 101, 102, 103, 104]
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
         ]
     ),
     *(
@@ -566,7 +585,73 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
             for cp in [True, False]
         ]
     ),
-    # Mask-based fused implicit GEMM backward (CuTe tensor core dgrad via reverse forward kernel)
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
+]
+
+# Exhaustive backward benchmark candidates ("all"): every algorithm and
+# parameter combination. Nothing excluded.
+_ALL_BENCHMARK_BACKWARD_PARAMS = [
+    # Explicit GEMM
+    ("explicit_gemm", {}),
+    *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
+    # Implicit GEMM (SIMT)
+    *[
+        (
+            "implicit_gemm",
+            {
+                "gemm_block_size": gemm_block_size,
+                "split_k_threads_per_block": 256,
+                "split_k_factor": split_k_factor,
+            },
+        )
+        for gemm_block_size in [4, 16, 32]
+        for split_k_factor in [2, 4, 8, 16]
+    ],
+    *[
+        (
+            "implicit_gemm_grouped",
+            {
+                "gemm_block_size": 16,
+                "split_k_threads_per_block": 256,
+                "split_k_factor": split_k_factor,
+                "saturation_m": m,
+            },
+        )
+        for split_k_factor in [2, 4]
+        for m in [2000, 5000, 10000]
+    ],
+    # CUTLASS per-offset
+    *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
+    *(
+        [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
+        if _HAS_CUTLASS_BACKEND
+        else []
+    ),
+    # CuTe per-offset
+    *([] if not _HAS_CUTE_BACKEND else [("cute_implicit_gemm", {})]),
+    # CuTe grouped
+    *([] if not _HAS_CUTE_GROUPED else [("cute_grouped", {"mma_tile": t}) for t in [0, 1, 2, 3]]),
+    # SM90 WGMMA
+    *(
+        []
+        if not _HAS_CUTE_SM90
+        else [
+            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+        ]
+    ),
+    *(
+        []
+        if not _HAS_CUTE_GROUPED_SM90
+        else [
+            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
+            for tile in [100, 101, 102, 103, 104]
+            for cp in [True, False]
+        ]
+    ),
+    # Mask-based fused implicit GEMM
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
@@ -581,17 +666,12 @@ _ALL_BENCHMARK_BACKWARD_PARAMS = [
 # Static superset of all forward "auto" candidates (union of all adaptive branches).
 # Used by _get_filtered_forward_params for env var filtering.
 _BENCHMARK_FORWARD_PARAMS_ALL_AUTO = [
+    *_FWD_MASK_IMPLICIT_GEMM,
     *_FWD_CUTLASS_IMPLICIT,
     *_FWD_CUTLASS_GROUPED,
-    *_FWD_IMPLICIT_GEMM_16,
-    *_FWD_IMPLICIT_GEMM_32,
     *_FWD_CUTE_GROUPED,
-    *_FWD_IMPLICIT_GEMM_GROUPED,
-    *_FWD_CUTE_IMPLICIT,
-    *_FWD_EXPLICIT,
     *_FWD_CUTE_SM90,
     *_FWD_CUTE_GROUPED_SM90,
-    *_FWD_EXPLICIT_GROUPED,
 ]
 
 
@@ -629,16 +709,22 @@ def _filter_benchmark_params_by_env_config(
         Filtered list of benchmark parameters
     """
     if env_config == "all":
-        # When "all", use the full exhaustive candidate set
+        # When "all", use the full exhaustive candidate set (nothing excluded)
         full_params = (
-            _ALL_BENCHMARK_FORWARD_PARAMS
-            if is_forward
-            else _ALL_BENCHMARK_BACKWARD_PARAMS
+            _ALL_BENCHMARK_FORWARD_PARAMS if is_forward else _ALL_BENCHMARK_BACKWARD_PARAMS
         )
         return [(str(algo), params) for algo, params in full_params]
 
+    if env_config == "trimmed":
+        # When "trimmed", use the reduced set that excludes 0%-win algorithms
+        # from earlier time-weighted analysis (pre-cuBLAS fix)
+        trimmed = (
+            _TRIMMED_BENCHMARK_FORWARD_PARAMS if is_forward else _TRIMMED_BENCHMARK_BACKWARD_PARAMS
+        )
+        return [(str(algo), params) for algo, params in trimmed]
+
     if env_config == "auto":
-        # When "auto", use reduced candidate set (default)
+        # When "auto", use adaptive candidate set based on dimensions
         return [(str(algo), params) for algo, params in all_params]
 
     # Convert environment config to list of algorithm names

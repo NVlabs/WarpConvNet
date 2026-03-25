@@ -154,8 +154,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--algo-mode",
         type=str,
-        default="auto",
-        help="Algorithm selection mode: auto, all, or specific algo name (default: auto)",
+        default="trimmed",
+        help="Algorithm selection mode: auto, all, trimmed, or specific algo name (default: trimmed)",
+    )
+    p.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear existing benchmark cache before populating",
     )
     p.add_argument(
         "--forward-only",
@@ -447,6 +452,17 @@ def main():
     if not torch.cuda.is_available():
         print("ERROR: CUDA is not available. This script requires a GPU.", file=sys.stderr)
         sys.exit(1)
+
+    # Clear cache if requested
+    if args.clear_cache:
+        from warpconvnet.constants import WARPCONVNET_BENCHMARK_CACHE_DIR
+        cache_file = os.path.join(
+            os.path.expanduser(WARPCONVNET_BENCHMARK_CACHE_DIR),
+            "benchmark_cache_generic.msgpack",
+        )
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+            print(f"Cleared cache: {cache_file}")
 
     # Apply presets then overrides
     if args.preset == "quick":
