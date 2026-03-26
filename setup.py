@@ -103,6 +103,7 @@ else:
 # Explicitly generate -gencode flags from TORCH_CUDA_ARCH_LIST.
 # We must do this ourselves because adding any explicit -gencode (e.g. sm_90a)
 # prevents PyTorch's BuildExtension from injecting its own gencode flags.
+_has_sm100_target = False
 _has_sm90_target = False
 _has_sm80_target = False
 _arch_values = []
@@ -120,6 +121,8 @@ else:
     try:
         cap = torch.cuda.get_device_capability()
         _arch_values.append(float(f"{cap[0]}.{cap[1]}"))
+        if cap[0] >= 10:
+            _has_sm100_target = True
         if cap[0] >= 9:
             _has_sm90_target = True
         if cap[0] >= 8:
@@ -142,7 +145,11 @@ if not _arch_values and not any(v >= 9.0 for v in _skipped):
 
 # Determine SM80+ presence first (needed to decide whether SM7X gencode is safe)
 for arch_val in _arch_values:
-    if arch_val >= 9.0:
+    if arch_val >= 10.0:
+        _has_sm100_target = True
+        _has_sm90_target = True
+        _has_sm80_target = True
+    elif arch_val >= 9.0:
         _has_sm90_target = True
         _has_sm80_target = True
     elif arch_val >= 8.0:
@@ -152,9 +159,17 @@ for arch_val in _arch_values:
 # When SM80+ targets are present, skip SM7X gencode: CUTLASS .cu files are compiled
 # with all gencode flags, and CUTLASS cp.async / tensor-core MMA fail on compute_7X.
 _skipped_sm7x = []
+_has_ptx_target = False
 for arch_val in _arch_values:
-    arch_int = int(arch_val * 10)  # e.g. 7.0 -> 70, 8.0 -> 80, 9.0 -> 90
-    if arch_val >= 9.0:
+    arch_int = int(arch_val * 10)  # e.g. 7.0 -> 70, 8.0 -> 80, 9.0 -> 90, 10.0 -> 100
+    if arch_val >= 10.0 and arch_val < 10.0 + 0.01:
+        pass  # sm_100a added separately below
+    elif arch_val >= 10.0:
+        # Future arch (e.g. 12.0): emit PTX for forward compatibility
+        nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=compute_{arch_int}")
+        _has_ptx_target = True
+        print(f"Adding PTX gencode for SM{arch_int} (forward compatibility)")
+    elif arch_val >= 9.0:
         pass  # sm_90a added separately below
     elif arch_val >= 8.0:
         nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=sm_{arch_int}")
@@ -185,6 +200,14 @@ if _has_sm90_target:
     cxx_args.append("-DWARPCONVNET_SM90_ENABLED=1")
     nvcc_args.append("-DWARPCONVNET_SM90_ENABLED=1")
     print("Adding SM90a (Hopper WGMMA) gencode flag and WARPCONVNET_SM90_ENABLED")
+
+# For SM100 (Blackwell) support, use sm_100a (like sm_90a for Hopper).
+# sm_100a enables __CUDA_ARCH_FEAT_SM100_ALL needed for Blackwell-specific features.
+if _has_sm100_target:
+    nvcc_args.append("-gencode=arch=compute_100a,code=sm_100a")
+    cxx_args.append("-DWARPCONVNET_SM100_ENABLED=1")
+    nvcc_args.append("-DWARPCONVNET_SM100_ENABLED=1")
+    print("Adding SM100a (Blackwell) gencode flag and WARPCONVNET_SM100_ENABLED")
 
 # Check DISABLE_BFLOAT16
 if os.environ.get("DISABLE_BFLOAT16", "0") == "1":

@@ -48,7 +48,10 @@ try:
 
     _sm_cap = torch.cuda.get_device_capability()
     _HAS_SM80_HARDWARE = _sm_cap[0] >= 8
-    _HAS_SM90_HARDWARE = _sm_cap[0] >= 9
+    # SM90 WGMMA is only available on SM90 (Hopper) hardware, not SM100+ (Blackwell).
+    # SM100 has its own instruction set (TCGEN05); the sm_90a WGMMA cubins are not
+    # selected by the CUDA runtime when a better-matching sm_100a cubin exists.
+    _HAS_SM90_HARDWARE = _sm_cap[0] == 9
 except Exception:
     pass
 
