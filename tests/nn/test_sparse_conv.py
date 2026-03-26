@@ -13,8 +13,8 @@ from warpconvnet.geometry.coords.search.torch_discrete import (
 )
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.sparse_conv import (
-    SPARSE_CONV_FWD_ALGO_MODE,
-    SPARSE_CONV_BWD_ALGO_MODE,
+    SPARSE_CONV_AB_ALGO_MODE,
+    SPARSE_CONV_ATB_ALGO_MODE,
     STRIDED_CONV_MODE,
     _implicit_gemm_forward_logic,
     _implicit_gemm_backward_logic,
@@ -180,7 +180,7 @@ def test_sparse_conv(setup_voxels):
         bias=bias,
         kernel_size=kernel_size,
         stride=(2, 2, 2),
-        fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM,
+        fwd_algo=SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
     )
     out_explicit = spatially_sparse_conv(
         voxels,
@@ -188,7 +188,7 @@ def test_sparse_conv(setup_voxels):
         bias=bias,
         kernel_size=kernel_size,
         stride=(2, 2, 2),
-        fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM,
+        fwd_algo=SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
     )
     # out_batched_explicit = spatially_sparse_conv(
     #     voxels,
@@ -196,7 +196,7 @@ def test_sparse_conv(setup_voxels):
     #     bias=bias,
     #     kernel_size=kernel_size,
     #     stride=(2, 2, 2),
-    #     fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM_BATCHED,
+    #     fwd_algo=SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM_BATCHED,
     # )
     assert out_implicit.num_channels == C_out
     assert out_explicit.num_channels == C_out
@@ -624,12 +624,12 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
         weight=weights,
         kernel_size=kernel_size,
         fwd_algo=[
-            SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM,
-            SPARSE_CONV_FWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
+            SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
+            SPARSE_CONV_AB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
         ],
         bwd_algo=[
-            SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM,
-            SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
+            SPARSE_CONV_ATB_ALGO_MODE.IMPLICIT_GEMM,
+            SPARSE_CONV_ATB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
         ],
     )
 
@@ -647,8 +647,8 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
         voxels,
         weight=weights,
         kernel_size=kernel_size,
-        fwd_algo=["implicit_gemm", SPARSE_CONV_FWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
-        bwd_algo=["implicit_gemm", SPARSE_CONV_BWD_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
+        fwd_algo=["implicit_gemm", SPARSE_CONV_AB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
+        bwd_algo=["implicit_gemm", SPARSE_CONV_ATB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
     )
 
     # Test single algorithm for comparison
@@ -656,8 +656,8 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
         voxels,
         weight=weights,
         kernel_size=kernel_size,
-        fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM,
-        bwd_algo=SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM,
+        fwd_algo=SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
+        bwd_algo=SPARSE_CONV_ATB_ALGO_MODE.IMPLICIT_GEMM,
     )
 
     # All should have same output dimensions
