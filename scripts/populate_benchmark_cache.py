@@ -90,8 +90,8 @@ CHANNEL_PAIRS_COMMON = [
 # max(ceil(log10(N)), 4) covers the cache bucket space:
 #   N<10K → bucket 4, N=10K-100K → bucket 5, N=100K-1M → bucket 6, N=1M+ → bucket 7
 NUM_VOXELS_DEFAULT = [
-    5_000,    # log10 bucket 4 (N < 10K)
-    50_000,   # log10 bucket 5 (10K-100K)
+    5_000,  # log10 bucket 4 (N < 10K)
+    50_000,  # log10 bucket 5 (10K-100K)
     500_000,  # log10 bucket 6 (100K-1M)
     2_000_000,  # log10 bucket 7 (1M+)
 ]
@@ -301,11 +301,10 @@ def run_single_config(
     """
     from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
     from warpconvnet.nn.functional.sparse_conv.detail.unified import (
-        _BENCHMARK_FORWARD_RESULTS,
-        _BENCHMARK_DGRAD_RESULTS,
-        _BENCHMARK_WGRAD_RESULTS,
-        _get_adaptive_forward_params,
-        _BENCHMARK_BACKWARD_PARAMS,
+        _BENCHMARK_AB_RESULTS,
+        _BENCHMARK_ATB_RESULTS,
+        _get_adaptive_AB_params,
+        _ATB_PARAMS_AUTO,
         SpatiallySparseConvConfig,
     )
 
@@ -324,13 +323,13 @@ def run_single_config(
     # Check cache for resume mode
     if resume:
         fwd_cached = _config_is_cached(
-            "sparse_conv_forward", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
+            "AB_gather_scatter", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
         dgrad_cached = _config_is_cached(
-            "sparse_conv_dgrad", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
+            "AB_gather_scatter", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
         wgrad_cached = _config_is_cached(
-            "sparse_conv_wgrad", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
+            "AtB_gather_gather", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
         bwd_cached = dgrad_cached and wgrad_cached
         if (not do_forward or fwd_cached) and (not do_backward or bwd_cached):
@@ -366,8 +365,8 @@ def run_single_config(
             kernel_volume=kernel_volume,
             in_dtype=dtype,
         )
-        had_cache = fwd_config in _BENCHMARK_FORWARD_RESULTS
-        num_fwd_candidates = len(_get_adaptive_forward_params(c_in, c_out, kernel_volume))
+        had_cache = fwd_config in _BENCHMARK_AB_RESULTS
+        num_fwd_candidates = len(_get_adaptive_AB_params(c_in, c_out, kernel_volume))
 
         torch.cuda.synchronize(device)
         t0 = time.perf_counter()
@@ -376,7 +375,7 @@ def run_single_config(
         first_call_ms = (time.perf_counter() - t0) * 1000
 
         # Extract chosen algo from cache
-        fwd_results = _BENCHMARK_FORWARD_RESULTS.get(fwd_config)
+        fwd_results = _BENCHMARK_AB_RESULTS.get(fwd_config)
         if fwd_results:
             best = fwd_results if isinstance(fwd_results, tuple) else fwd_results[0]
             best_algo, best_params, _ = best
@@ -407,9 +406,9 @@ def run_single_config(
             kernel_volume=kernel_volume,
             in_dtype=dtype,
         )
-        had_dgrad_cache = bwd_config in _BENCHMARK_DGRAD_RESULTS
-        had_wgrad_cache = bwd_config in _BENCHMARK_WGRAD_RESULTS
-        num_bwd_candidates = len(_BENCHMARK_BACKWARD_PARAMS)
+        had_dgrad_cache = bwd_config in _BENCHMARK_AB_RESULTS
+        had_wgrad_cache = bwd_config in _BENCHMARK_ATB_RESULTS
+        num_bwd_candidates = len(_ATB_PARAMS_AUTO)
 
         loss = out.feature_tensor.sum()
         torch.cuda.synchronize(device)
@@ -419,8 +418,8 @@ def run_single_config(
         first_bwd_ms = (time.perf_counter() - t0) * 1000
 
         # Extract chosen algos from split dgrad/wgrad caches
-        dgrad_results = _BENCHMARK_DGRAD_RESULTS.get(bwd_config)
-        wgrad_results = _BENCHMARK_WGRAD_RESULTS.get(bwd_config)
+        dgrad_results = _BENCHMARK_AB_RESULTS.get(bwd_config)
+        wgrad_results = _BENCHMARK_ATB_RESULTS.get(bwd_config)
         algo_parts = []
         if dgrad_results:
             best = dgrad_results if isinstance(dgrad_results, tuple) else dgrad_results[0]
@@ -456,6 +455,7 @@ def main():
     # Clear cache if requested
     if args.clear_cache:
         from warpconvnet.constants import WARPCONVNET_BENCHMARK_CACHE_DIR
+
         cache_file = os.path.join(
             os.path.expanduser(WARPCONVNET_BENCHMARK_CACHE_DIR),
             "benchmark_cache_generic.msgpack",

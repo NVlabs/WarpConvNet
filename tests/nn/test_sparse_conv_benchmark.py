@@ -9,16 +9,15 @@ from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable
 from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.sparse_conv import (
-    SPARSE_CONV_FWD_ALGO_MODE,
-    SPARSE_CONV_BWD_ALGO_MODE,
+    SPARSE_CONV_AB_ALGO_MODE,
+    SPARSE_CONV_ATB_ALGO_MODE,
     STRIDED_CONV_MODE,
     SpatiallySparseConvExplicitGEMMFunction,
     SpatiallySparseConvImplicitGEMMFunction,
     UnifiedSpatiallySparseConvFunction,
     spatially_sparse_conv,
-    _BENCHMARK_FORWARD_RESULTS,
-    _BENCHMARK_DGRAD_RESULTS,
-    _BENCHMARK_WGRAD_RESULTS,
+    _BENCHMARK_AB_RESULTS,
+    _BENCHMARK_ATB_RESULTS,
     SpatiallySparseConvConfig,
 )
 from warpconvnet.nn.functional.sparse_pool import sparse_max_pool
@@ -82,8 +81,8 @@ def test_sparse_conv_explicit_benchmark(setup_voxels, benchmark):
         kwargs={
             "bias": bias,
             "stride": stride,
-            "fwd_algo": SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM,
-            "bwd_algo": SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM,
+            "fwd_algo": SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
+            "bwd_algo": SPARSE_CONV_ATB_ALGO_MODE.EXPLICIT_GEMM,
             "implicit_matmul_fwd_block_size": None,
             "implicit_matmul_bwd_block_size": None,
         },
@@ -115,8 +114,8 @@ def test_sparse_conv_implicit_benchmark(setup_voxels, benchmark):
         kwargs={
             "bias": bias,
             "stride": stride,
-            "fwd_algo": SPARSE_CONV_FWD_ALGO_MODE.IMPLICIT_GEMM,
-            "bwd_algo": SPARSE_CONV_BWD_ALGO_MODE.IMPLICIT_GEMM,
+            "fwd_algo": SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
+            "bwd_algo": SPARSE_CONV_ATB_ALGO_MODE.IMPLICIT_GEMM,
             "implicit_matmul_fwd_block_size": fixed_implicit_fwd_block_size,
             "implicit_matmul_bwd_block_size": fixed_implicit_bwd_block_size,
         },
@@ -130,7 +129,7 @@ def test_sparse_conv_auto_benchmark_and_correctness(setup_voxels, benchmark):
     voxels = setup_voxels
     C_in, C_out = voxels.num_channels, 13
 
-    _BENCHMARK_FORWARD_RESULTS.clear()
+    _BENCHMARK_AB_RESULTS.clear()
 
     kernel_size = (3, 3, 3)
     stride = (2, 2, 2)
@@ -145,8 +144,8 @@ def test_sparse_conv_auto_benchmark_and_correctness(setup_voxels, benchmark):
         kernel_size,
         bias=bias,
         stride=stride,
-        fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.EXPLICIT_GEMM,
-        bwd_algo=SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM,
+        fwd_algo=SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
+        bwd_algo=SPARSE_CONV_ATB_ALGO_MODE.EXPLICIT_GEMM,
     ).feature_tensor
 
     out_auto_result = benchmark.pedantic(
@@ -159,8 +158,8 @@ def test_sparse_conv_auto_benchmark_and_correctness(setup_voxels, benchmark):
         kwargs={
             "bias": bias,
             "stride": stride,
-            "fwd_algo": SPARSE_CONV_FWD_ALGO_MODE.AUTO,
-            "bwd_algo": SPARSE_CONV_BWD_ALGO_MODE.AUTO,
+            "fwd_algo": SPARSE_CONV_AB_ALGO_MODE.AUTO,
+            "bwd_algo": SPARSE_CONV_ATB_ALGO_MODE.AUTO,
             "implicit_matmul_fwd_block_size": None,
             "implicit_matmul_bwd_block_size": None,
         },
@@ -173,14 +172,14 @@ def test_sparse_conv_auto_benchmark_and_correctness(setup_voxels, benchmark):
     assert torch.allclose(out_auto_features, out_explicit_features, atol=1e-6)
 
     found_config_in_cache = False
-    for config_key in _BENCHMARK_FORWARD_RESULTS:
+    for config_key in _BENCHMARK_AB_RESULTS:
         if (
             config_key.in_channels == C_in
             and config_key.out_channels == C_out
             and config_key.kernel_volume == num_kernels
         ):
             found_config_in_cache = True
-            cached = _BENCHMARK_FORWARD_RESULTS[config_key]
+            cached = _BENCHMARK_AB_RESULTS[config_key]
             assert cached is not None
             # Cache stores (algo_str, params, time) tuples or lists thereof
             first = cached[0] if isinstance(cached, list) else cached
@@ -272,9 +271,9 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
     stride_val = (2, 2, 2)
 
     # Clear benchmark caches
-    _BENCHMARK_FORWARD_RESULTS.clear()
-    _BENCHMARK_DGRAD_RESULTS.clear()
-    _BENCHMARK_WGRAD_RESULTS.clear()
+    _BENCHMARK_AB_RESULTS.clear()
+    _BENCHMARK_AB_RESULTS.clear()
+    _BENCHMARK_ATB_RESULTS.clear()
 
     num_kernels = kernel_size_val[0] * kernel_size_val[1] * kernel_size_val[2]
     weights = torch.randn(num_kernels, C_in, C_out, device=voxels.device, dtype=torch.float64)
@@ -318,8 +317,8 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
         weights,
         kernel_map_generated,
         num_out_coords_generated,
-        SPARSE_CONV_FWD_ALGO_MODE.AUTO,
-        SPARSE_CONV_BWD_ALGO_MODE.AUTO,
+        SPARSE_CONV_AB_ALGO_MODE.AUTO,
+        SPARSE_CONV_ATB_ALGO_MODE.AUTO,
         effective_compute_dtype,
         None,
         None,
@@ -335,15 +334,15 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
 
     # Check if benchmark caches were populated
     assert (
-        len(_BENCHMARK_FORWARD_RESULTS) > 0
+        len(_BENCHMARK_AB_RESULTS) > 0
     ), "Forward benchmark cache not populated after AUTO gradcheck"
     assert (
-        len(_BENCHMARK_DGRAD_RESULTS) > 0 or len(_BENCHMARK_WGRAD_RESULTS) > 0
+        len(_BENCHMARK_AB_RESULTS) > 0 or len(_BENCHMARK_ATB_RESULTS) > 0
     ), "Dgrad/wgrad benchmark caches not populated after AUTO gradcheck"
 
     # Simplified check as before for test_sparse_conv
     found_fwd_config_in_cache_grad = False
-    for config_key in _BENCHMARK_FORWARD_RESULTS:
+    for config_key in _BENCHMARK_AB_RESULTS:
         if (
             config_key.in_channels == C_in
             and config_key.out_channels == C_out
@@ -356,7 +355,7 @@ def test_sparse_conv_unified_auto_gradcheck(setup_small_voxels):
     ), "AUTO mode did not populate forward cache correctly during gradcheck."
 
     found_bwd_config_in_cache_grad = False
-    for cache_dict in (_BENCHMARK_DGRAD_RESULTS, _BENCHMARK_WGRAD_RESULTS):
+    for cache_dict in (_BENCHMARK_AB_RESULTS, _BENCHMARK_ATB_RESULTS):
         for config_key in cache_dict:
             if (
                 config_key.in_channels == C_in

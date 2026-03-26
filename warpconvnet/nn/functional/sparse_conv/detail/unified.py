@@ -22,27 +22,20 @@ from warpconvnet.utils.logger import get_logger
 
 from .dispatch import _execute_forward, _execute_backward
 from .algo_params import (
-    SPARSE_CONV_FWD_ALGO_MODE,
-    SPARSE_CONV_BWD_ALGO_MODE,
+    SPARSE_CONV_AB_ALGO_MODE,
+    SPARSE_CONV_ATB_ALGO_MODE,
     _HAS_CUTE_BACKEND,
     _HAS_CUTE_GROUPED,
     _HAS_CUTE_SM90,
     _HAS_CUTE_GROUPED_SM90,
-    _BENCHMARK_BACKWARD_PARAMS,
-    _ALL_BENCHMARK_FORWARD_PARAMS,
-    _ALL_BENCHMARK_BACKWARD_PARAMS,
-    _get_adaptive_forward_params,
-    _get_adaptive_backward_params,
-    _get_adaptive_dgrad_params,
-    _get_adaptive_wgrad_params,
-    _get_filtered_forward_params,
-    _get_filtered_backward_params,
+    _ATB_PARAMS_AUTO,
+    _get_adaptive_AB_params,
+    _get_adaptive_AtB_params,
     _filter_benchmark_params_by_env_config,
 )
 from .autotune import (
-    _BENCHMARK_FORWARD_RESULTS,
-    _BENCHMARK_DGRAD_RESULTS,
-    _BENCHMARK_WGRAD_RESULTS,
+    _BENCHMARK_AB_RESULTS,
+    _BENCHMARK_ATB_RESULTS,
     _serialize_benchmark_results,
     _run_forward_benchmarks,
     _run_backward_benchmarks,
@@ -74,13 +67,6 @@ if _HAS_CUTE_GROUPED_SM90:
 
 logger = get_logger(__name__)
 
-# Re-export for backward compatibility
-__all__ = [
-    "SPARSE_CONV_FWD_ALGO_MODE",
-    "SPARSE_CONV_BWD_ALGO_MODE",
-    "UnifiedSpatiallySparseConvFunction",
-]
-
 
 class UnifiedSpatiallySparseConvFunction(Function):
     @staticmethod
@@ -90,14 +76,14 @@ class UnifiedSpatiallySparseConvFunction(Function):
         weight: Float[Tensor, "K C_in C_out"],
         kernel_map: IntSearchResult,
         num_out_coords: int,
-        fwd_algo: Union[str, List[Union[str, SPARSE_CONV_FWD_ALGO_MODE]]],
-        bwd_algo: Union[str, List[Union[str, SPARSE_CONV_BWD_ALGO_MODE]]],
+        fwd_algo: Union[str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]],
+        bwd_algo: Union[str, List[Union[str, SPARSE_CONV_ATB_ALGO_MODE]]],
         compute_dtype: Optional[torch.dtype],
         fwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         voxel_size: Optional[Tuple[int, ...]] = None,
     ) -> Float[Tensor, "M C_out"]:
-        global _BENCHMARK_FORWARD_RESULTS  # noqa: F824
+        global _BENCHMARK_AB_RESULTS  # noqa: F824
         output_feature_tensor = None
 
         # Normalize input algos to strings for benchmarking and caching
@@ -125,7 +111,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         C_in = in_features.shape[1]
         C_out = weight.shape[2]
         kv = weight.shape[0]
-        adaptive_fwd_params = _get_adaptive_forward_params(
+        adaptive_fwd_params = _get_adaptive_AB_params(
             C_in,
             C_out,
             kv,
@@ -143,7 +129,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         )
 
         # Step 3: Check cache first
-        cached_result = _BENCHMARK_FORWARD_RESULTS.get(config)
+        cached_result = _BENCHMARK_AB_RESULTS.get(config)
         if cached_result is not None:
             # Support tuple (best) or list-of-tuples (best-first)
             if isinstance(cached_result, tuple):
@@ -179,10 +165,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             compute_dtype,
                             custom_params=filtered_params,
                         )
-                        _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results[0]
+                        _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
                         # Save a serialized copy (algo as string) to the generic cache
                         generic_benchmark_update_entry(
-                            "sparse_conv_forward",
+                            "AB_gather_scatter",
                             config,
                             _serialize_benchmark_results(all_fwd_benchmark_results),
                             force=False,
@@ -210,10 +196,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 compute_dtype,
                 custom_params=filtered_params,
             )
-            _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results[0]
+            _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
             # Persist a serialized copy to generic cache
             generic_benchmark_update_entry(
-                "sparse_conv_forward",
+                "AB_gather_scatter",
                 config,
                 _serialize_benchmark_results(all_fwd_benchmark_results),
                 force=False,
@@ -251,7 +237,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 f"Falling back to explicit_gemm."
             )
             # Invalidate the cached result for this config
-            _BENCHMARK_FORWARD_RESULTS.pop(config, None)
+            _BENCHMARK_AB_RESULTS.pop(config, None)
             output_feature_tensor = _execute_forward(
                 "explicit_gemm",
                 {},
@@ -348,9 +334,22 @@ class UnifiedSpatiallySparseConvFunction(Function):
         C_out_bwd = config_params["out_channels"]
         kv_bwd = config_params["kernel_volume"]
         N_in_bwd = config_params["num_in_coords"]
-        config = SpatiallySparseConvConfig(
+        N_out_bwd = config_params["num_out_coords"]
+
+        # Dgrad config: swapped perspective — the AB kernel iterates N_in rows,
+        # gathers from N_out, reduces over C_out, outputs C_in.
+        dgrad_config = SpatiallySparseConvConfig(
+            num_in_coords=N_out_bwd,
+            num_out_coords=N_in_bwd,
+            in_channels=C_out_bwd,
+            out_channels=C_in_bwd,
+            kernel_volume=kv_bwd,
+            in_dtype=grad_output.dtype,
+        )
+        # Wgrad config: reduction over gathered pairs, no swap needed.
+        wgrad_config = SpatiallySparseConvConfig(
             num_in_coords=N_in_bwd,
-            num_out_coords=config_params["num_out_coords"],
+            num_out_coords=N_out_bwd,
             in_channels=C_in_bwd,
             out_channels=C_out_bwd,
             kernel_volume=kv_bwd,
@@ -364,29 +363,31 @@ class UnifiedSpatiallySparseConvFunction(Function):
         else:
             algorithm_filter = [str(initial_bwd_algo)]
 
-        # Separate candidate lists for dgrad vs wgrad
-        dgrad_adaptive = _get_adaptive_dgrad_params(
-            C_in_bwd,
+        # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
+        dgrad_adaptive = _get_adaptive_AB_params(
             C_out_bwd,
+            C_in_bwd,
             kv_bwd,
             num_in_coords=N_in_bwd,
         )
-        wgrad_adaptive = _get_adaptive_wgrad_params(
+        wgrad_adaptive = _get_adaptive_AtB_params(
             C_in_bwd,
             C_out_bwd,
             kv_bwd,
             num_in_coords=N_in_bwd,
         )
         filtered_dgrad_params = _filter_benchmark_params_by_env_config(
-            dgrad_adaptive, algorithm_filter, is_forward=False
+            dgrad_adaptive, algorithm_filter, is_forward=True
         )
         filtered_wgrad_params = _filter_benchmark_params_by_env_config(
             wgrad_adaptive, algorithm_filter, is_forward=False
         )
 
         # Helper to auto-tune one direction
-        def _autotune_one_direction(cache_dict, cache_ns, needs_grad_tuple, params_for_direction):
-            cached = cache_dict.get(config)
+        def _autotune_one_direction(
+            cache_dict, cache_ns, needs_grad_tuple, params_for_direction, cfg
+        ):
+            cached = cache_dict.get(cfg)
             if cached is not None:
                 best_list = [cached] if isinstance(cached, tuple) else cached
                 return best_list[0][0], best_list[0][1]
@@ -401,10 +402,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 custom_params=params_for_direction,
                 needs_input_grad=needs_grad_tuple,
             )
-            cache_dict[config] = results[0]
+            cache_dict[cfg] = results[0]
             generic_benchmark_update_entry(
                 cache_ns,
-                config,
+                cfg,
                 _serialize_benchmark_results(results),
                 force=False,
             )
@@ -416,10 +417,11 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if ctx.needs_input_grad[0]:
             dgrad_algo, dgrad_params = _autotune_one_direction(
-                _BENCHMARK_DGRAD_RESULTS,
-                "sparse_conv_dgrad",
+                _BENCHMARK_AB_RESULTS,
+                "AB_gather_scatter",
                 (True, False),
                 filtered_dgrad_params,
+                dgrad_config,
             )
             logger.debug(
                 f"[dispatch] DGRAD algo={dgrad_algo} params={dgrad_params} "
@@ -441,7 +443,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"DGRAD '{dgrad_algo}' failed: {e}. Falling back.")
-                _BENCHMARK_DGRAD_RESULTS.pop(config, None)
+                _BENCHMARK_AB_RESULTS.pop(dgrad_config, None)
                 grad_in_features, _ = _execute_backward(
                     "explicit_gemm",
                     {},
@@ -457,10 +459,11 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if ctx.needs_input_grad[1]:
             wgrad_algo, wgrad_params = _autotune_one_direction(
-                _BENCHMARK_WGRAD_RESULTS,
-                "sparse_conv_wgrad",
+                _BENCHMARK_ATB_RESULTS,
+                "AtB_gather_gather",
                 (False, True),
                 filtered_wgrad_params,
+                wgrad_config,
             )
             logger.debug(
                 f"[dispatch] WGRAD algo={wgrad_algo} params={wgrad_params} "
@@ -482,7 +485,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"WGRAD '{wgrad_algo}' failed: {e}. Falling back.")
-                _BENCHMARK_WGRAD_RESULTS.pop(config, None)
+                _BENCHMARK_ATB_RESULTS.pop(wgrad_config, None)
                 _, grad_weight = _execute_backward(
                     "explicit_gemm",
                     {},

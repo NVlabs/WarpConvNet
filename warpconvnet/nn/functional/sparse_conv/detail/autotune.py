@@ -43,8 +43,8 @@ from .algo_params import (
     _HAS_CUTE_GROUPED,
     _HAS_CUTE_SM90,
     _HAS_CUTE_GROUPED_SM90,
-    _get_filtered_forward_params,
-    _get_filtered_backward_params,
+    _get_filtered_AB_params,
+    _get_filtered_AtB_params,
 )
 
 if _HAS_CUTE_BACKEND:
@@ -83,19 +83,14 @@ _AUTOTUNE_BANNER_SHOWN = False
 # In-memory benchmark result caches (config -> sorted list of results)
 # ---------------------------------------------------------------------------
 
-_BENCHMARK_FORWARD_RESULTS: Dict[
+_BENCHMARK_AB_RESULTS: Dict[
     SpatiallySparseConvConfig,
     List[Tuple[str, Dict[str, Any], float]],
-] = {}
-# Separate caches for dgrad-only and wgrad-only benchmarks
-_BENCHMARK_DGRAD_RESULTS: Dict[
+] = {}  # AB gather-scatter (forward + dgrad)
+_BENCHMARK_ATB_RESULTS: Dict[
     SpatiallySparseConvConfig,
     List[Tuple[str, Dict[str, Any], float]],
-] = {}
-_BENCHMARK_WGRAD_RESULTS: Dict[
-    SpatiallySparseConvConfig,
-    List[Tuple[str, Dict[str, Any], float]],
-] = {}
+] = {}  # AtB gather-gather (wgrad)
 
 # ---------------------------------------------------------------------------
 # Serialization helpers for cache
@@ -112,8 +107,7 @@ def _serialize_benchmark_results(
     results: List[Tuple[Union[str, Any], Dict[str, Any], float]],
 ) -> List[Tuple[str, Dict[str, Any], float]]:
     return [
-        (_serialize_algo_value(algo), params, float(metric))
-        for algo, params, metric in results
+        (_serialize_algo_value(algo), params, float(metric)) for algo, params, metric in results
     ]
 
 
@@ -140,32 +134,21 @@ def _normalize_benchmark_results(
 
 def _initialize_benchmark_cache():
     """Load cached benchmark results and populate global dictionaries."""
-    forward_ns = generic_benchmark_get_namespace("sparse_conv_forward")
-    dgrad_ns = generic_benchmark_get_namespace("sparse_conv_dgrad")
-    wgrad_ns = generic_benchmark_get_namespace("sparse_conv_wgrad")
+    ab_ns = generic_benchmark_get_namespace("AB_gather_scatter")
+    atb_ns = generic_benchmark_get_namespace("AtB_gather_gather")
 
-    if isinstance(forward_ns, dict):
-        for k, v in forward_ns.items():
-            _BENCHMARK_FORWARD_RESULTS[k] = _normalize_benchmark_results(
-                v, is_forward=True
-            )
-    if isinstance(dgrad_ns, dict):
-        for k, v in dgrad_ns.items():
-            _BENCHMARK_DGRAD_RESULTS[k] = _normalize_benchmark_results(
-                v, is_forward=False
-            )
-    if isinstance(wgrad_ns, dict):
-        for k, v in wgrad_ns.items():
-            _BENCHMARK_WGRAD_RESULTS[k] = _normalize_benchmark_results(
-                v, is_forward=False
-            )
+    if isinstance(ab_ns, dict):
+        for k, v in ab_ns.items():
+            _BENCHMARK_AB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=True)
+    if isinstance(atb_ns, dict):
+        for k, v in atb_ns.items():
+            _BENCHMARK_ATB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
 
-    n_fwd = len(forward_ns) if forward_ns else 0
-    n_dgrad = len(dgrad_ns) if dgrad_ns else 0
-    n_wgrad = len(wgrad_ns) if wgrad_ns else 0
-    if n_fwd or n_dgrad or n_wgrad:
+    n_ab = len(ab_ns) if ab_ns else 0
+    n_atb = len(atb_ns) if atb_ns else 0
+    if n_ab or n_atb:
         logger.info(
-            f"Loaded {n_fwd} forward, {n_dgrad} dgrad, {n_wgrad} wgrad "
+            f"Loaded {n_ab} AB_gather_scatter, {n_atb} AtB_gather_gather "
             f"benchmark configurations from cache"
         )
 
@@ -175,24 +158,14 @@ def _on_cache_merge(namespace: str, merged_dict: dict) -> None:
 
     Refreshes the in-memory auto-tune results with entries from other ranks.
     """
-    if namespace == "sparse_conv_forward":
+    if namespace == "AB_gather_scatter":
         for k, v in merged_dict.items():
-            if k not in _BENCHMARK_FORWARD_RESULTS:
-                _BENCHMARK_FORWARD_RESULTS[k] = _normalize_benchmark_results(
-                    v, is_forward=True
-                )
-    elif namespace == "sparse_conv_dgrad":
+            if k not in _BENCHMARK_AB_RESULTS:
+                _BENCHMARK_AB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=True)
+    elif namespace == "AtB_gather_gather":
         for k, v in merged_dict.items():
-            if k not in _BENCHMARK_DGRAD_RESULTS:
-                _BENCHMARK_DGRAD_RESULTS[k] = _normalize_benchmark_results(
-                    v, is_forward=False
-                )
-    elif namespace == "sparse_conv_wgrad":
-        for k, v in merged_dict.items():
-            if k not in _BENCHMARK_WGRAD_RESULTS:
-                _BENCHMARK_WGRAD_RESULTS[k] = _normalize_benchmark_results(
-                    v, is_forward=False
-                )
+            if k not in _BENCHMARK_ATB_RESULTS:
+                _BENCHMARK_ATB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
 
 
 # Initialize cache on module load
@@ -226,9 +199,7 @@ def _run_forward_benchmarks(
     all_benchmark_results: List[Tuple[str, Dict[str, Any], float]] = []
     timer = CUDATimer()
 
-    def _execute_single_fwd_pass(
-        algo_mode: str, params_config: Dict[str, Any]
-    ) -> Optional[int]:
+    def _execute_single_fwd_pass(algo_mode: str, params_config: Dict[str, Any]) -> Optional[int]:
         if algo_mode == "explicit_gemm":
             _ = _explicit_gemm_forward_logic(
                 in_features,
@@ -346,19 +317,13 @@ def _run_forward_benchmarks(
                 mma_tile=params_config.get("mma_tile", 3),
             )
         else:
-            raise ValueError(
-                f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}"
-            )
+            raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
 
-    params_to_use = (
-        custom_params if custom_params is not None else _get_filtered_forward_params()
-    )
+    params_to_use = custom_params if custom_params is not None else _get_filtered_AB_params()
     # Filter out IMPLICIT_GEMM when dtype is float64 (unsupported by kernels)
     dtype_to_check = compute_dtype if compute_dtype is not None else in_features.dtype
     if dtype_to_check == torch.float64:
-        params_to_use = [
-            (algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"
-        ]
+        params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
 
     # Note: no alignment filter for mask_implicit_gemm — both CUTLASS and mask
     # kernels auto-pad unaligned channels internally (see cutlass.py, mask_gemm.py).
@@ -395,9 +360,7 @@ def _run_forward_benchmarks(
             # Sync to catch async CUDA errors from this candidate
             torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})"
-            )
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
             # Clear CUDA error state to prevent corruption of subsequent candidates.
             # cudaGetLastError() resets the error flag; synchronize() then succeeds.
             try:
@@ -407,9 +370,7 @@ def _run_forward_benchmarks(
             continue
 
         if isinstance(status, int) and status != 0:
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)"
-            )
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
         # Benchmark runs
@@ -419,9 +380,7 @@ def _run_forward_benchmarks(
             for _ in range(benchmark_iters):
                 with timer:
                     _execute_single_fwd_pass(algo_mode, params_config)
-                current_algo_min_time_ms = min(
-                    current_algo_min_time_ms, timer.elapsed_time
-                )
+                current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
             # Sync to catch async errors
             torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
@@ -435,9 +394,7 @@ def _run_forward_benchmarks(
             continue
 
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append(
-                (algo_mode, params_config, current_algo_min_time_ms)
-            )
+            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
             _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode}"
@@ -495,9 +452,7 @@ def _run_backward_benchmarks(
     all_benchmark_results: List[Tuple[str, Dict[str, Any], float]] = []
     timer = CUDATimer()
 
-    def _execute_single_bwd_pass(
-        algo_mode: str, params_config: Dict[str, Any]
-    ) -> Optional[int]:
+    def _execute_single_bwd_pass(algo_mode: str, params_config: Dict[str, Any]) -> Optional[int]:
         status = None
 
         if algo_mode == "explicit_gemm":
@@ -562,9 +517,7 @@ def _run_backward_benchmarks(
                 kernel_map,
                 num_out_coords,
                 gemm_block_size=params_config.get("gemm_block_size", 16),
-                split_k_threads_per_block=params_config.get(
-                    "split_k_threads_per_block", 256
-                ),
+                split_k_threads_per_block=params_config.get("split_k_threads_per_block", 256),
                 split_k_factor=params_config.get("split_k_factor", 4),
                 compute_dtype=compute_dtype,
                 saturation_m=params_config.get("saturation_m", 5000),
@@ -637,19 +590,13 @@ def _run_backward_benchmarks(
                 mma_tile=params_config.get("mma_tile", 3),
             )
         else:
-            raise ValueError(
-                f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}"
-            )
+            raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
 
-    params_to_use = (
-        custom_params if custom_params is not None else _get_filtered_backward_params()
-    )
+    params_to_use = custom_params if custom_params is not None else _get_filtered_AtB_params()
     # Filter out IMPLICIT_GEMM when dtype is float64 (unsupported by kernels)
     dtype_to_check = compute_dtype if compute_dtype is not None else grad_output.dtype
     if dtype_to_check == torch.float64:
-        params_to_use = [
-            (algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"
-        ]
+        params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
 
     global _AUTOTUNE_BANNER_SHOWN
     num_candidates = len(params_to_use)
@@ -677,9 +624,7 @@ def _run_backward_benchmarks(
                     break
             torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})"
-            )
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
             try:
                 torch.cuda.synchronize()
             except Exception:
@@ -687,9 +632,7 @@ def _run_backward_benchmarks(
             continue
 
         if isinstance(status, int) and status != 0:
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)"
-            )
+            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
         # Benchmark runs
@@ -703,9 +646,7 @@ def _run_backward_benchmarks(
                 for _ in range(benchmark_iters):
                     with timer:
                         _execute_single_bwd_pass(algo_mode, params_config)
-                    current_algo_min_time_ms = min(
-                        current_algo_min_time_ms, timer.elapsed_time
-                    )
+                    current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
                 torch.cuda.synchronize()
             except (RuntimeError, Exception) as e:
                 logger.debug(
@@ -718,9 +659,7 @@ def _run_backward_benchmarks(
                 continue
 
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append(
-                (algo_mode, params_config, current_algo_min_time_ms)
-            )
+            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
             _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode}"
@@ -729,9 +668,7 @@ def _run_backward_benchmarks(
             )
 
     if not all_benchmark_results:
-        logger.warning(
-            "No backward benchmark succeeded. Falling back to explicit_gemm."
-        )
+        logger.warning("No backward benchmark succeeded. Falling back to explicit_gemm.")
         with timer:
             _execute_single_bwd_pass("explicit_gemm", {})
         all_benchmark_results.append(("explicit_gemm", {}, timer.elapsed_time))
