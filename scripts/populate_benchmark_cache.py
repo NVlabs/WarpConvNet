@@ -352,7 +352,8 @@ def run_single_config(
         kernel_size=kernel_size,
         bias=False,
         fwd_algo=algo_mode,
-        bwd_algo=algo_mode,
+        dgrad_algo=algo_mode,
+        wgrad_algo=algo_mode,
     ).to(device=device, dtype=dtype)
 
     # Forward: first call triggers auto-tuning, second measures inference

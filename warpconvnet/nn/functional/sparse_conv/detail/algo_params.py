@@ -97,6 +97,7 @@ class SPARSE_CONV_AB_ALGO_MODE(Enum):
     MASK_IMPLICIT_GEMM = "mask_implicit_gemm"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
+    TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
 
 
 class SPARSE_CONV_ATB_ALGO_MODE(Enum):
@@ -113,6 +114,7 @@ class SPARSE_CONV_ATB_ALGO_MODE(Enum):
     MASK_IMPLICIT_GEMM = "mask_implicit_gemm"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
+    TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
 
 
 # ---------------------------------------------------------------------------

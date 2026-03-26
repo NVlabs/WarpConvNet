@@ -18,9 +18,7 @@ def _get_env_bool(env_var_name: str, default_value: bool) -> bool:
 
     env_value = env_value.lower()
     if env_value not in valid_bools:
-        raise ValueError(
-            f"{env_var_name} must be one of {valid_bools}, got {env_value}"
-        )
+        raise ValueError(f"{env_var_name} must be one of {valid_bools}, got {env_value}")
 
     result = env_value in ["true", "1"]
     logger.info(f"{env_var_name} is set to {result} by environment variable")
@@ -38,9 +36,7 @@ def _get_env_string(
 
     env_value = env_value.lower()
     if valid_values is not None and env_value not in valid_values:
-        raise ValueError(
-            f"{env_var_name} must be one of {valid_values}, got {env_value}"
-        )
+        raise ValueError(f"{env_var_name} must be one of {valid_values}, got {env_value}")
 
     logger.info(f"{env_var_name} is set to {env_value} by environment variable")
     return env_value
@@ -89,9 +85,7 @@ def _get_env_string_list(
         # Single value format
         env_value = env_value.lower()
         if valid_values is not None and env_value not in valid_values:
-            raise ValueError(
-                f"{env_var_name} must be one of {valid_values}, got {env_value}"
-            )
+            raise ValueError(f"{env_var_name} must be one of {valid_values}, got {env_value}")
 
         logger.info(f"{env_var_name} is set to {env_value} by environment variable")
         return env_value
@@ -107,9 +101,15 @@ VALID_ALGOS = [
     "explicit_gemm",
     "implicit_gemm",
     "cutlass_implicit_gemm",
+    "cute_implicit_gemm",
+    "explicit_gemm_grouped",
+    "implicit_gemm_grouped",
+    "cutlass_grouped_hybrid",
+    "cute_grouped",
     "mask_implicit_gemm",
     "auto",
     "all",
+    "trimmed",
 ]
 
 # Algorithm selection constants
@@ -130,12 +130,8 @@ VALID_ALGOS = [
 # for backward with negligible performance loss.
 #
 # "all": uses the full exhaustive candidate set (19 forward, 32 backward).
-WARPCONVNET_FWD_ALGO_MODE = _get_env_string_list(
-    "WARPCONVNET_FWD_ALGO_MODE", "auto", VALID_ALGOS
-)
-WARPCONVNET_BWD_ALGO_MODE = _get_env_string_list(
-    "WARPCONVNET_BWD_ALGO_MODE", "auto", VALID_ALGOS
-)
+WARPCONVNET_FWD_ALGO_MODE = _get_env_string_list("WARPCONVNET_FWD_ALGO_MODE", "auto", VALID_ALGOS)
+WARPCONVNET_BWD_ALGO_MODE = _get_env_string_list("WARPCONVNET_BWD_ALGO_MODE", "auto", VALID_ALGOS)
 
 VALID_DEPTHWISE_ALGOS = ["explicit_gemm", "implicit_gemm", "auto"]
 

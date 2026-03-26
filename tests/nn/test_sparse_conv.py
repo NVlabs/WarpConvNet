@@ -627,7 +627,11 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
             SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
             SPARSE_CONV_AB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
         ],
-        bwd_algo=[
+        dgrad_algo=[
+            SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
+            SPARSE_CONV_AB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
+        ],
+        wgrad_algo=[
             SPARSE_CONV_ATB_ALGO_MODE.IMPLICIT_GEMM,
             SPARSE_CONV_ATB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM,
         ],
@@ -639,25 +643,28 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
         weight=weights,
         kernel_size=kernel_size,
         fwd_algo=["implicit_gemm", "cutlass_implicit_gemm"],
-        bwd_algo=["implicit_gemm", "cutlass_implicit_gemm"],
+        dgrad_algo=["implicit_gemm", "cutlass_implicit_gemm"],
+        wgrad_algo=["implicit_gemm", "cutlass_implicit_gemm"],
     )
 
-    # Test with mixed string/enum list (should be converted properly)
+    # Test with mixed string/enum list
     out3 = spatially_sparse_conv(
         voxels,
         weight=weights,
         kernel_size=kernel_size,
         fwd_algo=["implicit_gemm", SPARSE_CONV_AB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
-        bwd_algo=["implicit_gemm", SPARSE_CONV_ATB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
+        dgrad_algo=["implicit_gemm", SPARSE_CONV_AB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
+        wgrad_algo=["implicit_gemm", SPARSE_CONV_ATB_ALGO_MODE.CUTLASS_IMPLICIT_GEMM],
     )
 
-    # Test single algorithm for comparison
+    # Test single algorithm
     out4 = spatially_sparse_conv(
         voxels,
         weight=weights,
         kernel_size=kernel_size,
         fwd_algo=SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
-        bwd_algo=SPARSE_CONV_ATB_ALGO_MODE.IMPLICIT_GEMM,
+        dgrad_algo=SPARSE_CONV_AB_ALGO_MODE.IMPLICIT_GEMM,
+        wgrad_algo=SPARSE_CONV_ATB_ALGO_MODE.IMPLICIT_GEMM,
     )
 
     # All should have same output dimensions

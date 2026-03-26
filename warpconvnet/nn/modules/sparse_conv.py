@@ -53,9 +53,11 @@ class SpatiallySparseConv(BaseSpatialModule):
     num_spatial_dims : int, optional
         Number of spatial dimensions. Defaults to ``3``.
     fwd_algo : `SPARSE_CONV_AB_ALGO_MODE` or str, optional
-        Forward algorithm to use. Defaults to environment setting.
-    bwd_algo : `SPARSE_CONV_ATB_ALGO_MODE` or str, optional
-        Backward algorithm to use. Defaults to environment setting.
+        Forward (AB gather-scatter) algorithm. Defaults to environment setting.
+    dgrad_algo : `SPARSE_CONV_AB_ALGO_MODE` or str, optional
+        Dgrad (AB gather-scatter) algorithm. Defaults to environment setting.
+    wgrad_algo : `SPARSE_CONV_ATB_ALGO_MODE` or str, optional
+        Wgrad (AtB gather-gather) algorithm. Defaults to environment setting.
     stride_mode : `STRIDED_CONV_MODE`, optional
         How to interpret ``stride`` when ``transposed`` is ``True``.
     order : `POINT_ORDERING`, optional
@@ -81,7 +83,8 @@ class SpatiallySparseConv(BaseSpatialModule):
         kernel_matmul_batch_size: int = 2,
         num_spatial_dims: Optional[int] = 3,
         fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        bwd_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
+        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
+        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         compute_dtype: Optional[torch.dtype] = None,
@@ -93,7 +96,6 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        # Ensure kernel_size, stride, dilation are tuples for consistent use
         _kernel_size = ntuple(kernel_size, ndim=self.num_spatial_dims)
         _stride = ntuple(stride, ndim=self.num_spatial_dims)
         _dilation = ntuple(dilation, ndim=self.num_spatial_dims)
@@ -109,21 +111,19 @@ class SpatiallySparseConv(BaseSpatialModule):
         # Use environment variable values if not explicitly provided
         if fwd_algo is None:
             fwd_algo = WARPCONVNET_FWD_ALGO_MODE
-        if bwd_algo is None:
-            bwd_algo = WARPCONVNET_BWD_ALGO_MODE
+        if dgrad_algo is None:
+            dgrad_algo = WARPCONVNET_FWD_ALGO_MODE
+        if wgrad_algo is None:
+            wgrad_algo = WARPCONVNET_BWD_ALGO_MODE
 
-        # Convert string to enum, but preserve lists for direct passing to functional layer
-        if isinstance(fwd_algo, str):
-            self.fwd_algo = SPARSE_CONV_AB_ALGO_MODE(fwd_algo)
-        else:
-            # Keep lists as-is (from env vars or direct user input)
-            self.fwd_algo = fwd_algo
+        def _parse_algo(algo, enum_cls):
+            if isinstance(algo, str):
+                return enum_cls(algo)
+            return algo
 
-        if isinstance(bwd_algo, str):
-            self.bwd_algo = SPARSE_CONV_ATB_ALGO_MODE(bwd_algo)
-        else:
-            # Keep lists as-is (from env vars or direct user input)
-            self.bwd_algo = bwd_algo
+        self.fwd_algo = _parse_algo(fwd_algo, SPARSE_CONV_AB_ALGO_MODE)
+        self.dgrad_algo = _parse_algo(dgrad_algo, SPARSE_CONV_AB_ALGO_MODE)
+        self.wgrad_algo = _parse_algo(wgrad_algo, SPARSE_CONV_ATB_ALGO_MODE)
 
         self.stride_mode = stride_mode
         self.order = order
@@ -207,7 +207,8 @@ class SpatiallySparseConv(BaseSpatialModule):
             transposed=self.transposed,
             generative=self.generative,
             fwd_algo=self.fwd_algo,
-            bwd_algo=self.bwd_algo,
+            dgrad_algo=self.dgrad_algo,
+            wgrad_algo=self.wgrad_algo,
             stride_mode=self.stride_mode,
             order=self.order,
             compute_dtype=self.compute_dtype,
@@ -239,20 +240,12 @@ class SparseConv2d(SpatiallySparseConv):
         Use generative convolution. Defaults to ``False``.
     stride_mode : `STRIDED_CONV_MODE`, optional
         How to interpret ``stride`` when ``transposed`` is ``True``.
-    fwd_algo : `SPARSE_CONV_AB_ALGO_MODE` or str, optional
-        Forward algorithm to use.
-    bwd_algo : `SPARSE_CONV_ATB_ALGO_MODE` or str, optional
-        Backward algorithm to use.
-    kernel_matmul_batch_size : int, optional
-        Batch size used for implicit matrix multiplications. Defaults to ``2``.
-    order : `POINT_ORDERING`, optional
-        Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
-    compute_dtype : torch.dtype, optional
-        Data type used for intermediate computations.
-    implicit_matmul_fwd_block_size : int, optional
-        CUDA block size for implicit forward matmuls.
-    implicit_matmul_bwd_block_size : int, optional
-        CUDA block size for implicit backward matmuls.
+    fwd_algo : str, optional
+        Forward (AB gather-scatter) algorithm.
+    dgrad_algo : str, optional
+        Dgrad (AB gather-scatter) algorithm.
+    wgrad_algo : str, optional
+        Wgrad (AtB gather-gather) algorithm.
     """
 
     def __init__(
@@ -267,12 +260,11 @@ class SparseConv2d(SpatiallySparseConv):
         generative: bool = False,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        bwd_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
+        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
+        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
         kernel_matmul_batch_size: int = 2,
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         compute_dtype: Optional[torch.dtype] = None,
-        implicit_matmul_fwd_block_size: Optional[int] = None,
-        implicit_matmul_bwd_block_size: Optional[int] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -286,12 +278,11 @@ class SparseConv2d(SpatiallySparseConv):
             num_spatial_dims=2,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
-            bwd_algo=bwd_algo,
+            dgrad_algo=dgrad_algo,
+            wgrad_algo=wgrad_algo,
             kernel_matmul_batch_size=kernel_matmul_batch_size,
             order=order,
             compute_dtype=compute_dtype,
-            implicit_matmul_fwd_block_size=implicit_matmul_fwd_block_size,
-            implicit_matmul_bwd_block_size=implicit_matmul_bwd_block_size,
         )
 
 
@@ -318,20 +309,12 @@ class SparseConv3d(SpatiallySparseConv):
         Use generative convolution. Defaults to ``False``.
     stride_mode : `STRIDED_CONV_MODE`, optional
         How to interpret ``stride`` when ``transposed`` is ``True``.
-    fwd_algo : `SPARSE_CONV_AB_ALGO_MODE` or str, optional
-        Forward algorithm to use.
-    bwd_algo : `SPARSE_CONV_ATB_ALGO_MODE` or str, optional
-        Backward algorithm to use.
-    kernel_matmul_batch_size : int, optional
-        Batch size used for implicit matrix multiplications. Defaults to ``2``.
-    order : `POINT_ORDERING`, optional
-        Ordering of points in the output. Defaults to ``POINT_ORDERING.RANDOM``.
-    compute_dtype : torch.dtype, optional
-        Data type used for intermediate computations.
-    implicit_matmul_fwd_block_size : int, optional
-        CUDA block size for implicit forward matmuls.
-    implicit_matmul_bwd_block_size : int, optional
-        CUDA block size for implicit backward matmuls.
+    fwd_algo : str, optional
+        Forward (AB gather-scatter) algorithm.
+    dgrad_algo : str, optional
+        Dgrad (AB gather-scatter) algorithm.
+    wgrad_algo : str, optional
+        Wgrad (AtB gather-gather) algorithm.
     """
 
     def __init__(
@@ -346,12 +329,11 @@ class SparseConv3d(SpatiallySparseConv):
         generative: bool = False,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
-        bwd_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
+        dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
+        wgrad_algo: Optional[Union[SPARSE_CONV_ATB_ALGO_MODE, str]] = None,
         kernel_matmul_batch_size: int = 2,
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         compute_dtype: Optional[torch.dtype] = None,
-        implicit_matmul_fwd_block_size: Optional[int] = None,
-        implicit_matmul_bwd_block_size: Optional[int] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -365,10 +347,9 @@ class SparseConv3d(SpatiallySparseConv):
             num_spatial_dims=3,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
-            bwd_algo=bwd_algo,
+            dgrad_algo=dgrad_algo,
+            wgrad_algo=wgrad_algo,
             kernel_matmul_batch_size=kernel_matmul_batch_size,
             order=order,
             compute_dtype=compute_dtype,
-            implicit_matmul_fwd_block_size=implicit_matmul_fwd_block_size,
-            implicit_matmul_bwd_block_size=implicit_matmul_bwd_block_size,
         )
