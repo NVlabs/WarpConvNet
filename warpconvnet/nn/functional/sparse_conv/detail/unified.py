@@ -33,6 +33,8 @@ from .algo_params import (
     _ALL_BENCHMARK_BACKWARD_PARAMS,
     _get_adaptive_forward_params,
     _get_adaptive_backward_params,
+    _get_adaptive_dgrad_params,
+    _get_adaptive_wgrad_params,
     _get_filtered_forward_params,
     _get_filtered_backward_params,
     _filter_benchmark_params_by_env_config,
@@ -177,9 +179,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             compute_dtype,
                             custom_params=filtered_params,
                         )
-                        _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results[
-                            0
-                        ]
+                        _BENCHMARK_FORWARD_RESULTS[config] = all_fwd_benchmark_results[0]
                         # Save a serialized copy (algo as string) to the generic cache
                         generic_benchmark_update_entry(
                             "sparse_conv_forward",
@@ -187,9 +187,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             _serialize_benchmark_results(all_fwd_benchmark_results),
                             force=False,
                         )
-                        chosen_fwd_algo, chosen_fwd_params, _ = (
-                            all_fwd_benchmark_results[0]
-                        )
+                        chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
         else:
             # Step 4: No cache - always benchmark within filtered space
             if algorithm_filter in ("auto", "all"):
@@ -312,8 +310,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # Normalize input to strings
         if isinstance(initial_bwd_algo, list):
             initial_bwd_algo = [
-                str(a.value) if isinstance(a, Enum) else str(a)
-                for a in initial_bwd_algo
+                str(a.value) if isinstance(a, Enum) else str(a) for a in initial_bwd_algo
             ]
         else:
             initial_bwd_algo = (
@@ -337,12 +334,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             or N_in == 0
             or grad_output.shape[0] == 0
         ):
-            grad_in_final = (
-                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            )
-            grad_weight_final = (
-                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            )
+            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
             return _pad_tuple(grad_in_final, grad_weight_final, 10)
 
         # --- Split dgrad/wgrad auto-tuning ---
@@ -364,26 +357,35 @@ class UnifiedSpatiallySparseConvFunction(Function):
             in_dtype=grad_output.dtype,
         )
 
-        adaptive_bwd_params = _get_adaptive_backward_params(
+        if isinstance(initial_bwd_algo, list):
+            algorithm_filter = initial_bwd_algo
+        elif initial_bwd_algo in ("auto", "all", "trimmed"):
+            algorithm_filter = initial_bwd_algo
+        else:
+            algorithm_filter = [str(initial_bwd_algo)]
+
+        # Separate candidate lists for dgrad vs wgrad
+        dgrad_adaptive = _get_adaptive_dgrad_params(
             C_in_bwd,
             C_out_bwd,
             kv_bwd,
             num_in_coords=N_in_bwd,
         )
-
-        if isinstance(initial_bwd_algo, list):
-            algorithm_filter = initial_bwd_algo
-        elif initial_bwd_algo in ("auto", "all"):
-            algorithm_filter = initial_bwd_algo
-        else:
-            algorithm_filter = [str(initial_bwd_algo)]
-
-        filtered_params = _filter_benchmark_params_by_env_config(
-            adaptive_bwd_params, algorithm_filter, is_forward=False
+        wgrad_adaptive = _get_adaptive_wgrad_params(
+            C_in_bwd,
+            C_out_bwd,
+            kv_bwd,
+            num_in_coords=N_in_bwd,
+        )
+        filtered_dgrad_params = _filter_benchmark_params_by_env_config(
+            dgrad_adaptive, algorithm_filter, is_forward=False
+        )
+        filtered_wgrad_params = _filter_benchmark_params_by_env_config(
+            wgrad_adaptive, algorithm_filter, is_forward=False
         )
 
         # Helper to auto-tune one direction
-        def _autotune_one_direction(cache_dict, cache_ns, needs_grad_tuple):
+        def _autotune_one_direction(cache_dict, cache_ns, needs_grad_tuple, params_for_direction):
             cached = cache_dict.get(config)
             if cached is not None:
                 best_list = [cached] if isinstance(cached, tuple) else cached
@@ -396,7 +398,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 num_out_coords,
                 compute_dtype,
                 device,
-                custom_params=filtered_params,
+                custom_params=params_for_direction,
                 needs_input_grad=needs_grad_tuple,
             )
             cache_dict[config] = results[0]
@@ -414,7 +416,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if ctx.needs_input_grad[0]:
             dgrad_algo, dgrad_params = _autotune_one_direction(
-                _BENCHMARK_DGRAD_RESULTS, "sparse_conv_dgrad", (True, False)
+                _BENCHMARK_DGRAD_RESULTS,
+                "sparse_conv_dgrad",
+                (True, False),
+                filtered_dgrad_params,
             )
             logger.debug(
                 f"[dispatch] DGRAD algo={dgrad_algo} params={dgrad_params} "
@@ -452,7 +457,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if ctx.needs_input_grad[1]:
             wgrad_algo, wgrad_params = _autotune_one_direction(
-                _BENCHMARK_WGRAD_RESULTS, "sparse_conv_wgrad", (False, True)
+                _BENCHMARK_WGRAD_RESULTS,
+                "sparse_conv_wgrad",
+                (False, True),
+                filtered_wgrad_params,
             )
             logger.debug(
                 f"[dispatch] WGRAD algo={wgrad_algo} params={wgrad_params} "
