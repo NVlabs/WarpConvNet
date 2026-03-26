@@ -77,7 +77,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         kernel_map: IntSearchResult,
         num_out_coords: int,
         fwd_algo: Union[str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]],
-        bwd_algo: Union[str, List[Union[str, SPARSE_CONV_ATB_ALGO_MODE]]],
+        dgrad_algo: Union[str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]],
+        wgrad_algo: Union[str, List[Union[str, SPARSE_CONV_ATB_ALGO_MODE]]],
         compute_dtype: Optional[torch.dtype],
         fwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
@@ -95,13 +96,14 @@ class UnifiedSpatiallySparseConvFunction(Function):
             return x.value if isinstance(x, Enum) else str(x)
 
         fwd_algo = _to_algo_str_list(fwd_algo)
-        bwd_algo = _to_algo_str_list(bwd_algo)
+        dgrad_algo = _to_algo_str_list(dgrad_algo)
+        wgrad_algo = _to_algo_str_list(wgrad_algo)
 
         # UNIFIED APPROACH: Always benchmark within filtered algorithm space
         # Step 1: Determine algorithm filter set
         if isinstance(fwd_algo, list):
             algorithm_filter = fwd_algo
-        elif fwd_algo in ("auto", "all"):
+        elif fwd_algo in ("auto", "all", "trimmed"):
             algorithm_filter = fwd_algo
         else:
             # Single algorithm - create list for consistent processing
@@ -137,7 +139,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 best_list = [best_tuple]
             else:
                 best_list = cached_result
-            if algorithm_filter in ("auto", "all"):
+            if algorithm_filter in ("auto", "all", "trimmed"):
                 chosen_fwd_algo, chosen_fwd_params, _ = best_list[0]
             else:
                 filtered_cached_results = []
@@ -176,7 +178,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                         chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
         else:
             # Step 4: No cache - always benchmark within filtered space
-            if algorithm_filter in ("auto", "all"):
+            if algorithm_filter in ("auto", "all", "trimmed"):
                 # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
                 filtered_params = _filter_benchmark_params_by_env_config(
                     adaptive_fwd_params, algorithm_filter, is_forward=True
@@ -265,7 +267,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             "implicit_matmul_bwd_block_size": bwd_block_size,  # from user input for bwd
             "compute_dtype": compute_dtype,
             "device": in_features.device,
-            "initial_bwd_algo": bwd_algo,
+            "initial_dgrad_algo": dgrad_algo,
+            "initial_wgrad_algo": wgrad_algo,
             "initial_bwd_block_size": bwd_block_size,
         }
 
@@ -290,25 +293,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         num_out_coords = config_params["num_out_coords"]
         compute_dtype = config_params["compute_dtype"]
         device = config_params["device"]
-        initial_bwd_algo = config_params["initial_bwd_algo"]
-        initial_bwd_block_size = config_params["initial_bwd_block_size"]
-
-        # Normalize input to strings
-        if isinstance(initial_bwd_algo, list):
-            initial_bwd_algo = [
-                str(a.value) if isinstance(a, Enum) else str(a) for a in initial_bwd_algo
-            ]
-        else:
-            initial_bwd_algo = (
-                str(initial_bwd_algo.value)
-                if isinstance(initial_bwd_algo, Enum)
-                else str(initial_bwd_algo)
-            )
+        initial_dgrad_algo = config_params["initial_dgrad_algo"]
+        initial_wgrad_algo = config_params["initial_wgrad_algo"]
 
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return _pad_tuple(None, None, 10)
+            return _pad_tuple(None, None, 11)
 
         N_in, C_in = in_features.shape
         K, _, C_out = weight.shape
@@ -322,7 +313,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            return _pad_tuple(grad_in_final, grad_weight_final, 10)
+            return _pad_tuple(grad_in_final, grad_weight_final, 11)
 
         # --- Split dgrad/wgrad auto-tuning ---
         # Each direction is auto-tuned independently so the best algorithm
@@ -356,12 +347,15 @@ class UnifiedSpatiallySparseConvFunction(Function):
             in_dtype=grad_output.dtype,
         )
 
-        if isinstance(initial_bwd_algo, list):
-            algorithm_filter = initial_bwd_algo
-        elif initial_bwd_algo in ("auto", "all", "trimmed"):
-            algorithm_filter = initial_bwd_algo
-        else:
-            algorithm_filter = [str(initial_bwd_algo)]
+        def _normalize_algo(algo):
+            if isinstance(algo, list):
+                return [str(a.value) if isinstance(a, Enum) else str(a) for a in algo]
+            if isinstance(algo, Enum):
+                return str(algo.value)
+            return str(algo)
+
+        dgrad_filter = _normalize_algo(initial_dgrad_algo)
+        wgrad_filter = _normalize_algo(initial_wgrad_algo)
 
         # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
         dgrad_adaptive = _get_adaptive_AB_params(
@@ -377,10 +371,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
             num_in_coords=N_in_bwd,
         )
         filtered_dgrad_params = _filter_benchmark_params_by_env_config(
-            dgrad_adaptive, algorithm_filter, is_forward=True
+            dgrad_adaptive, dgrad_filter, is_forward=True
         )
         filtered_wgrad_params = _filter_benchmark_params_by_env_config(
-            wgrad_adaptive, algorithm_filter, is_forward=False
+            wgrad_adaptive, wgrad_filter, is_forward=False
         )
 
         # Helper to auto-tune one direction
@@ -499,7 +493,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     needs_input_grad=(False, True),
                 )
 
-        return _pad_tuple(grad_in_features, grad_weight, 10)
+        return _pad_tuple(grad_in_features, grad_weight, 11)
 
 
 # Algorithm execution dispatch moved to dispatch.py

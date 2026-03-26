@@ -159,7 +159,10 @@ def spatially_sparse_conv(
     fwd_algo: Union[
         str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]
     ] = SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
-    bwd_algo: Union[
+    dgrad_algo: Union[
+        str, List[Union[str, SPARSE_CONV_AB_ALGO_MODE]]
+    ] = SPARSE_CONV_AB_ALGO_MODE.EXPLICIT_GEMM,
+    wgrad_algo: Union[
         str, List[Union[str, SPARSE_CONV_ATB_ALGO_MODE]]
     ] = SPARSE_CONV_ATB_ALGO_MODE.EXPLICIT_GEMM,
     stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
@@ -277,7 +280,8 @@ def spatially_sparse_conv(
         kernel_map,
         num_out_coords,
         fwd_algo,
-        bwd_algo,
+        dgrad_algo,
+        wgrad_algo,
         effective_compute_dtype,
         implicit_matmul_fwd_block_size,
         implicit_matmul_bwd_block_size,
