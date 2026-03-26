@@ -56,9 +56,7 @@ def _build_mask_and_argsort(
     elif K <= 32:
         pair_table_2d = pair_table.reshape(K, N)
         valid = pair_table_2d >= 0
-        bit_positions = (
-            1 << torch.arange(K, device=device, dtype=torch.int32)
-        ).unsqueeze(1)
+        bit_positions = (1 << torch.arange(K, device=device, dtype=torch.int32)).unsqueeze(1)
         pair_mask = (valid.int() * bit_positions).sum(dim=0).int()
     mask_argsort = torch.argsort(pair_mask, stable=True).int()
     return pair_mask, mask_argsort
@@ -134,9 +132,7 @@ def _get_mask_data(
         stale_keys = [k for k in _MASK_DATA_CACHE if k[0] == id(kernel_map)]
         for k in stale_keys:
             del _MASK_DATA_CACHE[k]
-        _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(
-            kernel_map, num_out_coords, device
-        )
+        _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(kernel_map, num_out_coords, device)
     return _MASK_DATA_CACHE[cache_key]
 
 
@@ -183,9 +179,7 @@ def _mask_implicit_gemm_forward_logic(
     if num_out_coords == 0 or K == 0 or C_in == 0 or C_out == 0 or N_in == 0:
         return output.to(dtype=in_features.dtype)
 
-    pair_table, pair_mask, mask_argsort = _get_mask_data(
-        kernel_map, num_out_coords, device
-    )
+    pair_table, pair_mask, mask_argsort = _get_mask_data(kernel_map, num_out_coords, device)
 
     # Auto-pad unaligned channels for CuTe tensor core eligibility
     _has_cute = hasattr(_C.gemm, "cute_gemm_mask_fwd")
@@ -196,12 +190,8 @@ def _mask_implicit_gemm_forward_logic(
         target_cin = ((C_in + vec_width - 1) // vec_width) * vec_width
         target_cout = ((C_out + vec_width - 1) // vec_width) * vec_width
         _in_features = torch.nn.functional.pad(_in_features, (0, target_cin - C_in))
-        _weight = torch.nn.functional.pad(
-            _weight, (0, target_cout - C_out, 0, target_cin - C_in)
-        )
-        output = torch.zeros(
-            (num_out_coords, target_cout), dtype=min_dtype, device=device
-        )
+        _weight = torch.nn.functional.pad(_weight, (0, target_cout - C_out, 0, target_cin - C_in))
+        output = torch.zeros((num_out_coords, target_cout), dtype=min_dtype, device=device)
         C_in, C_out = target_cin, target_cout
     aligned = True  # After padding, always aligned
 
@@ -229,8 +219,7 @@ def _mask_implicit_gemm_forward_logic(
 
     # No CuTe available or channels unaligned — signal unsupported
     raise RuntimeError(
-        f"mask_implicit_gemm requires aligned channels for CuTe "
-        f"(C_in={C_in}, C_out={C_out})"
+        f"mask_implicit_gemm requires aligned channels for CuTe " f"(C_in={C_in}, C_out={C_out})"
     )
 
 
@@ -257,9 +246,7 @@ def _mask_implicit_gemm_backward_logic(
     N_in, C_in = _in_features.shape
     K, _, C_out = _weight.shape
 
-    pair_table, pair_mask, mask_argsort = _get_mask_data(
-        kernel_map, num_out_coords, device
-    )
+    pair_table, pair_mask, mask_argsort = _get_mask_data(kernel_map, num_out_coords, device)
 
     grad_in = None
     grad_weight = None
@@ -270,11 +257,7 @@ def _mask_implicit_gemm_backward_logic(
         orig_C_in_bwd, orig_C_out_bwd = C_in, C_out
         _go_bwd, _w_bwd = _grad_output, _weight
         needs_padding_bwd = (C_in % vec_width_bwd != 0) or (C_out % vec_width_bwd != 0)
-        if (
-            needs_padding_bwd
-            and _has_cute_fwd
-            and min_dtype in (torch.float16, torch.bfloat16)
-        ):
+        if needs_padding_bwd and _has_cute_fwd and min_dtype in (torch.float16, torch.bfloat16):
             tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
             tco = ((C_out + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
             _go_bwd = torch.nn.functional.pad(_grad_output, (0, tco - C_out))
@@ -331,18 +314,60 @@ def _mask_implicit_gemm_backward_logic(
         grad_in = grad_in.to(dtype=in_features.dtype)
 
     if needs_input_grad[1]:
-        grad_weight = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
-        status = _C.gemm.mask_implicit_gemm_bwd_wgrad(
-            _in_features,
-            _grad_output,
-            grad_weight,
-            pair_table,
-            pair_mask,
-            K,
-            block_size,
-        )
-        if status != 0:
-            raise RuntimeError(f"mask_implicit_gemm_bwd_wgrad failed: {status}")
+        _has_cute_wgrad = hasattr(_C.gemm, "cute_gemm_mask_wgrad")
+        vec_width_w = 16 // _in_features.element_size()
+        orig_C_in_w, orig_C_out_w = C_in, C_out
+        _in_w, _go_w = _in_features, _grad_output
+        needs_padding_w = (C_in % vec_width_w != 0) or (C_out % vec_width_w != 0)
+        if needs_padding_w and _has_cute_wgrad and min_dtype in (torch.float16, torch.bfloat16):
+            tc = ((C_in + vec_width_w - 1) // vec_width_w) * vec_width_w
+            tco = ((C_out + vec_width_w - 1) // vec_width_w) * vec_width_w
+            _in_w = torch.nn.functional.pad(_in_features, (0, tc - C_in))
+            _go_w = torch.nn.functional.pad(_grad_output, (0, tco - C_out))
+            grad_weight = torch.zeros((K, tc, tco), dtype=min_dtype, device=device)
+        else:
+            grad_weight = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
+        used_cute = False
+
+        if _has_cute_wgrad and min_dtype in (torch.float16, torch.bfloat16):
+            # Heuristic split_k: target ~4K pairs per split for good parallelism
+            # without excessive atomicAdd contention
+            split_k = max(1, num_out_coords // 4096)
+            # Cap split_k to avoid too many blocks (diminishing returns)
+            split_k = min(split_k, 32)
+            status = _C.gemm.cute_gemm_mask_wgrad(
+                _in_w,
+                _go_w,
+                grad_weight,
+                pair_table,
+                pair_mask,
+                mask_argsort,
+                K,
+                mma_tile,
+                1.0,
+                split_k,
+            )
+            if status == 0:
+                used_cute = True
+
+        if not used_cute:
+            # SIMT fallback
+            if needs_padding_w:
+                grad_weight = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
+            status = _C.gemm.mask_implicit_gemm_bwd_wgrad(
+                _in_features,
+                _grad_output,
+                grad_weight,
+                pair_table,
+                pair_mask,
+                K,
+                block_size,
+            )
+            if status != 0:
+                raise RuntimeError(f"mask_implicit_gemm_bwd_wgrad failed: {status}")
+
+        if needs_padding_w and used_cute:
+            grad_weight = grad_weight[:, :orig_C_in_w, :orig_C_out_w]
         grad_weight = grad_weight.to(dtype=weight.dtype)
 
     return grad_in, grad_weight

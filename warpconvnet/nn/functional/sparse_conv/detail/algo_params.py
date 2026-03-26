@@ -199,6 +199,12 @@ _AB_MASK_IMPLICIT_GEMM = [
     ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
 ]
 
+# Mask wgrad candidates for AtB (uses CuTe split-K wgrad kernel internally)
+_ATB_MASK_IMPLICIT_GEMM = [
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
+    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
+]
+
 # ---------------------------------------------------------------------------
 # AtB (gather-gather / wgrad) specific building blocks
 # ---------------------------------------------------------------------------
@@ -263,9 +269,11 @@ def _get_adaptive_AB_params(
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # ch > 256: cutlass dominates at large N, mask at small N
+    # ch > 256: cute_grouped wins at ch>=384, cutlass at ch=512 large N,
+    # mask still competitive at ch=256-384 small N
     params = []
     params.extend(_AB_MASK_IMPLICIT_GEMM)
+    params.extend(_AB_CUTE_GROUPED)
     params.extend(_AB_CUTLASS_IMPLICIT)
     params.extend(_AB_CUTE_SM90)
     params.extend(_AB_CUTE_GROUPED_SM90)
@@ -447,10 +455,11 @@ def _get_adaptive_AtB_params(
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # ch 65-128, small/medium N: cute_grouped dominant
+    # ch 65-128, small/medium N: cute_grouped dominant, mask competitive
     if max_ch > 64 and (0 < log_n <= 17):
         params = []
         params.extend(_AB_CUTE_GROUPED)
+
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -464,19 +473,21 @@ def _get_adaptive_AtB_params(
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # ch <= 64, small N: cute_grouped 57%, implicit 29%
+    # ch <= 64, small N: cute_grouped 57%, implicit 29%, mask competitive
     if 0 < log_n <= 14:
         params = []
         params.extend(_AB_CUTE_GROUPED)
+
         params.extend(_ATB_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # ch <= 64, medium N: cute_grouped 57%, explicit_grouped 43%
+    # ch <= 64, medium N: cute_grouped 57%, explicit_grouped 43%, mask competitive
     if 0 < log_n <= 17:
         params = []
         params.extend(_AB_CUTE_GROUPED)
+
         params.extend(_ATB_EXPLICIT_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
