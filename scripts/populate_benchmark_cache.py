@@ -49,7 +49,6 @@ import torch
 #   MinkUNet18/34: 3->32, 32->32, 32->64, 64->64, 64->128, 128->128,
 #                  128->256, 256->256, 256->128, 128->96, 96->96
 #   MaxViT-UNet:   6->48, 48->96, 96->192, 192->384, 384->512
-#   SparseConvUNet: 16->32->48->64->80->96->112->128
 CHANNEL_PAIRS_COMMON = [
     # Initial layers (small C_in)
     (3, 32),
@@ -73,11 +72,22 @@ CHANNEL_PAIRS_COMMON = [
     (384, 384),
     (384, 512),
     (512, 512),
-    # Decoder / upsampling layers (reverse channel direction)
+    # Decoder / upsampling layers (big -> small)
+    (64, 32),
+    (128, 32),
+    (128, 64),
     (128, 96),
+    (192, 96),
+    (192, 128),
+    (256, 64),
     (256, 128),
+    (256, 192),
     (256, 256),
+    (384, 128),
+    (384, 192),
     (384, 256),
+    (512, 128),
+    (512, 256),
     (512, 384),
     # 1x1 projections (kernel_volume=1 handled separately)
     (96, 10),
