@@ -454,32 +454,81 @@ _BENCHMARK_BACKWARD_PARAMS = [
 ]
 
 
-def _get_adaptive_backward_params(
+def _get_adaptive_dgrad_params(
     in_channels: int,
     out_channels: int,
     kernel_volume: int,
     num_in_coords: int = 0,
     voxel_size: Union[Tuple[int, ...], None] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Get backward benchmark candidates adapted to the convolution dimensions.
+    """Get dgrad benchmark candidates (A @ B with gather-scatter, same as forward).
 
-    Dgrad and wgrad are auto-tuned independently, so candidates must cover
-    winners from both directions.
-
-    Based on time-weighted analysis of 146 configs (SM 8.9, cuBLAS 12.9.1.4):
-      Dgrad: mask_implicit_gemm 74%, cute_grouped 21%, cutlass_implicit_gemm 5%
-      Wgrad: cute_grouped 64%, cutlass_grouped_hybrid 12%, explicit_gemm_grouped 10%,
-             implicit_gemm 5%, explicit_gemm 5%, cutlass_implicit_gemm 4%
+    Based on 146-config analysis (SM 8.9, cuBLAS 12.9.1.4):
+      mask_implicit_gemm 74%, cute_grouped 21%, cutlass_implicit_gemm 5%
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # kv >= 64 (5x5x5): no benchmark data, include broad set
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
         params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_GROUPED)
         params.extend(_BWD_CUTLASS_IMPLICIT)
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Small N (N <= 10K): mask 92-100%, cute_grouped at ch>256
+    if 0 < log_n <= 14:
+        params = []
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
+        if max_ch > 256:
+            params.extend(_BWD_CUTE_GROUPED)
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Medium N (10K-100K): mask 77%, cute_grouped 23%
+    if 0 < log_n <= 17:
+        params = []
+        params.extend(_BWD_MASK_IMPLICIT_GEMM)
+        params.extend(_BWD_CUTE_GROUPED)
+        params.extend(_BWD_CUTLASS_IMPLICIT)
+        params.extend(_BWD_CUTE_SM90)
+        params.extend(_BWD_CUTE_GROUPED_SM90)
+        return params
+
+    # Large N (N > 100K) or unknown: mask 95% (ch<=256), cutlass 75% (ch>256)
+    params = []
+    params.extend(_BWD_MASK_IMPLICIT_GEMM)
+    params.extend(_BWD_CUTLASS_IMPLICIT)
+    if max_ch > 256:
+        params.extend(_BWD_CUTE_GROUPED)
+        params.extend(_BWD_CUTLASS_GROUPED)
+    params.extend(_BWD_CUTE_SM90)
+    params.extend(_BWD_CUTE_GROUPED_SM90)
+    return params
+
+
+def _get_adaptive_wgrad_params(
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+    voxel_size: Union[Tuple[int, ...], None] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get wgrad benchmark candidates (A^T @ B reduction, no scatter).
+
+    Based on 146-config analysis (SM 8.9, cuBLAS 12.9.1.4):
+      cute_grouped 64%, cutlass_grouped_hybrid 12%, explicit_gemm_grouped 10%,
+      implicit_gemm 5%, explicit_gemm 5%, cutlass_implicit_gemm 4%
+    """
+    max_ch = max(in_channels, out_channels)
+    log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
+
+    if kernel_volume >= 64:
+        params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_BWD_CUTE_GROUPED)
         params.extend(_BWD_CUTLASS_GROUPED)
         params.extend(_BWD_EXPLICIT)
         params.extend(_BWD_EXPLICIT_GROUPED)
@@ -488,15 +537,9 @@ def _get_adaptive_backward_params(
         params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
 
-    # --- kv <= 27 below ---
-    # All buckets include mask (dgrad winner) + cute_grouped (wgrad winner).
-
-    # Small N (N <= 10K, log10 <= 4):
-    #   dgrad: mask 92-100%, cute_grouped at ch>256
-    #   wgrad: cute_grouped 57-100%, explicit_gemm_grouped 15%, implicit_gemm 8%
+    # Small N (N <= 10K): cute_grouped 57-100%, explicit_grouped 15%, implicit_gemm 8%
     if 0 < log_n <= 14:
         params = []
-        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_GROUPED)
         params.extend(_BWD_EXPLICIT_GROUPED)
         if max_ch <= 64:
@@ -505,35 +548,52 @@ def _get_adaptive_backward_params(
         params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
 
-    # Medium N (10K < N <= 100K, log10 = 5):
-    #   dgrad: mask 77%, cute_grouped 23% (at ch>256: cute_grouped 100%)
-    #   wgrad: cute_grouped 77%, explicit_gemm 23% (ch<=64: explicit_gemm_grouped 43%)
+    # Medium N (10K-100K): cute_grouped 77%, explicit 23%
     if 0 < log_n <= 17:
         params = []
-        params.extend(_BWD_MASK_IMPLICIT_GEMM)
         params.extend(_BWD_CUTE_GROUPED)
         params.extend(_BWD_EXPLICIT)
         params.extend(_BWD_EXPLICIT_GROUPED)
-        params.extend(_BWD_CUTLASS_IMPLICIT)
         params.extend(_BWD_CUTE_SM90)
         params.extend(_BWD_CUTE_GROUPED_SM90)
         return params
 
-    # Large N (N > 100K) or unknown N:
-    #   dgrad: mask 95% (ch<=256), cutlass 75% (ch>256)
-    #   wgrad: cutlass_grouped 40%, cute_grouped 30%, cutlass 30% (ch<=256);
-    #          cute_grouped 100% (ch>256); cutlass_grouped 57% + explicit_grouped 36% (ch<=64)
+    # Large N (N > 100K) or unknown: cutlass_grouped 40%, cute_grouped 30%, cutlass 30%
     params = []
-    params.extend(_BWD_MASK_IMPLICIT_GEMM)
     params.extend(_BWD_CUTE_GROUPED)
-    params.extend(_BWD_CUTLASS_IMPLICIT)
     params.extend(_BWD_CUTLASS_GROUPED)
+    params.extend(_BWD_CUTLASS_IMPLICIT)
     params.extend(_BWD_EXPLICIT_GROUPED)
     if max_ch <= 64:
         params.extend(_BWD_EXPLICIT)
     params.extend(_BWD_CUTE_SM90)
     params.extend(_BWD_CUTE_GROUPED_SM90)
     return params
+
+
+def _get_adaptive_backward_params(
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+    voxel_size: Union[Tuple[int, ...], None] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get backward candidates (union of dgrad + wgrad). Legacy interface."""
+    dgrad = _get_adaptive_dgrad_params(
+        in_channels, out_channels, kernel_volume, num_in_coords, voxel_size
+    )
+    wgrad = _get_adaptive_wgrad_params(
+        in_channels, out_channels, kernel_volume, num_in_coords, voxel_size
+    )
+    # Deduplicate while preserving order
+    seen = set()
+    combined = []
+    for algo, params in dgrad + wgrad:
+        key = (algo, tuple(sorted(params.items())))
+        if key not in seen:
+            seen.add(key)
+            combined.append((algo, params))
+    return combined
 
 
 # Trimmed backward benchmark candidates ("trimmed"): excludes algorithms
