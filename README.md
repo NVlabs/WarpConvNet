@@ -72,14 +72,24 @@ Auto-tuning sparse convolution algorithms. The first few iterations will be slow
 Auto-tune forward complete: mask_implicit_gemm (mma_tile=3) — 0.21ms
 ```
 
-### Configuration
+### Algorithm Selection Modes
 
-| Environment Variable              | Default                | Description                                                                                           |
-| --------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
-| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | AB gather-scatter algorithm for forward/dgrad. `auto`, `all`, `trimmed`, or a specific algorithm name |
-| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | AtB gather-gather algorithm for wgrad. Same options as above                                          |
-| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` or `0` to suppress auto-tuning log messages                                            |
-| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Directory for cached auto-tune results                                                                |
+The auto-tuner supports three candidate selection modes, controlled by environment variables:
+
+| Mode                 | AB candidates | AtB candidates | Description                                                                                     |
+| -------------------- | ------------: | -------------: | ----------------------------------------------------------------------------------------------- |
+| **`auto`** (default) |           4-5 |            3-4 | Fastest auto-tune. Only the dominant winner per channel/N region. Recommended for training.     |
+| **`trimmed`**        |          5-11 |            6-9 | Moderate search. Includes runner-ups for edge cases. Default for `populate_benchmark_cache.py`. |
+| **`all`**            |            23 |             35 | Exhaustive. Benchmarks every algorithm. Use for new hardware validation or after code changes.  |
+
+### Environment Variables
+
+| Variable                          | Default                | Description                                 |
+| --------------------------------- | ---------------------- | ------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | AB gather-scatter algorithm (forward/dgrad) |
+| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | AtB gather-gather algorithm (wgrad)         |
+| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` to suppress auto-tuning logs |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Cache directory                             |
 
 ```bash
 # Suppress auto-tuning logs
@@ -88,15 +98,33 @@ export WARPCONVNET_AUTOTUNE_LOG=false
 # Pin a specific algorithm (skip auto-tuning entirely)
 export WARPCONVNET_FWD_ALGO_MODE=mask_implicit_gemm
 
+# Exhaustive search (slow, for benchmarking)
+export WARPCONVNET_FWD_ALGO_MODE=all
+
 # Benchmark only specific algorithms
 export WARPCONVNET_FWD_ALGO_MODE="[mask_implicit_gemm,cutlass_implicit_gemm]"
 ```
 
 Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`, `mask_implicit_gemm`.
 
-To skip auto-tuning entirely by pre-populating the cache, see [Pre-Populate Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/populate_benchmark_cache/) or the [installation section](#optional-pre-populate-the-benchmark-cache) below.
+### Pre-Populating the Cache
 
-For details on algorithm backends, cache inspection, and tuning, see the [Sparse Convolutions](https://nvlabs.github.io/WarpConvNet/user_guide/sparse_convolutions/) and [Inspecting the Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/inspect_benchmark_cache/) documentation.
+To skip auto-tuning entirely, pre-populate the cache with the `populate_benchmark_cache.py` script. Multi-GPU support is available via `--gpus`:
+
+```bash
+# Single GPU (uses trimmed mode by default)
+python scripts/populate_benchmark_cache.py
+
+# All GPUs in parallel
+python scripts/populate_benchmark_cache.py --gpus all
+
+# Exhaustive search on specific GPUs
+python scripts/populate_benchmark_cache.py --gpus 0,1 --algo-mode all
+```
+
+See [Pre-Populate Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/populate_benchmark_cache/) for details.
+
+For algorithm backends and cache inspection, see the [Sparse Convolutions](https://nvlabs.github.io/WarpConvNet/user_guide/sparse_convolutions/) and [Inspecting the Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/inspect_benchmark_cache/) documentation.
 
 ## Installation
 
