@@ -73,8 +73,10 @@ if _HAS_CUTE_GROUPED_SM90:
 
 logger = get_logger(__name__)
 
-# Separate benchmark parameters for independent operations
-_BENCHMARK_NUM_RUNS = 2
+# Benchmark iterations for auto-tuning. More iterations = more reliable
+# winner selection but slower first-iteration auto-tune.
+_BENCHMARK_NUM_WARMUP = 2
+_BENCHMARK_NUM_ITERS = 5
 
 # Track whether auto-tune banner has been shown (once per process)
 _AUTOTUNE_BANNER_SHOWN = False
@@ -188,8 +190,8 @@ def _run_forward_benchmarks(
     kernel_map,
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
-    warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
-    benchmark_iters: int = _BENCHMARK_NUM_RUNS,
+    warmup_iters: int = _BENCHMARK_NUM_WARMUP,
+    benchmark_iters: int = _BENCHMARK_NUM_ITERS,
     custom_params: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
 ) -> List[Tuple[str, Dict[str, Any], float]]:
     """Benchmark different forward algorithms and return sorted results (best first)."""
@@ -434,8 +436,8 @@ def _run_backward_benchmarks(
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
     device: torch.device,
-    warmup_iters: int = _BENCHMARK_NUM_RUNS // 2,
-    benchmark_iters: int = _BENCHMARK_NUM_RUNS,
+    warmup_iters: int = _BENCHMARK_NUM_WARMUP,
+    benchmark_iters: int = _BENCHMARK_NUM_ITERS,
     custom_params: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
     needs_input_grad: Tuple[bool, bool] = (True, True),
 ) -> List[Tuple[str, Dict[str, Any], float]]:
