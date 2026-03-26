@@ -165,6 +165,37 @@ WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE = os.environ.get(
 # Set WARPCONVNET_AUTOTUNE_LOG=false (or 0) to suppress auto-tuning logs.
 WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
 
-# --- Types ---
 
-# --- Functions ---
+# ---------------------------------------------------------------------------
+# Startup check: detect broken cuBLAS for fp16 matmul
+# nvidia-cublas-cu12==12.8.4.1 (shipped with torch 2.10+cu128) has a bug
+# where cublasGemmEx with CUDA_R_16F returns CUBLAS_STATUS_INVALID_VALUE.
+# Fix: pip install 'nvidia-cublas-cu12>=12.9.1.4'
+# See: https://github.com/pytorch/pytorch/issues/174949
+# ---------------------------------------------------------------------------
+def _check_cublas_fp16():
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        a = torch.ones(2, 2, device="cuda", dtype=torch.float16)
+        _ = a @ a
+    except RuntimeError as e:
+        if "CUBLAS_STATUS" in str(e):
+            logger.warning(
+                "fp16 matrix multiplication is broken with the current nvidia-cublas-cu12 version. "
+                "This will cause failures in CUTLASS, CuTe, and explicit_gemm backends with fp16 inputs. "
+                "Fix: pip install 'nvidia-cublas-cu12>=12.9.1.4'\n"
+                "See: https://github.com/pytorch/pytorch/issues/174949"
+            )
+            # Clear the sticky CUDA error
+            try:
+                torch.cuda.synchronize()
+            except RuntimeError:
+                pass
+        else:
+            raise
+
+
+_check_cublas_fp16()
