@@ -8,10 +8,11 @@ WarpConvNet benchmarks sparse convolution algorithms at runtime and caches the r
 ### What the cache contains
 
 - **Namespaces**: Logical groups of cached results:
-  - `sparse_conv_forward` / `sparse_conv_backward` -- Top-level algorithm selection (e.g., `cute_grouped`, `cutlass_implicit_gemm`)
-  - `implicit_gemm_AD_gather_scatter` / `cute_gemm_AD_gather_scatter` -- MMA tile + split-K tuning for per-offset forward kernels
-  - `implicit_gemm_trAB_gather` / `cute_gemm_trAB_gather` -- MMA tile + split-K tuning for transposed (TrAB) backward kernels
-- **Per-configuration results**: For each input configuration (log2(N), channels, kernel volume, dtype), the cache stores all benchmarked algorithms sorted by time.
+  - `AB_gather_scatter` -- AB (gather-scatter) algorithm selection for forward and dgrad
+  - `AtB_gather_gather` -- AtB (gather-gather) algorithm selection for wgrad
+  - `implicit_gemm_AD_gather_scatter` / `cute_gemm_AD_gather_scatter` -- MMA tile + split-K tuning for per-offset kernels
+  - `implicit_gemm_trAB_gather` / `cute_gemm_trAB_gather` -- MMA tile + split-K tuning for TrAB kernels
+- **Per-configuration results**: For each input configuration (log10(N), channels, kernel volume, dtype, SM), the cache stores all benchmarked algorithms sorted by time.
 - **Ordering**: Results are stored best-first within each configuration.
 
 ## Quick start
@@ -22,60 +23,51 @@ Run without arguments to see the namespace tree:
 python scripts/inspect_benchmark_cache.py
 ```
 
-Show details for a specific namespace (e.g., forward sparse conv):
+Show details for a specific namespace:
 
 ```bash
-python scripts/inspect_benchmark_cache.py namespace=sparse_conv_forward
+python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter
 ```
 
 Only show the best algorithm per configuration:
 
 ```bash
-python scripts/inspect_benchmark_cache.py namespace=sparse_conv_forward --best-only
+python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter --best-only
 ```
 
 Show the top K results per configuration:
 
 ```bash
-python scripts/inspect_benchmark_cache.py namespace=sparse_conv_forward --top-k 3
+python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter --top-k 3
 ```
 
 Search namespaces or keys when passing extra arguments:
 
 ```bash
-# List namespaces then search for entries containing "wmma"
-python scripts/inspect_benchmark_cache.py wmma
-
 # Search inside a specific namespace
-python scripts/inspect_benchmark_cache.py namespace=sparse_conv_forward wmma
+python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter mask
 ```
 
 ## Sample output
 
-Below is an excerpt from a real run inspecting the `sparse_conv_forward` namespace. Times are in milliseconds; lower is better.
+Below is an excerpt from inspecting the `AB_gather_scatter` namespace. Times are in milliseconds; lower is better.
 
 ```text
 Loading benchmark cache...
 Cache file location: /home/<user>/.cache/warpconvnet/benchmark_cache_generic.msgpack
-Cache file size: 44,320 bytes
-Last modified: 2025-09-08 13:33:35
 
 ============================================================
 NAMESPACE TREE
 ============================================================
-Total namespaces: 6
 
+- AB_gather_scatter: 148 entry(ies)
+- AtB_gather_gather: 146 entry(ies)
 - implicit_gemm_AD_gather_scatter: 37 entry(ies)
-- implicit_gemm_trAB_gather: 24 entry(ies)
-- sparse_conv_backward: 6 entry(ies)
-- sparse_conv_forward: 11 entry(ies)
-- wmma_implicit_gemm_sm80: 23 entry(ies)
-- wmma_split_k_implicit_gemm_sm80: 13 entry(ies)
 
 ============================================================
-NAMESPACE: SPARSE_CONV_FORWARD
+NAMESPACE: AB_GATHER_SCATTER
 ============================================================
-Total configurations: 11
+Total configurations: 148
 
 ----------------------------------------
 Configuration 1:
