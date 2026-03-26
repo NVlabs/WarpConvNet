@@ -26,12 +26,12 @@ python scripts/populate_benchmark_cache.py --dry-run
 
 The default configuration grid covers common 3D deep learning architectures:
 
-| Dimension | Values | Source |
-| --------- | ------ | ------ |
-| **Voxel counts** | 30K, 65K, 130K, 260K, 500K, 1M, 2M | Indoor (ScanNet) to outdoor (nuScenes/Waymo) |
-| **Channel pairs** | 3→32, 32→64, 64→128, 128→256, 256→256, ... (26 pairs) | MinkUNet18/34, MaxViT-UNet, SparseConvUNet |
-| **Kernel sizes** | 3 | Standard 3×3×3 |
-| **Dtypes** | float16, bfloat16 | Mixed-precision training |
+| Dimension         | Values                                                | Source                                       |
+| ----------------- | ----------------------------------------------------- | -------------------------------------------- |
+| **Voxel counts**  | 30K, 65K, 130K, 260K, 500K, 1M, 2M                    | Indoor (ScanNet) to outdoor (nuScenes/Waymo) |
+| **Channel pairs** | 3→32, 32→64, 64→128, 128→256, 256→256, ... (26 pairs) | MinkUNet18/34, MaxViT-UNet, SparseConvUNet   |
+| **Kernel sizes**  | 3                                                     | Standard 3×3×3                               |
+| **Dtypes**        | float16, bfloat16                                     | Mixed-precision training                     |
 
 After log₂-deduplication (voxel counts that map to the same cache bucket are merged), this produces **364 unique configurations**.
 
@@ -89,7 +89,7 @@ scp ~/.cache/warpconvnet/benchmark_cache_generic.msgpack \
 ```
 
 !!! warning "Do not mix cache files from different GPU architectures"
-    Cache entries from an A100 (SM 8.0) will not match lookups on an RTX 4090 (SM 8.9). Each GPU architecture needs its own cache. If you accidentally mix them, clear the cache with `rm -rf ~/.cache/warpconvnet/` and re-run the script.
+Cache entries from an A100 (SM 8.0) will not match lookups on an RTX 4090 (SM 8.9). Each GPU architecture needs its own cache. If you accidentally mix them, clear the cache with `rm -rf ~/.cache/warpconvnet/` and re-run the script.
 
 ### Full CLI reference
 
@@ -107,20 +107,20 @@ usage: populate_benchmark_cache.py [-h]
     [--device DEVICE]
 ```
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `--preset` | `default` | `default` (364 configs) or `quick` (6 configs) |
-| `--num-voxels` | preset | Override voxel counts |
-| `--channels` | preset | Override channel pairs as `C_in,C_out` |
-| `--kernel-sizes` | preset | Override kernel sizes |
-| `--dtypes` | preset | Override dtypes |
-| `--algo-mode` | `auto` | Algorithm selection: `auto`, `all`, or specific name |
-| `--forward-only` | off | Skip backward pass benchmarking |
-| `--backward-only` | off | Skip forward pass benchmarking |
-| `--batch-size` | 1 | Batch size for voxel generation |
-| `--dry-run` | off | List configs without running |
-| `--resume` | off | Skip configs already in cache |
-| `--device` | `cuda:0` | CUDA device to benchmark on |
+| Flag              | Default   | Description                                          |
+| ----------------- | --------- | ---------------------------------------------------- |
+| `--preset`        | `default` | `default` (364 configs) or `quick` (6 configs)       |
+| `--num-voxels`    | preset    | Override voxel counts                                |
+| `--channels`      | preset    | Override channel pairs as `C_in,C_out`               |
+| `--kernel-sizes`  | preset    | Override kernel sizes                                |
+| `--dtypes`        | preset    | Override dtypes                                      |
+| `--algo-mode`     | `auto`    | Algorithm selection: `auto`, `all`, or specific name |
+| `--forward-only`  | off       | Skip backward pass benchmarking                      |
+| `--backward-only` | off       | Skip forward pass benchmarking                       |
+| `--batch-size`    | 1         | Batch size for voxel generation                      |
+| `--dry-run`       | off       | List configs without running                         |
+| `--resume`        | off       | Skip configs already in cache                        |
+| `--device`        | `cuda:0`  | CUDA device to benchmark on                          |
 
 ### Relationship to environment variables
 
@@ -131,4 +131,4 @@ export WARPCONVNET_BENCHMARK_CACHE_DIR=/shared/warpconvnet_cache
 python scripts/populate_benchmark_cache.py
 ```
 
-The `--algo-mode` flag sets `WARPCONVNET_FWD_ALGO_MODE` and `WARPCONVNET_BWD_ALGO_MODE` internally. See [Sparse Convolutions](./sparse_convolutions.md) for details on algorithm modes.
+The `--algo-mode` flag sets both `WARPCONVNET_FWD_ALGO_MODE` (AB gather-scatter) and `WARPCONVNET_BWD_ALGO_MODE` (AtB gather-gather) internally. Options: `auto` (adaptive), `trimmed` (default, excludes dead-weight), `all` (exhaustive). See [Sparse Convolutions](./sparse_convolutions.md) for details.

@@ -56,36 +56,43 @@ See `examples/modelnet.py` for a full training script.
 
 ## Sparse Convolution Auto-Tuning
 
-WarpConvNet automatically benchmarks CUDA kernel algorithms (GEMM tile shapes, grouping strategies) on the first forward pass and caches the results to `~/.cache/warpconvnet/`. Subsequent runs reuse cached results with no overhead.
+WarpConvNet automatically benchmarks CUDA kernel algorithms on the first forward/backward pass and caches results to `~/.cache/warpconvnet/`. Subsequent runs reuse cached results with no overhead.
+
+Sparse convolution decomposes into two distinct GEMM operations:
+
+- **AB gather-scatter** (forward and dgrad): `D[scatter] = A[gather] @ B` — fused gather-GEMM-scatter
+- **AtB gather-gather** (wgrad): `D = A[gather]^T @ B[gather]` — reduction GEMM
+
+Each operation is auto-tuned independently with its own candidate set and cache namespace.
 
 **The first iteration will be slower** while auto-tuning runs. You will see log messages like:
 
 ```
 Auto-tuning sparse convolution algorithms. The first few iterations will be slow...
-Auto-tune forward complete: cute_grouped (mma_tile=1) — 0.54ms
+Auto-tune forward complete: mask_implicit_gemm (mma_tile=3) — 0.21ms
 ```
 
 ### Configuration
 
-| Environment Variable              | Default                | Description                                                                                         |
-| --------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- |
-| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | Forward algorithm. `auto` (benchmark reduced set), `all` (exhaustive), or a specific algorithm name |
-| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | Backward algorithm. Same options as forward                                                         |
-| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` or `0` to suppress auto-tuning log messages                                          |
-| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Directory for cached auto-tune results                                                              |
+| Environment Variable              | Default                | Description                                                                                           |
+| --------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | AB gather-scatter algorithm for forward/dgrad. `auto`, `all`, `trimmed`, or a specific algorithm name |
+| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | AtB gather-gather algorithm for wgrad. Same options as above                                          |
+| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` or `0` to suppress auto-tuning log messages                                            |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Directory for cached auto-tune results                                                                |
 
 ```bash
 # Suppress auto-tuning logs
 export WARPCONVNET_AUTOTUNE_LOG=false
 
 # Pin a specific algorithm (skip auto-tuning entirely)
-export WARPCONVNET_FWD_ALGO_MODE=explicit_gemm
+export WARPCONVNET_FWD_ALGO_MODE=mask_implicit_gemm
 
 # Benchmark only specific algorithms
-export WARPCONVNET_FWD_ALGO_MODE="[implicit_gemm,cutlass_implicit_gemm]"
+export WARPCONVNET_FWD_ALGO_MODE="[mask_implicit_gemm,cutlass_implicit_gemm]"
 ```
 
-Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`.
+Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`, `mask_implicit_gemm`.
 
 To skip auto-tuning entirely by pre-populating the cache, see [Pre-Populate Benchmark Cache](https://nvlabs.github.io/WarpConvNet/user_guide/populate_benchmark_cache/) or the [installation section](#optional-pre-populate-the-benchmark-cache) below.
 

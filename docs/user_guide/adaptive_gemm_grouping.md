@@ -81,16 +81,16 @@ You can also select grouped algorithms explicitly:
 
 ```python
 from warpconvnet.nn.functional.sparse_conv import (
-    SPARSE_CONV_FWD_ALGO_MODE,
-    SPARSE_CONV_BWD_ALGO_MODE,
+    SPARSE_CONV_AB_ALGO_MODE,
+    SPARSE_CONV_ATB_ALGO_MODE,
 )
 
 output = spatially_sparse_conv(
     input_voxels,
     weight,
     kernel_size=3,
-    fwd_algo=SPARSE_CONV_FWD_ALGO_MODE.CUTLASS_GROUPED_HYBRID,
-    bwd_algo=SPARSE_CONV_BWD_ALGO_MODE.EXPLICIT_GEMM_GROUPED,
+    fwd_algo=SPARSE_CONV_AB_ALGO_MODE.CUTLASS_GROUPED_HYBRID,
+    wgrad_algo=SPARSE_CONV_ATB_ALGO_MODE.EXPLICIT_GEMM_GROUPED,
 )
 ```
 
