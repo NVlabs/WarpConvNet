@@ -31,6 +31,8 @@ from .algo_params import (
     _ATB_PARAMS_AUTO,
     _get_adaptive_AB_params,
     _get_adaptive_AtB_params,
+    _get_trimmed_AB_params,
+    _get_trimmed_AtB_params,
     _filter_benchmark_params_by_env_config,
 )
 from .autotune import (
@@ -113,13 +115,21 @@ class UnifiedSpatiallySparseConvFunction(Function):
         C_in = in_features.shape[1]
         C_out = weight.shape[2]
         kv = weight.shape[0]
-        adaptive_fwd_params = _get_adaptive_AB_params(
-            C_in,
-            C_out,
-            kv,
-            num_in_coords=in_features.shape[0],
-            voxel_size=voxel_size,
-        )
+        if algorithm_filter == "trimmed":
+            adaptive_fwd_params = _get_trimmed_AB_params(
+                C_in,
+                C_out,
+                kv,
+                num_in_coords=in_features.shape[0],
+            )
+        else:
+            adaptive_fwd_params = _get_adaptive_AB_params(
+                C_in,
+                C_out,
+                kv,
+                num_in_coords=in_features.shape[0],
+                voxel_size=voxel_size,
+            )
 
         config = SpatiallySparseConvConfig(
             num_in_coords=in_features.shape[0],
@@ -358,18 +368,34 @@ class UnifiedSpatiallySparseConvFunction(Function):
         wgrad_filter = _normalize_algo(initial_wgrad_algo)
 
         # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
-        dgrad_adaptive = _get_adaptive_AB_params(
-            C_out_bwd,
-            C_in_bwd,
-            kv_bwd,
-            num_in_coords=N_in_bwd,
-        )
-        wgrad_adaptive = _get_adaptive_AtB_params(
-            C_in_bwd,
-            C_out_bwd,
-            kv_bwd,
-            num_in_coords=N_in_bwd,
-        )
+        if dgrad_filter == "trimmed":
+            dgrad_adaptive = _get_trimmed_AB_params(
+                C_out_bwd,
+                C_in_bwd,
+                kv_bwd,
+                num_in_coords=N_in_bwd,
+            )
+        else:
+            dgrad_adaptive = _get_adaptive_AB_params(
+                C_out_bwd,
+                C_in_bwd,
+                kv_bwd,
+                num_in_coords=N_in_bwd,
+            )
+        if wgrad_filter == "trimmed":
+            wgrad_adaptive = _get_trimmed_AtB_params(
+                C_in_bwd,
+                C_out_bwd,
+                kv_bwd,
+                num_in_coords=N_in_bwd,
+            )
+        else:
+            wgrad_adaptive = _get_adaptive_AtB_params(
+                C_in_bwd,
+                C_out_bwd,
+                kv_bwd,
+                num_in_coords=N_in_bwd,
+            )
         filtered_dgrad_params = _filter_benchmark_params_by_env_config(
             dgrad_adaptive, dgrad_filter, is_forward=True
         )

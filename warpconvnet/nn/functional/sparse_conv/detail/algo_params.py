@@ -220,23 +220,90 @@ def _get_adaptive_AB_params(
     num_in_coords: int = 0,
     voxel_size: Union[Tuple[int, ...], None] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Get AB (gather-scatter) benchmark candidates adapted to the convolution dimensions.
+    """Get AB (gather-scatter) auto candidates — most aggressive trimming.
 
-    Used for both forward and dgrad passes (both are A @ B with gather-scatter).
+    Based on 301-config analysis (SM 8.9, cuBLAS 12.9.1.4):
+      mask: 66% wins (dominates ch<=128 at all N, ch<=256 at small-medium N)
+      cutlass: 21% (dominates ch>256 at large N)
+      cutlass_grouped: 10% (wins ch 129-256 at large N)
+      cute_grouped: 2% (marginal, dropped from auto)
 
-    Based on time-weighted analysis of 148 configs (SM 8.9, cuBLAS 12.9.1.4):
-      mask_implicit_gemm: 56% wins — dominates at ch<=256
-      cutlass_grouped_hybrid: 20% — wins at large N + large channels
-      cutlass_implicit_gemm: 17% — wins at large N + ch>256
-      cute_grouped: 6% — wins at small N + ch>256
+    Auto picks only the dominant winner per region. 4-5 candidates.
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # kv >= 64 (5x5x5): no benchmark data, include broad set
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_AB_MASK_IMPLICIT_GEMM)
+        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch <= 128: mask wins 90-100% at all N sizes
+    if max_ch <= 128:
+        params = []
+        params.extend(_AB_MASK_IMPLICIT_GEMM)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch 129-256: mask dominates small/medium N, cutlass_grouped at large N
+    if max_ch <= 256:
+        params = []
+        params.extend(_AB_MASK_IMPLICIT_GEMM)
+        if log_n == 0 or log_n > 17:
+            params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
+        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch > 256: cutlass dominates at large N, mask at small N
+    params = []
+    params.extend(_AB_MASK_IMPLICIT_GEMM)
+    params.extend(_AB_CUTLASS_IMPLICIT)
+    params.extend(_AB_CUTE_SM90)
+    params.extend(_AB_CUTE_GROUPED_SM90)
+    return params
+
+
+def _get_trimmed_AB_params(
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get AB (gather-scatter) trimmed candidates — moderate trimming.
+
+    Includes runner-ups that cover edge cases. 5-11 candidates.
+    """
+    max_ch = max(in_channels, out_channels)
+    log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
+
+    if kernel_volume >= 64:
+        params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_AB_MASK_IMPLICIT_GEMM)
+        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_AB_CUTLASS_GROUPED)
         params.extend(_AB_CUTE_GROUPED)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch <= 128: mask dominant, cutlass as fallback
+    if max_ch <= 128:
+        params = []
+        params.extend(_AB_MASK_IMPLICIT_GEMM)
+        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch 129-256: mask + cutlass + cutlass_grouped
+    if max_ch <= 256:
+        params = []
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -244,33 +311,7 @@ def _get_adaptive_AB_params(
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # --- kv <= 27 below ---
-
-    # Small N (N <= 10K, log10 <= 4): mask dominates (92-100%), cute_grouped for ch>256
-    if 0 < log_n <= 14:
-        params = []
-        params.extend(_AB_MASK_IMPLICIT_GEMM)
-        params.extend(_AB_CUTE_GROUPED)
-        if max_ch > 256:
-            params.extend(_AB_CUTLASS_IMPLICIT)
-        params.extend(_AB_CUTE_SM90)
-        params.extend(_AB_CUTE_GROUPED_SM90)
-        return params
-
-    # Medium N (10K < N <= 100K, log10 = 5): mask (69%), cutlass (27%)
-    if 0 < log_n <= 17:
-        params = []
-        params.extend(_AB_MASK_IMPLICIT_GEMM)
-        params.extend(_AB_CUTLASS_IMPLICIT)
-        if max_ch > 256:
-            params.extend(_AB_CUTLASS_GROUPED)
-        params.extend(_AB_CUTE_GROUPED)
-        params.extend(_AB_CUTE_SM90)
-        params.extend(_AB_CUTE_GROUPED_SM90)
-        return params
-
-    # Large N (N > 100K) or unknown N: cutlass dominates ch>256,
-    # mask wins ch<=64, cutlass_grouped wins ch 65-256
+    # ch > 256: all major backends
     params = []
     params.extend(_AB_MASK_IMPLICIT_GEMM)
     params.extend(_AB_CUTLASS_IMPLICIT)
@@ -280,47 +321,6 @@ def _get_adaptive_AB_params(
     params.extend(_AB_CUTE_GROUPED_SM90)
     return params
 
-
-# Trimmed AB benchmark candidates ("trimmed"): excludes algorithms
-# that had 0% wins in earlier time-weighted analysis. Used by "all" mode
-# prior to the cuBLAS fix; may exclude algorithms that are now competitive.
-_TRIMMED_AB_PARAMS = [
-    *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
-    *(
-        [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
-        if _HAS_CUTLASS_BACKEND
-        else []
-    ),
-    *(
-        []
-        if not _HAS_CUTE_GROUPED
-        else [
-            ("cute_grouped", {"mma_tile": 3}),
-            ("cute_grouped", {"mma_tile": 0}),
-            ("cute_grouped", {"mma_tile": 1}),
-        ]
-    ),
-    *(
-        []
-        if not _HAS_CUTE_SM90
-        else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
-        ]
-    ),
-    *(
-        []
-        if not _HAS_CUTE_GROUPED_SM90
-        else [
-            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
-            for tile in [100, 101, 102, 103, 104]
-            for cp in [True, False]
-        ]
-    ),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
-]
 
 # Exhaustive AB benchmark candidates ("all"): every algorithm and
 # parameter combination. Nothing excluded.
@@ -396,11 +396,9 @@ _ALL_AB_PARAMS = [
 #   - N>512K, ch<=64: cutlass_grouped_hybrid (8.8ms), explicit_gemm (0.2ms)
 #   - kv=125: explicit_gemm (59%) + explicit_gemm_grouped (32%) + implicit_gemm (9%)
 
-# Static AtB params (used by _get_filtered_AtB_params for env var filtering)
+# Static AtB auto superset (union of all _get_adaptive_AtB_params branches).
 _ATB_PARAMS_AUTO = [
-    *_AB_MASK_IMPLICIT_GEMM,
     *_AB_CUTE_GROUPED,
-    *_AB_CUTLASS_IMPLICIT,
     *_AB_CUTLASS_GROUPED,
     *_ATB_EXPLICIT,
     *_ATB_EXPLICIT_GROUPED,
@@ -417,11 +415,88 @@ def _get_adaptive_AtB_params(
     num_in_coords: int = 0,
     voxel_size: Union[Tuple[int, ...], None] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Get AtB (wgrad) benchmark candidates (A^T @ B reduction, no scatter).
+    """Get AtB (wgrad) auto candidates — most aggressive trimming.
 
-    Based on 146-config analysis (SM 8.9, cuBLAS 12.9.1.4):
-      cute_grouped 64%, cutlass_grouped_hybrid 12%, explicit_gemm_grouped 10%,
-      implicit_gemm 5%, explicit_gemm 5%, cutlass_implicit_gemm 4%
+    Based on 201-config analysis (SM 8.9, cuBLAS 12.9.1.4):
+      cute_grouped: 55% (dominates ch>128 at all N, ch<=128 at small N)
+      cutlass_grouped: 21% (dominates ch<=256 at large N)
+      explicit_gemm_grouped: 9% (wins ch<=64 at medium-large N)
+      cutlass: 7%, explicit: 5%, implicit: 3% (minor winners)
+
+    Auto picks only the dominant winner per region. 2-4 candidates.
+    """
+    max_ch = max(in_channels, out_channels)
+    log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
+
+    if kernel_volume >= 64:
+        params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_AB_CUTE_GROUPED)
+        params.extend(_AB_CUTLASS_GROUPED)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch > 128: cute_grouped wins 82-100% at all N
+    if max_ch > 128:
+        params = []
+        params.extend(_AB_CUTE_GROUPED)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch 65-128, small/medium N: cute_grouped dominant
+    if max_ch > 64 and (0 < log_n <= 17):
+        params = []
+        params.extend(_AB_CUTE_GROUPED)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch 65-128, large N: cutlass_grouped 58%, cute_grouped 23%
+    if max_ch > 64:
+        params = []
+        params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
+        params.extend(_AB_CUTE_GROUPED)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch <= 64, small N: cute_grouped 57%, implicit 29%
+    if 0 < log_n <= 14:
+        params = []
+        params.extend(_AB_CUTE_GROUPED)
+        params.extend(_ATB_IMPLICIT_GEMM)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch <= 64, medium N: cute_grouped 57%, explicit_grouped 43%
+    if 0 < log_n <= 17:
+        params = []
+        params.extend(_AB_CUTE_GROUPED)
+        params.extend(_ATB_EXPLICIT_GROUPED)
+        params.extend(_AB_CUTE_SM90)
+        params.extend(_AB_CUTE_GROUPED_SM90)
+        return params
+
+    # ch <= 64, large N or unknown: cutlass_grouped 43%, explicit 43%
+    params = []
+    params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
+    params.extend(_ATB_EXPLICIT)
+    params.extend(_AB_CUTE_SM90)
+    params.extend(_AB_CUTE_GROUPED_SM90)
+    return params
+
+
+def _get_trimmed_AtB_params(
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get AtB (wgrad) trimmed candidates — moderate trimming.
+
+    Includes runner-ups that cover edge cases. 3-9 candidates.
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
@@ -437,94 +512,38 @@ def _get_adaptive_AtB_params(
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # Small N (N <= 10K): cute_grouped 57-100%, explicit_grouped 15%, implicit_gemm 8%
-    if 0 < log_n <= 14:
+    # ch > 128: cute_grouped dominant + cutlass_grouped fallback
+    if max_ch > 128:
         params = []
         params.extend(_AB_CUTE_GROUPED)
-        params.extend(_ATB_EXPLICIT_GROUPED)
-        if max_ch <= 64:
-            params.extend(_ATB_IMPLICIT_GEMM)
+        if log_n == 0 or log_n > 17:
+            params.extend(_AB_CUTLASS_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # Medium N (10K-100K): cute_grouped 77%, explicit 23%
-    if 0 < log_n <= 17:
+    # ch 65-128: cute_grouped + cutlass_grouped + cutlass
+    if max_ch > 64:
         params = []
         params.extend(_AB_CUTE_GROUPED)
-        params.extend(_ATB_EXPLICIT)
+        params.extend(_AB_CUTLASS_GROUPED)
+        params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_ATB_EXPLICIT_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
 
-    # Large N (N > 100K) or unknown: cutlass_grouped 40%, cute_grouped 30%, cutlass 30%
+    # ch <= 64: all wgrad-relevant backends
     params = []
     params.extend(_AB_CUTE_GROUPED)
     params.extend(_AB_CUTLASS_GROUPED)
-    params.extend(_AB_CUTLASS_IMPLICIT)
+    params.extend(_ATB_EXPLICIT)
     params.extend(_ATB_EXPLICIT_GROUPED)
-    if max_ch <= 64:
-        params.extend(_ATB_EXPLICIT)
+    params.extend(_ATB_IMPLICIT_GEMM)
     params.extend(_AB_CUTE_SM90)
     params.extend(_AB_CUTE_GROUPED_SM90)
     return params
 
-
-# Trimmed AtB benchmark candidates ("trimmed"): excludes algorithms
-# that had 0% wins in earlier analysis (pre-cuBLAS fix).
-_TRIMMED_ATB_PARAMS = [
-    *([] if not _HAS_CUTLASS_BACKEND else [("cutlass_implicit_gemm", {})]),
-    *[
-        (
-            "implicit_gemm",
-            {
-                "gemm_block_size": gemm_block_size,
-                "split_k_threads_per_block": split_k_threads_per_block,
-                "split_k_factor": split_k_factor,
-            },
-        )
-        for gemm_block_size in [4, 16, 32]
-        for split_k_threads_per_block in [256]
-        for split_k_factor in [2, 4, 8, 16]
-    ],
-    ("explicit_gemm", {}),
-    *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
-    *(
-        [("cutlass_grouped_hybrid", {"saturation_m": m}) for m in [2000, 5000, 10000]]
-        if _HAS_CUTLASS_BACKEND
-        else []
-    ),
-    *(
-        []
-        if not _HAS_CUTE_GROUPED
-        else [
-            ("cute_grouped", {"mma_tile": 3}),
-            ("cute_grouped", {"mma_tile": 0}),
-            ("cute_grouped", {"mma_tile": 1}),
-        ]
-    ),
-    *(
-        []
-        if not _HAS_CUTE_SM90
-        else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
-        ]
-    ),
-    *(
-        []
-        if not _HAS_CUTE_GROUPED_SM90
-        else [
-            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
-            for tile in [100, 101, 102, 103, 104]
-            for cp in [True, False]
-        ]
-    ),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
-]
 
 # Exhaustive AtB benchmark candidates ("all"): every algorithm and
 # parameter combination. Nothing excluded.
@@ -648,14 +667,10 @@ def _filter_benchmark_params_by_env_config(
         full_params = _ALL_AB_PARAMS if is_forward else _ALL_ATB_PARAMS
         return [(str(algo), params) for algo, params in full_params]
 
-    if env_config == "trimmed":
-        # When "trimmed", use the reduced set that excludes 0%-win algorithms
-        # from earlier time-weighted analysis (pre-cuBLAS fix)
-        trimmed = _TRIMMED_AB_PARAMS if is_forward else _TRIMMED_ATB_PARAMS
-        return [(str(algo), params) for algo, params in trimmed]
-
-    if env_config == "auto":
-        # When "auto", use adaptive candidate set based on dimensions
+    if env_config in ("auto", "trimmed"):
+        # "auto" and "trimmed" both use dimension-aware candidate selection.
+        # The caller (unified.py) already selected the right params via
+        # _get_adaptive_*_params or _get_trimmed_*_params.
         return [(str(algo), params) for algo, params in all_params]
 
     # Convert environment config to list of algorithm names
