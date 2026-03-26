@@ -194,6 +194,20 @@ def parse_args() -> argparse.Namespace:
         default="cuda:0",
         help="CUDA device (default: cuda:0)",
     )
+    p.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help=(
+            "Multi-GPU parallelism. 'all' uses all visible GPUs, or specify "
+            "comma-separated IDs (e.g. --gpus 0,1,3). Each GPU processes a "
+            "shard of the config grid. Cache writes are file-locked so results "
+            "accumulate without overwriting. Overrides --device."
+        ),
+    )
+    # Internal: set by multi-GPU launcher, not by user
+    p.add_argument("--_shard_index", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_shard_total", type=int, default=None, help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -446,6 +460,95 @@ def run_single_config(
     return result
 
 
+def _launch_multi_gpu(args, gpu_ids: list[int]):
+    """Spawn one subprocess per GPU, each processing a config shard."""
+    import subprocess
+
+    num_gpus = len(gpu_ids)
+    print(f"Launching {num_gpus} workers on GPUs {gpu_ids}")
+    print()
+
+    # Build base command from current args (excluding --gpus and --device)
+    base_cmd = [sys.executable, __file__]
+    if args.preset != "default":
+        base_cmd += ["--preset", args.preset]
+    if args.num_voxels is not None:
+        base_cmd += ["--num-voxels"] + [str(v) for v in args.num_voxels]
+    if args.channels is not None:
+        base_cmd += ["--channels"] + args.channels
+    if args.kernel_sizes is not None:
+        base_cmd += ["--kernel-sizes"] + [str(k) for k in args.kernel_sizes]
+    if args.dtypes is not None:
+        base_cmd += ["--dtypes"] + args.dtypes
+    if args.algo_mode != "trimmed":
+        base_cmd += ["--algo-mode", args.algo_mode]
+    if args.clear_cache:
+        # Only first worker clears; others just start
+        pass
+    if args.forward_only:
+        base_cmd += ["--forward-only"]
+    if args.backward_only:
+        base_cmd += ["--backward-only"]
+    if args.batch_size != 1:
+        base_cmd += ["--batch-size", str(args.batch_size)]
+    if args.resume:
+        base_cmd += ["--resume"]
+    if args.dry_run:
+        base_cmd += ["--dry-run"]
+
+    # Clear cache once before launching workers
+    if args.clear_cache:
+        from warpconvnet.constants import WARPCONVNET_BENCHMARK_CACHE_DIR
+
+        cache_file = os.path.join(
+            os.path.expanduser(WARPCONVNET_BENCHMARK_CACHE_DIR),
+            "benchmark_cache_generic.msgpack",
+        )
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+            print(f"Cleared cache: {cache_file}")
+
+    # Launch workers
+    procs = []
+    for shard_idx, gpu_id in enumerate(gpu_ids):
+        cmd = base_cmd + [
+            "--device",
+            f"cuda:{gpu_id}",
+            "--_shard_index",
+            str(shard_idx),
+            "--_shard_total",
+            str(num_gpus),
+        ]
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # Each worker sees only its GPU as cuda:0
+        cmd_device_idx = cmd.index("--device")
+        cmd[cmd_device_idx + 1] = "cuda:0"
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        procs.append((gpu_id, proc))
+        print(f"  GPU {gpu_id}: PID {proc.pid} (shard {shard_idx + 1}/{num_gpus})")
+
+    print()
+
+    # Wait for all workers
+    failed = []
+    for gpu_id, proc in procs:
+        proc.wait()
+        if proc.returncode != 0:
+            failed.append(gpu_id)
+
+    if failed:
+        print(f"\nWARNING: Workers on GPUs {failed} exited with errors.", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"\nAll {num_gpus} workers completed successfully.")
+
+
 def main():
     args = parse_args()
 
@@ -453,8 +556,24 @@ def main():
         print("ERROR: CUDA is not available. This script requires a GPU.", file=sys.stderr)
         sys.exit(1)
 
-    # Clear cache if requested
-    if args.clear_cache:
+    # Multi-GPU dispatch
+    if args.gpus is not None and args._shard_index is None:
+        if args.gpus == "all":
+            gpu_ids = list(range(torch.cuda.device_count()))
+        else:
+            gpu_ids = [int(x) for x in args.gpus.split(",")]
+        if len(gpu_ids) < 1:
+            print("ERROR: No GPUs specified.", file=sys.stderr)
+            sys.exit(1)
+        if len(gpu_ids) == 1:
+            args.device = f"cuda:{gpu_ids[0]}"
+            # Fall through to single-GPU path
+        else:
+            _launch_multi_gpu(args, gpu_ids)
+            return
+
+    # Clear cache if requested (single-GPU path only; multi-GPU clears in launcher)
+    if args.clear_cache and args._shard_index is None:
         from warpconvnet.constants import WARPCONVNET_BENCHMARK_CACHE_DIR
 
         cache_file = os.path.join(
@@ -514,14 +633,25 @@ def main():
             unique_configs.append((nv, c_in, c_out, ks, dt))
     configs = unique_configs
 
+    # Shard configs across GPUs if running as a worker
+    if args._shard_index is not None and args._shard_total is not None:
+        configs = [c for i, c in enumerate(configs) if i % args._shard_total == args._shard_index]
+
     # Print summary
     dev = torch.device(args.device)
     sm = torch.cuda.get_device_capability(dev)
     gpu_name = torch.cuda.get_device_name(dev)
-    print(f"GPU: {gpu_name} (SM {sm[0]}.{sm[1]})")
+    shard_tag = (
+        f" (shard {args._shard_index + 1}/{args._shard_total})"
+        if args._shard_index is not None
+        else ""
+    )
+    print(f"GPU: {gpu_name} (SM {sm[0]}.{sm[1]}){shard_tag}")
     print(f"Algo mode: {args.algo_mode}")
     print(f"Directions: {'fwd' if do_forward else ''}{'+bwd' if do_backward else ''}")
-    print(f"Configs: {len(configs)} unique (after log10-dedup)")
+    print(
+        f"Configs: {len(configs)} unique (after log10-dedup{', sharded' if args._shard_index is not None else ''})"
+    )
     print(f"  Voxel counts: {sorted({nv for nv, *_ in configs})}")
     print(f"  Channel pairs: {sorted({(c, co) for _, c, co, *_ in configs})}")
     print(f"  Kernel sizes: {sorted({ks for *_, ks, _ in configs})}")
