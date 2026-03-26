@@ -56,7 +56,8 @@ class CUDATimer:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.end_event.record()
-        torch.cuda.synchronize()
+        # Wait only for this event, not all device work. This avoids
+        # blocking on unrelated streams/ranks during auto-tuning.
+        self.end_event.synchronize()
         self.elapsed_time = self.start_event.elapsed_time(self.end_event)
-        # Do not suppress exceptions (including KeyboardInterrupt)
         return False
