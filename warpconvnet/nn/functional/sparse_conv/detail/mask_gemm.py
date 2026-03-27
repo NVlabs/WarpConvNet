@@ -115,10 +115,20 @@ def _build_reverse_mask_data(
     return reverse_flat, reverse_pair_mask, reverse_mask_argsort
 
 
-# Cache mask data per kernel_map to avoid recomputation.
-# Keys: (id, num_out_coords, K) for forward data
-#        (id, num_out_coords, K, "reverse") for reverse dgrad data
+# Cache mask data by content hash of kernel_map offsets.
+# This survives across different Python objects that represent the same mapping.
+# Keys: (offsets_tuple, num_out_coords) for forward data
+#        (offsets_tuple, num_out_coords, "reverse", num_in_coords) for reverse dgrad data
 _MASK_DATA_CACHE = {}
+_MASK_DATA_CACHE_MAX_SIZE = 64  # Evict oldest entries when cache exceeds this
+
+
+def _content_key(kernel_map: IntSearchResult, num_out_coords: int):
+    """Content-based cache key from kernel_map offsets (28 ints for K=27)."""
+    offsets = kernel_map.offsets
+    if offsets.is_cuda:
+        offsets = offsets.cpu()
+    return (tuple(offsets.tolist()), num_out_coords)
 
 
 def _get_mask_data(
@@ -127,11 +137,12 @@ def _get_mask_data(
     device: torch.device,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Get or compute cached forward mask data for a kernel_map."""
-    cache_key = (id(kernel_map), num_out_coords, len(kernel_map))
+    cache_key = _content_key(kernel_map, num_out_coords)
     if cache_key not in _MASK_DATA_CACHE:
-        stale_keys = [k for k in _MASK_DATA_CACHE if k[0] == id(kernel_map)]
-        for k in stale_keys:
-            del _MASK_DATA_CACHE[k]
+        if len(_MASK_DATA_CACHE) >= _MASK_DATA_CACHE_MAX_SIZE:
+            # Evict oldest entries (FIFO)
+            for _ in range(len(_MASK_DATA_CACHE) // 4):
+                _MASK_DATA_CACHE.pop(next(iter(_MASK_DATA_CACHE)))
         _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(kernel_map, num_out_coords, device)
     return _MASK_DATA_CACHE[cache_key]
 
@@ -144,9 +155,9 @@ def _get_reverse_mask_data(
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Get or compute cached reverse mask data for atomicAdd-free dgrad."""
     K = len(kernel_map)
-    cache_key = (id(kernel_map), num_out_coords, K, "reverse")
+    base_key = _content_key(kernel_map, num_out_coords)
+    cache_key = (*base_key, "reverse", num_in_coords)
     if cache_key not in _MASK_DATA_CACHE:
-        # Ensure forward pair_table is built first
         fwd_pair_table, _, _ = _get_mask_data(kernel_map, num_out_coords, device)
         _MASK_DATA_CACHE[cache_key] = _build_reverse_mask_data(
             fwd_pair_table, num_in_coords, num_out_coords, K, device
