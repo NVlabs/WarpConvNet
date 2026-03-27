@@ -130,29 +130,61 @@ For algorithm backends and cache inspection, see the [Sparse Convolutions](https
 
 Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies. When using `uv`, prepend with `uv pip install ...`.
 
+### Pre-built wheels (recommended)
+
+Pre-built wheels are available for common PyTorch + CUDA combinations on Linux x86_64. This is the fastest way to install — no compiler or CUDA toolkit needed.
+
+```bash
+# Install PyTorch first (specify your CUDA version)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# Install warpconvnet (pre-built wheel, matched to your torch + CUDA)
+pip install warpconvnet --extra-index-url https://nvlabs.github.io/WarpConvNet/whl/
+```
+
+Available wheels:
+
+| PyTorch | CUDA         | Python           |
+| ------- | ------------ | ---------------- |
+| 2.10.x  | cu128, cu126 | 3.10, 3.11, 3.12 |
+| 2.5.x   | cu124, cu121 | 3.10, 3.11, 3.12 |
+
+### Install from PyPI (builds from source)
+
+If no pre-built wheel matches your environment, you can install from PyPI. This builds the CUDA extensions from source (~10 minutes).
+
 ```bash
 # Install PyTorch first (specify your CUDA version)
 export CUDA=cu128  # For CUDA 12.8
-## A100 is 80, V100 is 70
-export CUDA_ARCHITECTURES=89;80;
-export TORCH_CUDA_ARCH_LIST="8.9 8.0"
+export TORCH_CUDA_ARCH_LIST="8.9 8.0"  # A100 is 80, RTX 6000 Ada is 89
 
 pip install torch torchvision --index-url https://download.pytorch.org/whl/${CUDA}
 
+# Install build dependencies
+pip install build ninja
+
+# Install warpconvnet (builds from source)
+pip install warpconvnet
+```
+
+### Install from source (development)
+
+```bash
+# Install PyTorch first
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
 # Install core dependencies
 pip install build ninja
-pip install cupy-cuda12x  # use cupy-cuda11x for CUDA 11.x
 pip install git+https://github.com/rusty1s/pytorch_scatter.git
 pip install flash-attn --no-build-isolation
 
-# Install warpconvnet from source
+# Clone and install
 git clone https://github.com/NVlabs/WarpConvNet.git
 cd WarpConvNet
 git submodule update --init 3rdparty/cutlass
-pip install .
+pip install -e . --no-build-isolation
 
-# If this fails, please create an issue on https://github.com/NVlabs/WarpConvNet/issues and try running the following commands:
-cd WarpConvNet
+# If this fails, please create an issue on https://github.com/NVlabs/WarpConvNet/issues and try:
 # Option 1
 python setup.py build_ext --inplace
 # Option 2
