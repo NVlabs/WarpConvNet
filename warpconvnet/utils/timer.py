@@ -39,8 +39,18 @@ class Timer:
 
 
 class CUDATimer:
-    """__enter__ and __exit__ to time a block of code.
-    Returns the elapsed time in milliseconds.
+    """Context manager for timing CUDA operations in milliseconds.
+
+    Uses CUDA events for accurate GPU timing. Synchronizes before the
+    start event to drain previous GPU work and prevent pipeline overlap
+    from inflating measurements.
+
+    Usage::
+
+        timer = CUDATimer()
+        with timer:
+            kernel(...)
+        print(timer.elapsed_time)  # milliseconds
     """
 
     def __init__(self):
@@ -51,6 +61,10 @@ class CUDATimer:
     def __enter__(self):
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
+        # Drain any pending GPU work so the start event marks a clean
+        # boundary. Without this, the measurement can include tail work
+        # from a previous iteration.
+        torch.cuda.current_stream().synchronize()
         self.start_event.record()
         return self
 

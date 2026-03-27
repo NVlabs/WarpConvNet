@@ -375,14 +375,14 @@ def _run_forward_benchmarks(
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
-        # Benchmark runs
-        current_algo_min_time_ms = float("inf")
+        # Benchmark runs — collect all times and take median for robustness
+        iter_times = []
 
         try:
             for _ in range(benchmark_iters):
                 with timer:
                     _execute_single_fwd_pass(algo_mode, params_config)
-                current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+                iter_times.append(timer.elapsed_time)
             # Sync to catch async errors
             torch.cuda.synchronize()
         except (RuntimeError, Exception) as e:
@@ -395,13 +395,14 @@ def _run_forward_benchmarks(
                 pass  # Clear error state by consuming the sync exception
             continue
 
-        if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
+        if iter_times:
+            median_time_ms = sorted(iter_times)[len(iter_times) // 2]
+            all_benchmark_results.append((algo_mode, params_config, median_time_ms))
             _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode}"
                 + (f" ({_param_str})" if _param_str else "")
-                + f" — {current_algo_min_time_ms:.2f}ms"
+                + f" — {median_time_ms:.2f}ms"
             )
 
     if not all_benchmark_results:
@@ -637,8 +638,8 @@ def _run_backward_benchmarks(
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
-        # Benchmark runs
-        current_algo_min_time_ms = float("inf")
+        # Benchmark runs — collect all times and take median for robustness
+        iter_times = []
 
         if benchmark_iters == 0:
             if warmup_iters == 0:
@@ -648,7 +649,7 @@ def _run_backward_benchmarks(
                 for _ in range(benchmark_iters):
                     with timer:
                         _execute_single_bwd_pass(algo_mode, params_config)
-                    current_algo_min_time_ms = min(current_algo_min_time_ms, timer.elapsed_time)
+                    iter_times.append(timer.elapsed_time)
                 torch.cuda.synchronize()
             except (RuntimeError, Exception) as e:
                 logger.debug(
@@ -660,13 +661,14 @@ def _run_backward_benchmarks(
                     pass  # Clear error state by consuming the sync exception
                 continue
 
-        if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
+        if iter_times:
+            median_time_ms = sorted(iter_times)[len(iter_times) // 2]
+            all_benchmark_results.append((algo_mode, params_config, median_time_ms))
             _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
             logger.debug(
                 f"  [{idx}/{num_candidates}] {algo_mode}"
                 + (f" ({_param_str})" if _param_str else "")
-                + f" — {current_algo_min_time_ms:.2f}ms"
+                + f" — {median_time_ms:.2f}ms"
             )
 
     if not all_benchmark_results:
