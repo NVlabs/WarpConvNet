@@ -116,11 +116,13 @@ def _build_reverse_mask_data(
 
 
 # Cache mask data by content hash of kernel_map offsets.
-# This survives across different Python objects that represent the same mapping.
 # Keys: (offsets_tuple, num_out_coords) for forward data
-#        (offsets_tuple, num_out_coords, "reverse", num_in_coords) for reverse dgrad data
+#        (offsets_tuple, num_out_coords, "reverse", num_in_coords) for reverse data
+#
+# Bounded to prevent GPU OOM from variable-size training batches.
+# Each entry holds ~11-22MB of GPU tensors (pair_table + mask + argsort).
 _MASK_DATA_CACHE = {}
-_MASK_DATA_CACHE_MAX_SIZE = 64  # Evict oldest entries when cache exceeds this
+_MASK_DATA_CACHE_MAX_SIZE = 16  # Max entries (forward + reverse combined)
 
 
 def _content_key(kernel_map: IntSearchResult, num_out_coords: int):
@@ -131,6 +133,12 @@ def _content_key(kernel_map: IntSearchResult, num_out_coords: int):
     return (tuple(offsets.tolist()), num_out_coords)
 
 
+def _evict_if_needed():
+    """Evict oldest entries from mask data cache if over limit."""
+    while len(_MASK_DATA_CACHE) >= _MASK_DATA_CACHE_MAX_SIZE:
+        _MASK_DATA_CACHE.pop(next(iter(_MASK_DATA_CACHE)))
+
+
 def _get_mask_data(
     kernel_map: IntSearchResult,
     num_out_coords: int,
@@ -139,10 +147,7 @@ def _get_mask_data(
     """Get or compute cached forward mask data for a kernel_map."""
     cache_key = _content_key(kernel_map, num_out_coords)
     if cache_key not in _MASK_DATA_CACHE:
-        if len(_MASK_DATA_CACHE) >= _MASK_DATA_CACHE_MAX_SIZE:
-            # Evict oldest entries (FIFO)
-            for _ in range(len(_MASK_DATA_CACHE) // 4):
-                _MASK_DATA_CACHE.pop(next(iter(_MASK_DATA_CACHE)))
+        _evict_if_needed()
         _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(kernel_map, num_out_coords, device)
     return _MASK_DATA_CACHE[cache_key]
 
@@ -158,6 +163,7 @@ def _get_reverse_mask_data(
     base_key = _content_key(kernel_map, num_out_coords)
     cache_key = (*base_key, "reverse", num_in_coords)
     if cache_key not in _MASK_DATA_CACHE:
+        _evict_if_needed()
         fwd_pair_table, _, _ = _get_mask_data(kernel_map, num_out_coords, device)
         _MASK_DATA_CACHE[cache_key] = _build_reverse_mask_data(
             fwd_pair_table, num_in_coords, num_out_coords, K, device

@@ -519,6 +519,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     needs_input_grad=(False, True),
                 )
 
+        # Release kernel_map GPU tensors (in_maps, out_maps, _pair_table)
+        # eagerly. ctx attributes are not managed by save_for_backward and
+        # can persist until the autograd graph is garbage collected.
+        ctx.kernel_map = None
+        ctx.config_params_for_bwd = None
+
         return _pad_tuple(grad_in_features, grad_weight, 11)
 
 
