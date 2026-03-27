@@ -39,6 +39,8 @@ jobs:
 
     steps:
       - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
           apt-get install -y software-properties-common git

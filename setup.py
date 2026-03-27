@@ -6,18 +6,51 @@ import subprocess
 import sys
 from setuptools import setup
 
-import torch
-import torch.utils.cpp_extension
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+# Allow sdist generation without torch installed.
+# When torch is not available, setup() runs with no ext_modules (source-only).
+try:
+    import torch
+    import torch.utils.cpp_extension
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-version_str = getattr(torch, "__version__", "")
-if isinstance(version_str, str) and "cpu" in version_str.lower():
-    print(
-        f"ERROR: warpconvnet requires a CUDA-enabled PyTorch build; detected CPU-only PyTorch ({version_str}). "
-        "Please install a CUDA build of PyTorch.",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
+if _HAS_TORCH:
+    version_str = getattr(torch, "__version__", "")
+    if isinstance(version_str, str) and "cpu" in version_str.lower():
+        print(
+            f"ERROR: warpconvnet requires a CUDA-enabled PyTorch build; detected CPU-only PyTorch ({version_str}). "
+            "Please install a CUDA build of PyTorch.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+workspace_dir = os.path.dirname(os.path.abspath(__file__))
+
+if not _HAS_TORCH:
+    # No torch: sdist-only mode. Just run setup() with no extensions.
+    print("PyTorch not found — building source distribution only (no CUDA extensions).")
+
+    _local_version = os.environ.get("WARPCONVNET_LOCAL_VERSION", "")
+    _version_file = os.path.join(workspace_dir, "VERSION.md")
+    _original_version = None
+    if _local_version:
+        with open(_version_file) as f:
+            _original_version = f.read()
+        _tagged = f"{_original_version.strip()}+{_local_version}"
+        with open(_version_file, "w") as f:
+            f.write(_tagged + "\n")
+
+    try:
+        setup(name="warpconvnet", zip_safe=False, python_requires=">=3.8")
+    finally:
+        if _original_version is not None:
+            with open(_version_file, "w") as f:
+                f.write(_original_version)
+    raise SystemExit(0)
 
 
 # Get CUDA toolkit path
@@ -42,9 +75,6 @@ def get_cuda_path():
 
 cuda_home = get_cuda_path()
 print(f"Using CUDA path: {cuda_home}")
-
-# Get the absolute path of the workspace
-workspace_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Define include directories
 include_dirs = [
