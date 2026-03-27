@@ -1,4 +1,4 @@
-name: Build and upload wheels
+name: Build and publish wheels
 
 on:
   push:
@@ -6,69 +6,148 @@ on:
       - v*
   workflow_dispatch:
 
+# Map matrix.cuda short names to Docker image CUDA versions and PyTorch index URLs
+env:
+  TORCH_CUDA_ARCH_LIST: "8.0;8.6;8.9;9.0a"
+
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: "py${{ matrix.python }} torch${{ matrix.torch }} ${{ matrix.cuda }}"
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:${{ matrix.cuda_docker }}-devel-ubuntu22.04
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+        include:
+          # ---- torch 2.10.0 + cu128 ----
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.10" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.11" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.12" }
+          # ---- torch 2.10.0 + cu126 ----
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.10" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.11" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.12" }
+          # ---- torch 2.5.1 + cu124 ----
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.10" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.11" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.12" }
+          # ---- torch 2.5.1 + cu121 ----
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu121", cuda_docker: "12.1.1", python: "3.10" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu121", cuda_docker: "12.1.1", python: "3.11" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu121", cuda_docker: "12.1.1", python: "3.12" }
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y software-properties-common git
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update
+          apt-get install -y python${{ matrix.python }} python${{ matrix.python }}-dev python${{ matrix.python }}-venv
+          python${{ matrix.python }} -m ensurepip --upgrade || true
 
-    - name: Set up CUDA (Linux)
-      if: matrix.os == 'ubuntu-latest'
-      uses: Jimver/cuda-toolkit@v0.2.11
-      with:
-        cuda: '12.1'
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Build wheels
-      uses: pypa/cibuildwheel@v2.16.2
-      env:
-        CIBW_BUILD: cp39-* cp310-* cp311-* cp312-*
-        CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
-        CIBW_ARCHS_LINUX: x86_64
-        CIBW_ARCHS_MACOS: x86_64 arm64
-        CIBW_ARCHS_WINDOWS: AMD64
-        CIBW_ENVIRONMENT_LINUX: CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH
-        CIBW_BEFORE_ALL_LINUX: |
-          yum install -y epel-release
-          yum install -y cuda-toolkit-12-1 || apt-get update && apt-get install -y nvidia-cuda-toolkit
-        CIBW_TEST_COMMAND: python -c "import warpconvnet; print('Import successful')"
+      - name: Create venv and install dependencies
+        run: |
+          python${{ matrix.python }} -m venv /tmp/buildenv
+          . /tmp/buildenv/bin/activate
+          pip install --upgrade pip setuptools wheel pybind11 ninja
+          pip install torch==${{ matrix.torch }}+${{ matrix.cuda }} \
+            --index-url https://download.pytorch.org/whl/${{ matrix.cuda }}
 
-    - uses: actions/upload-artifact@v3
-      with:
-        path: ./wheelhouse/*.whl
+      - name: Build wheel
+        run: |
+          . /tmp/buildenv/bin/activate
+          export WARPCONVNET_LOCAL_VERSION="torch${{ matrix.torch_short }}${{ matrix.cuda }}"
+          python setup.py bdist_wheel
+
+      - name: Repair wheel (manylinux tag)
+        run: |
+          . /tmp/buildenv/bin/activate
+          pip install auditwheel patchelf
+          auditwheel repair dist/*.whl \
+            --plat manylinux_2_28_x86_64 \
+            -w dist/repaired/ \
+            --exclude libtorch.so \
+            --exclude libtorch_cpu.so \
+            --exclude libtorch_cuda.so \
+            --exclude libtorch_python.so \
+            --exclude libc10.so \
+            --exclude libc10_cuda.so \
+            --exclude libcudart.so \
+            --exclude libcublas.so \
+            --exclude libcublasLt.so \
+            --exclude libcuda.so || cp dist/*.whl dist/repaired/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-torch${{ matrix.torch_short }}-${{ matrix.cuda }}-py${{ matrix.python }}
+          path: dist/repaired/*.whl
 
   build_sdist:
     name: Build source distribution
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Build sdist
-      run: pipx run build --sdist
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist
 
-    - uses: actions/upload-artifact@v3
-      with:
-        path: dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
 
-  upload_pypi:
-    needs: [build_wheels, build_sdist]
+  publish_gh_pages:
+    name: Publish wheels to GitHub Pages
+    needs: build_wheels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-wheels/
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Generate PEP 503 index
+        run: |
+          pip install packaging
+          python scripts/generate_index.py all-wheels/ whl/
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: whl/
+          destination_dir: whl
+          keep_files: true
+
+  publish_pypi:
+    name: Publish sdist to PyPI
+    needs: build_sdist
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
-    - uses: actions/download-artifact@v3
-      with:
-        name: artifact
-        path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist/
 
-    - uses: pypa/gh-action-pypi-publish@v1.8.10
-      with:
-        user: __token__
-        password: ${{ secrets.PYPI_API_TOKEN }} 
+      - uses: pypa/gh-action-pypi-publish@v1.8.10
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
