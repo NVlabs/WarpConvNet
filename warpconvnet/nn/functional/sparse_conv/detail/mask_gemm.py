@@ -212,7 +212,26 @@ def _mask_implicit_gemm_forward_logic(
         C_in, C_out = target_cin, target_cout
     aligned = True  # After padding, always aligned
 
-    if _has_cute and aligned and min_dtype in (torch.float16, torch.bfloat16):
+    if _has_cute:
+        # CuTe kernels require fp16/bf16 — downcast fp32 inputs
+        if min_dtype == torch.float32:
+            _in_features = _in_features.half()
+            _weight = _weight.half()
+            output = output.half()
+            min_dtype = torch.float16
+            # Recheck padding after dtype change
+            vec_width = 16 // _in_features.element_size()
+            needs_padding = (orig_C_in % vec_width != 0) or (orig_C_out % vec_width != 0)
+            if needs_padding:
+                C_in_pad = ((orig_C_in + vec_width - 1) // vec_width) * vec_width
+                C_out_pad = ((orig_C_out + vec_width - 1) // vec_width) * vec_width
+                _in_features = torch.nn.functional.pad(_in_features, (0, C_in_pad - orig_C_in))
+                _weight = torch.nn.functional.pad(
+                    _weight, (0, C_out_pad - orig_C_out, 0, C_in_pad - orig_C_in)
+                )
+                output = torch.zeros((num_out_coords, C_out_pad), dtype=min_dtype, device=device)
+                C_in, C_out = C_in_pad, C_out_pad
+
         status = _C.gemm.cute_gemm_mask_fwd(
             _in_features,
             _weight,
@@ -228,16 +247,12 @@ def _mask_implicit_gemm_forward_logic(
             if needs_padding:
                 output = output[:, :orig_C_out]
             return output.to(dtype=in_features.dtype)
-        # CuTe failed — signal error so auto-tuner skips this algo
         raise RuntimeError(
             f"cute_gemm_mask_fwd failed with status {status} "
             f"(N={num_out_coords}, C_in={C_in}, C_out={C_out}, K={K})"
         )
 
-    # No CuTe available or channels unaligned — signal unsupported
-    raise RuntimeError(
-        f"mask_implicit_gemm requires aligned channels for CuTe " f"(C_in={C_in}, C_out={C_out})"
-    )
+    raise RuntimeError(f"mask_implicit_gemm requires CuTe backend (C_in={C_in}, C_out={C_out})")
 
 
 def _mask_implicit_gemm_backward_logic(
