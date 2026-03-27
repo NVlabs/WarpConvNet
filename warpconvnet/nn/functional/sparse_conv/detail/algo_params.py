@@ -251,9 +251,11 @@ def _get_adaptive_AB_params(
         return params
 
     # ch <= 128: mask wins 90-100% at all N sizes
+    # Include cutlass as fallback in case mask fails (e.g., unsupported config)
     if max_ch <= 128:
         params = []
         params.extend(_AB_MASK_IMPLICIT_GEMM)
+        params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
