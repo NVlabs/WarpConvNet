@@ -269,12 +269,33 @@ ext_modules = [
     )
 ]
 
-setup(
-    name="warpconvnet",
-    ext_modules=ext_modules,
-    cmdclass={
-        "build_ext": BuildExtension,
-    },
-    zip_safe=False,
-    python_requires=">=3.8",
-)
+# Local version suffix for pre-built wheels (e.g. "+torch2.10cu128").
+# pyproject.toml reads version from VERSION.md (dynamic), so we patch the file
+# in-place and restore it after setup() to inject the local tag.
+_local_version = os.environ.get("WARPCONVNET_LOCAL_VERSION", "")
+_version_file = os.path.join(workspace_dir, "VERSION.md")
+_original_version = None
+
+if _local_version:
+    with open(_version_file) as f:
+        _original_version = f.read()
+    _tagged_version = f"{_original_version.strip()}+{_local_version}"
+    with open(_version_file, "w") as f:
+        f.write(_tagged_version + "\n")
+    print(f"Using local version: {_tagged_version}")
+
+try:
+    setup(
+        name="warpconvnet",
+        ext_modules=ext_modules,
+        cmdclass={
+            "build_ext": BuildExtension,
+        },
+        zip_safe=False,
+        python_requires=">=3.8",
+    )
+finally:
+    # Restore VERSION.md so the working tree stays clean
+    if _original_version is not None:
+        with open(_version_file, "w") as f:
+            f.write(_original_version)
