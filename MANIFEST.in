@@ -1,0 +1,25 @@
+# Include 3rdparty directories needed for building
+recursive-include 3rdparty/cutlass/include *
+recursive-include 3rdparty/cutlass/tools/util/include *
+
+# Include source files
+include README.md
+include LICENSE
+include *.py
+include *.cu
+include *.cuh
+include *.cpp
+include *.h
+include *.hpp
+
+# Include package data
+recursive-include warpconvnet *.cu *.cuh *.cpp *.h *.hpp
+recursive-include scripts *.py
+
+# Exclude unnecessary files
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__
+global-exclude .git*
+global-exclude .pytest_cache
+global-exclude *.egg-info

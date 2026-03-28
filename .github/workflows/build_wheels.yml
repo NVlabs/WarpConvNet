@@ -56,19 +56,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Create venv and install dependencies
         run: |
           python${{ matrix.python }} -m venv /tmp/buildenv
           . /tmp/buildenv/bin/activate
-          pip install --upgrade pip setuptools wheel pybind11 ninja
+          pip install --upgrade pip setuptools setuptools-scm wheel pybind11 ninja
           pip install torch==${{ matrix.torch }}+${{ matrix.cuda }} \
             --index-url https://download.pytorch.org/whl/${{ matrix.cuda }}
 
       - name: Build wheel
         run: |
           . /tmp/buildenv/bin/activate
-          export WARPCONVNET_LOCAL_VERSION="torch${{ matrix.torch_short }}${{ matrix.cuda }}"
+          BASE_VERSION=$(python -m setuptools_scm)
+          export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+torch${{ matrix.torch_short }}${{ matrix.cuda }}"
+          echo "Building version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
           python setup.py bdist_wheel
 
       - name: Repair wheel (manylinux tag)
@@ -102,10 +105,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Build sdist
         run: |
-          pip install build
+          pip install build setuptools-scm
           python -m build --sdist
 
       - uses: actions/upload-artifact@v4
