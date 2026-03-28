@@ -70,7 +70,8 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . /tmp/buildenv/bin/activate
-          BASE_VERSION=$(python -m setuptools_scm)
+          # Strip any existing local segment (+g1234567) before appending torch tag
+          BASE_VERSION=$(python -m setuptools_scm | cut -d'+' -f1)
           export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+torch${{ matrix.torch_short }}${{ matrix.cuda }}"
           echo "Building version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
           python setup.py bdist_wheel

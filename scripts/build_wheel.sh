@@ -24,8 +24,8 @@ else
     echo "Auto-detected: ${LOCAL_VERSION}"
 fi
 
-# Get base version from git tags via setuptools-scm
-BASE_VERSION=$(python -m setuptools_scm 2>/dev/null || echo "0.0.0")
+# Get base version from git tags via setuptools-scm (strip local segment if present)
+BASE_VERSION=$(python -m setuptools_scm 2>/dev/null | cut -d'+' -f1 || echo "0.0.0")
 export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+${LOCAL_VERSION}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0a}"
 
