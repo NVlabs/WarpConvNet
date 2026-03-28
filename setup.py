@@ -292,10 +292,9 @@ else:
 # For pre-built wheels, set SETUPTOOLS_SCM_PRETEND_VERSION externally
 # (e.g. "1.4.2+torch2.10cu128") to inject a local version tag.
 # setuptools-scm reads version from git tags by default.
+# All metadata (name, version, dependencies) comes from pyproject.toml.
+# setup.py only provides ext_modules and cmdclass for the CUDA build.
 setup(
-    name="warpconvnet",
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    zip_safe=False,
-    python_requires=">=3.8",
 )
