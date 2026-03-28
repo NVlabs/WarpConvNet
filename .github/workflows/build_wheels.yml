@@ -68,6 +68,7 @@ jobs:
 
       - name: Build wheel
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . /tmp/buildenv/bin/activate
           BASE_VERSION=$(python -m setuptools_scm)
           export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+torch${{ matrix.torch_short }}${{ matrix.cuda }}"
