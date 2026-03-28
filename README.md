@@ -144,10 +144,10 @@ pip install warpconvnet --extra-index-url https://nvlabs.github.io/WarpConvNet/w
 
 Available wheels:
 
-| PyTorch | CUDA         | Python           |
-| ------- | ------------ | ---------------- |
-| 2.10.x  | cu128, cu126 | 3.10, 3.11, 3.12 |
-| 2.5.x   | cu124, cu121 | 3.10, 3.11, 3.12 |
+| PyTorch | CUDA                | Python           |
+| ------- | ------------------- | ---------------- |
+| 2.10.x  | cu130, cu128, cu126 | 3.10, 3.11, 3.12 |
+| 2.5.x   | cu124, cu121        | 3.10, 3.11, 3.12 |
 
 ### Install from PyPI (builds from source)
 

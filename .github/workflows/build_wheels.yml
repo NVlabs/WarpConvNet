@@ -20,6 +20,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ---- torch 2.10.0 + cu130 ----
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.10" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.11" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.12" }
           # ---- torch 2.10.0 + cu128 ----
           - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.10" }
           - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.11" }
