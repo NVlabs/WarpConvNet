@@ -69,9 +69,6 @@ include = ["warpconvnet*", "scripts*"]
 [tool.setuptools.package-data]
 warpconvnet = ["csrc/*.cu", "csrc/*.cpp", "csrc/*.h", "csrc/*.hpp", "csrc/include/*.h", "csrc/include/**/*.h", "csrc/include/**/*.hpp"]
 
-[tool.setuptools.dynamic]
-readme = { file = ["README.md"], content-type = "text/markdown" }
-
 [tool.setuptools_scm]
 # Version derived from git tags (e.g. v1.4.2 → 1.4.2)
 # Between tags: 1.4.3.dev3+g1234567
