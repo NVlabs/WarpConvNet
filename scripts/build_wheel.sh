@@ -6,6 +6,7 @@
 #   ./scripts/build_wheel.sh torch2.10cu128   # explicit local version tag
 #
 # The wheel is placed in dist/repaired/ with the local version tag embedded.
+# Version is derived from git tags via setuptools-scm.
 
 set -euo pipefail
 
@@ -23,10 +24,12 @@ else
     echo "Auto-detected: ${LOCAL_VERSION}"
 fi
 
-export WARPCONVNET_LOCAL_VERSION="$LOCAL_VERSION"
+# Get base version from git tags via setuptools-scm
+BASE_VERSION=$(python -m setuptools_scm 2>/dev/null || echo "0.0.0")
+export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+${LOCAL_VERSION}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0a}"
 
-echo "Building wheel with local version: +${LOCAL_VERSION}"
+echo "Building wheel version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
 echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
 
 # Clean previous builds
