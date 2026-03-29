@@ -119,14 +119,16 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  publish_gh_pages:
-    name: Publish wheels to GitHub Pages
+  publish_release:
+    name: Upload wheels to GitHub Release
     needs: build_wheels
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all wheel artifacts
         uses: actions/download-artifact@v4
@@ -135,18 +137,25 @@ jobs:
           pattern: wheel-*
           merge-multiple: true
 
-      - name: Generate PEP 503 index
+      - name: Determine version tag
+        id: version
         run: |
-          pip install packaging
-          python scripts/generate_index.py all-wheels/ whl/
+          pip install setuptools-scm
+          VERSION=$(python -m setuptools_scm | cut -d'+' -f1)
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${VERSION}, Tag: ${TAG}"
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: whl/
-          destination_dir: whl
-          keep_files: true
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Create release if it doesn't exist
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          # Upload wheels (overwrite if re-running)
+          gh release upload "$TAG" all-wheels/*.whl --clobber
 
   publish_pypi:
     name: Publish sdist to PyPI

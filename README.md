@@ -138,16 +138,19 @@ Pre-built wheels are available for common PyTorch + CUDA combinations on Linux x
 # Install PyTorch first (specify your CUDA version)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
-# Install warpconvnet (pre-built wheel, matched to your torch + CUDA)
-pip install warpconvnet --extra-index-url https://nvlabs.github.io/WarpConvNet/whl/
+# Install warpconvnet — specify your torch + CUDA version in the version string
+pip install "warpconvnet==1.5.0+torch2.10cu128" \
+    --find-links https://github.com/NVlabs/WarpConvNet/releases/latest/download/
 ```
 
-Available wheels:
+Replace `1.5.0` with the release version and `torch2.10cu128` with your torch + CUDA combo (must match your installed PyTorch). Available wheels:
 
 | PyTorch | CUDA                | Python           |
 | ------- | ------------------- | ---------------- |
 | 2.10.x  | cu130, cu128, cu126 | 3.10, 3.11, 3.12 |
 | 2.5.x   | cu124, cu121        | 3.10, 3.11, 3.12 |
+
+Browse all releases: <https://github.com/NVlabs/WarpConvNet/releases>
 
 ### Install from PyPI (builds from source)
 
