@@ -236,6 +236,7 @@ def _mask_implicit_gemm_backward_logic(
     needs_input_grad: Tuple[bool, ...] = (True, True),
     block_size: int = 16,
     mma_tile: int = 3,
+    weight_T: Optional[Tensor] = None,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Backward pass using mask-based fused implicit GEMM."""
     device = in_features.device
@@ -279,10 +280,15 @@ def _mask_implicit_gemm_backward_logic(
                 kernel_map, N_in, num_out_coords, device
             )
             # Weight transposed: [K, C_in, C_out] -> [K, C_out, C_in]
-            # The forward kernel loads B[k] as [C_in_kernel, C_out_kernel].
-            # For dgrad: C_in_kernel=C_out, C_out_kernel=C_in, so B[k]
-            # should be [C_out, C_in] = weight.transpose(-1,-2).
-            _weight_T = _w_bwd.transpose(1, 2).contiguous()
+            if weight_T is not None:
+                _weight_T = weight_T
+                # Apply same padding as _w_bwd if needed
+                if needs_padding_bwd and min_dtype in (torch.float16, torch.bfloat16):
+                    tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
+                    tco = ((C_out + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
+                    _weight_T = torch.nn.functional.pad(_weight_T, (0, tc - C_in, 0, tco - C_out))
+            else:
+                _weight_T = _w_bwd.transpose(1, 2).contiguous()
             status = _C.gemm.cute_gemm_mask_fwd(
                 _go_bwd,  # "input": grad_output [N_out, C_out]
                 _weight_T,  # "weight": [K, C_out, C_in]

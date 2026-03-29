@@ -30,30 +30,32 @@ def _get_group_indices(offsets_cpu: Tensor, identity_map_index: Optional[int]) -
     return torch.where(valid)[0]
 
 
-def _prepare_grouped_params(
+def _get_cached_AB_geometry(
     kernel_map: IntSearchResult,
-    weight: Tensor,
     identity_map_index: Optional[int],
     tile_m: int,
     device: torch.device,
 ) -> Optional[Tuple[Tensor, Tensor, Tensor, Tensor, list, int]]:
-    """Build device-side arrays for fused grouped GEMM (vectorized).
+    """Get or compute cached geometry-dependent grouped GEMM params.
 
-    Returns (weight_ptrs, tile_offsets, group_sizes, map_offsets, group_indices,
-             total_m_tiles) or None if no non-identity groups exist.
+    Returns (group_indices_dev, tile_offsets, group_sizes, map_offsets,
+             group_indices_list, total_m_tiles) or None.
     """
-    offsets_cpu = kernel_map.offsets  # [K+1] int32, on CPU
+    cache_key = ("AB", tile_m)
+    cached = kernel_map._grouped_params_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    offsets_cpu = kernel_map.offsets
     group_indices = _get_group_indices(offsets_cpu, identity_map_index)
 
     if len(group_indices) == 0:
+        kernel_map._grouped_params_cache[cache_key] = None
         return None
 
-    # group_sizes: M_g per group — vectorized diff
     group_sizes = (offsets_cpu[group_indices + 1] - offsets_cpu[group_indices]).to(
         dtype=torch.int32, device=device
     )
-
-    # map_offsets: start offset per group + end of last group
     map_offsets = torch.cat(
         [
             offsets_cpu[group_indices],
@@ -61,18 +63,88 @@ def _prepare_grouped_params(
         ]
     ).to(dtype=torch.int32, device=device)
 
-    # tile_offsets: prefix sum of ceil(M_g / tile_m)
     m_tiles = (group_sizes + tile_m - 1) // tile_m
     tile_offsets = torch.zeros(len(group_indices) + 1, dtype=torch.int32, device=device)
     torch.cumsum(m_tiles, dim=0, out=tile_offsets[1:])
     total_m_tiles = int(tile_offsets[-1])
 
-    # weight_ptrs: stride arithmetic instead of per-element data_ptr()
+    group_indices_dev = group_indices.to(dtype=torch.int64, device=device)
+
+    result = (
+        group_indices_dev,
+        tile_offsets,
+        group_sizes,
+        map_offsets,
+        group_indices.tolist(),
+        total_m_tiles,
+    )
+    kernel_map._grouped_params_cache[cache_key] = result
+    return result
+
+
+def _get_cached_AtB_geometry(
+    kernel_map: IntSearchResult,
+    identity_map_index: Optional[int],
+    device: torch.device,
+) -> Optional[Tuple[Tensor, Tensor, Tensor]]:
+    """Get or compute cached geometry-dependent grouped TrAB params.
+
+    Returns (group_indices_dev, gather_sizes, map_offsets) or None.
+    """
+    cache_key = "AtB"
+    cached = kernel_map._grouped_params_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    offsets_cpu = kernel_map.offsets
+    group_indices = _get_group_indices(offsets_cpu, identity_map_index)
+
+    if len(group_indices) == 0:
+        kernel_map._grouped_params_cache[cache_key] = None
+        return None
+
+    gather_sizes = (offsets_cpu[group_indices + 1] - offsets_cpu[group_indices]).to(
+        dtype=torch.int32, device=device
+    )
+    map_offsets = offsets_cpu[group_indices].to(dtype=torch.int32, device=device)
+    group_indices_dev = group_indices.to(dtype=torch.int64, device=device)
+
+    result = (group_indices_dev, gather_sizes, map_offsets)
+    kernel_map._grouped_params_cache[cache_key] = result
+    return result
+
+
+def _prepare_grouped_params(
+    kernel_map: IntSearchResult,
+    weight: Tensor,
+    identity_map_index: Optional[int],
+    tile_m: int,
+    device: torch.device,
+) -> Optional[Tuple[Tensor, Tensor, Tensor, Tensor, list, int]]:
+    """Build device-side arrays for fused grouped GEMM.
+
+    Geometry-dependent arrays are cached on the kernel_map. Only weight_ptrs
+    are recomputed each call (depends on weight data_ptr which changes after
+    optimizer steps).
+    """
+    geo = _get_cached_AB_geometry(kernel_map, identity_map_index, tile_m, device)
+    if geo is None:
+        return None
+
+    (
+        group_indices_dev,
+        tile_offsets,
+        group_sizes,
+        map_offsets,
+        group_indices_list,
+        total_m_tiles,
+    ) = geo
+
+    # weight_ptrs: must recompute each call (weight tensor changes after optim step)
     base_ptr = weight.data_ptr()
     stride_bytes = weight.stride(0) * weight.element_size()
     weight_ptrs = (
-        torch.tensor(base_ptr, dtype=torch.int64, device=device)
-        + group_indices.to(dtype=torch.int64, device=device) * stride_bytes
+        torch.tensor(base_ptr, dtype=torch.int64, device=device) + group_indices_dev * stride_bytes
     )
 
     return (
@@ -80,7 +152,7 @@ def _prepare_grouped_params(
         tile_offsets,
         group_sizes,
         map_offsets,
-        group_indices.tolist(),
+        group_indices_list,
         total_m_tiles,
     )
 
@@ -91,35 +163,27 @@ def _prepare_grouped_trAB_params(
     identity_map_index: Optional[int],
     device: torch.device,
 ) -> Optional[Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
-    """Build device-side arrays for fused grouped TrAB GEMM (vectorized).
+    """Build device-side arrays for fused grouped TrAB GEMM.
 
-    Returns (output_ptrs, gather_sizes, map_offsets, in_map, out_map)
-    or None if no non-identity groups exist.
+    Geometry-dependent arrays are cached on the kernel_map. Only output_ptrs
+    are recomputed each call.
     """
-    offsets_cpu = kernel_map.offsets  # [K+1] int32, on CPU
-    group_indices = _get_group_indices(offsets_cpu, identity_map_index)
-
-    if len(group_indices) == 0:
+    geo = _get_cached_AtB_geometry(kernel_map, identity_map_index, device)
+    if geo is None:
         return None
 
-    # gather_sizes: vectorized diff
-    gather_sizes = (offsets_cpu[group_indices + 1] - offsets_cpu[group_indices]).to(
-        dtype=torch.int32, device=device
-    )
+    group_indices_dev, gather_sizes, map_offsets = geo
 
-    # map_offsets: start offset per group
-    map_offsets = offsets_cpu[group_indices].to(dtype=torch.int32, device=device)
-
-    # output_ptrs: stride arithmetic
+    # output_ptrs: must recompute (grad_weight is freshly allocated each call)
     base_ptr = grad_weight.data_ptr()
     stride_bytes = grad_weight.stride(0) * grad_weight.element_size()
     output_ptrs = (
-        torch.tensor(base_ptr, dtype=torch.int64, device=device)
-        + group_indices.to(dtype=torch.int64, device=device) * stride_bytes
+        torch.tensor(base_ptr, dtype=torch.int64, device=device) + group_indices_dev * stride_bytes
     )
 
-    in_map_dev = kernel_map.in_maps.to(device).int().contiguous()
-    out_map_dev = kernel_map.out_maps.to(device).int().contiguous()
+    # in_maps/out_maps are already on CUDA — avoid redundant .to(device)
+    in_map_dev = kernel_map.in_maps.int().contiguous()
+    out_map_dev = kernel_map.out_maps.int().contiguous()
 
     return output_ptrs, gather_sizes, map_offsets, in_map_dev, out_map_dev
 
@@ -216,6 +280,7 @@ def _cute_grouped_backward_logic(
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
     mma_tile: int = 3,
+    weight_T: Optional[Tensor] = None,
 ) -> Union[
     Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]],
     Tuple[int, int],
@@ -238,9 +303,9 @@ def _cute_grouped_backward_logic(
     compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
 
     iden_idx = kernel_map.identity_map_index
-    grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
 
     # --- Input gradient: fused grouped GEMM ---
+    grad_in_features = None
     if requires_grad[0]:
         if iden_idx is not None:
             grad_in_features = torch.matmul(_grad_output, _weight[iden_idx].T).to(dtype=out_dtype)
@@ -253,13 +318,15 @@ def _cute_grouped_backward_logic(
             )
 
         # For input grad: A=grad_output gathered by out_map, B=weight.T, scatter to in_map
-        # We need transposed weights in compute dtype
-        weight_t = (
-            _weight.to(dtype=compute_dtype).transpose(-1, -2).contiguous()
-        )  # [K, C_out, C_in]
+        if weight_T is not None:
+            _weight_t = weight_T.to(dtype=compute_dtype).contiguous()
+        else:
+            _weight_t = (
+                _weight.to(dtype=compute_dtype).transpose(-1, -2).contiguous()
+            )  # [K, C_out, C_in]
 
         tile_m = _TILE_M_SIZES.get(mma_tile, 64)
-        params = _prepare_grouped_params(kernel_map, weight_t, iden_idx, tile_m, device)
+        params = _prepare_grouped_params(kernel_map, _weight_t, iden_idx, tile_m, device)
 
         if params is not None:
             (
@@ -270,8 +337,9 @@ def _cute_grouped_backward_logic(
                 group_indices,
                 total_m_tiles,
             ) = params
-            out_map_dev = kernel_map.out_maps.to(device).int().contiguous()
-            in_map_dev = kernel_map.in_maps.to(device).int().contiguous()
+            # in_maps/out_maps are already on CUDA — avoid redundant .to(device)
+            out_map_dev = kernel_map.out_maps.int().contiguous()
+            in_map_dev = kernel_map.in_maps.int().contiguous()
 
             status = _C.gemm.cute_gemm_grouped_AD_gather_scatter(
                 _grad_output,
@@ -288,16 +356,11 @@ def _cute_grouped_backward_logic(
             )
             if status != 0:
                 return status, -1
-    else:
-        grad_in_features = torch.zeros(
-            _in_features.shape[0],
-            _in_features.shape[1],
-            device=device,
-            dtype=out_dtype,
-        )
 
     # --- Weight gradient: fused grouped TrAB ---
+    grad_weight = None
     if requires_grad[1]:
+        grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
         if iden_idx is not None:
             grad_weight[iden_idx] = torch.matmul(_in_features.T, _grad_output).to(dtype=out_dtype)
 

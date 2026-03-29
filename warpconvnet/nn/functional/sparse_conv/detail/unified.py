@@ -431,6 +431,23 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
             return results[0][0], results[0][1]
 
+        # Pre-cast tensors once so dgrad and wgrad don't duplicate work.
+        # The kernel logic functions will detect matching dtype and skip
+        # redundant .to() / .contiguous() / .detach() calls.
+        from warpconvnet.utils.type_cast import _min_dtype
+
+        _cast_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
+        _min_dt = _min_dtype(_cast_dtype, weight.dtype)
+        if _min_dt == torch.float64:
+            _min_dt = torch.float32
+        _grad_output = grad_output.contiguous().detach().to(dtype=_min_dt)
+        _in_features = in_features.contiguous().detach().to(dtype=_min_dt)
+        _weight = weight.contiguous().detach().to(dtype=_min_dt)
+
+        # Pre-compute weight transpose once for dgrad (both mask and
+        # cute_grouped need [K, C_out, C_in] contiguous for the AB kernel).
+        _weight_T = _weight.transpose(1, 2).contiguous() if ctx.needs_input_grad[0] else None
+
         # Auto-tune dgrad and wgrad independently
         grad_in_features = None
         grad_weight = None
@@ -452,14 +469,15 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 grad_in_features, _ = _execute_backward(
                     dgrad_algo,
                     dgrad_params,
-                    grad_output,
-                    in_features,
-                    weight,
+                    _grad_output,
+                    _in_features,
+                    _weight,
                     kernel_map,
                     num_out_coords,
                     compute_dtype,
                     device,
                     needs_input_grad=(True, False),
+                    weight_T=_weight_T,
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"DGRAD '{dgrad_algo}' failed: {e}. Falling back.")
@@ -467,14 +485,15 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 grad_in_features, _ = _execute_backward(
                     "explicit_gemm",
                     {},
-                    grad_output,
-                    in_features,
-                    weight,
+                    _grad_output,
+                    _in_features,
+                    _weight,
                     kernel_map,
                     num_out_coords,
                     compute_dtype,
                     device,
                     needs_input_grad=(True, False),
+                    weight_T=_weight_T,
                 )
 
         if ctx.needs_input_grad[1]:
@@ -494,9 +513,9 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 _, grad_weight = _execute_backward(
                     wgrad_algo,
                     wgrad_params,
-                    grad_output,
-                    in_features,
-                    weight,
+                    _grad_output,
+                    _in_features,
+                    _weight,
                     kernel_map,
                     num_out_coords,
                     compute_dtype,
@@ -509,15 +528,18 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 _, grad_weight = _execute_backward(
                     "explicit_gemm",
                     {},
-                    grad_output,
-                    in_features,
-                    weight,
+                    _grad_output,
+                    _in_features,
+                    _weight,
                     kernel_map,
                     num_out_coords,
                     compute_dtype,
                     device,
                     needs_input_grad=(False, True),
                 )
+
+        # Free pre-cast tensors eagerly
+        del _grad_output, _in_features, _weight, _weight_T
 
         # Release kernel_map GPU tensors (in_maps, out_maps, _pair_table)
         # eagerly. ctx attributes are not managed by save_for_backward and
