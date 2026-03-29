@@ -21,6 +21,15 @@ _DTYPE_TO_SCALAR_TYPE_INT = {
 }
 
 
+def _get_group_indices(offsets_cpu: Tensor, identity_map_index: Optional[int]) -> Tensor:
+    """Return indices of non-identity offsets with count > 0 (vectorized)."""
+    counts = offsets_cpu[1:] - offsets_cpu[:-1]
+    valid = counts > 0
+    if identity_map_index is not None:
+        valid[identity_map_index] = False
+    return torch.where(valid)[0]
+
+
 def _prepare_grouped_params(
     kernel_map: IntSearchResult,
     weight: Tensor,
@@ -28,53 +37,50 @@ def _prepare_grouped_params(
     tile_m: int,
     device: torch.device,
 ) -> Optional[Tuple[Tensor, Tensor, Tensor, Tensor, list, int]]:
-    """Build device-side arrays for fused grouped GEMM.
+    """Build device-side arrays for fused grouped GEMM (vectorized).
 
     Returns (weight_ptrs, tile_offsets, group_sizes, map_offsets, group_indices,
              total_m_tiles) or None if no non-identity groups exist.
     """
-    offsets_cpu = kernel_map.offsets  # already on CPU
+    offsets_cpu = kernel_map.offsets  # [K+1] int32, on CPU
+    group_indices = _get_group_indices(offsets_cpu, identity_map_index)
 
-    group_indices = []
-    for k in range(len(offsets_cpu) - 1):
-        if k == identity_map_index:
-            continue
-        m_k = int(offsets_cpu[k + 1] - offsets_cpu[k])
-        if m_k > 0:
-            group_indices.append(k)
-
-    if not group_indices:
+    if len(group_indices) == 0:
         return None
 
-    num_groups = len(group_indices)
+    # group_sizes: M_g per group — vectorized diff
+    group_sizes = (offsets_cpu[group_indices + 1] - offsets_cpu[group_indices]).to(
+        dtype=torch.int32, device=device
+    )
 
-    # group_sizes: M_g per group
-    group_sizes_list = [int(offsets_cpu[k + 1] - offsets_cpu[k]) for k in group_indices]
-    group_sizes = torch.tensor(group_sizes_list, dtype=torch.int32, device=device)
-
-    # map_offsets: start offset into in_map/out_map per group
-    map_offsets_list = [int(offsets_cpu[k]) for k in group_indices]
-    map_offsets_list.append(int(offsets_cpu[group_indices[-1] + 1]))
-    map_offsets = torch.tensor(map_offsets_list, dtype=torch.int32, device=device)
+    # map_offsets: start offset per group + end of last group
+    map_offsets = torch.cat(
+        [
+            offsets_cpu[group_indices],
+            offsets_cpu[group_indices[-1] + 1 : group_indices[-1] + 2],
+        ]
+    ).to(dtype=torch.int32, device=device)
 
     # tile_offsets: prefix sum of ceil(M_g / tile_m)
-    m_tiles = [(m + tile_m - 1) // tile_m for m in group_sizes_list]
-    tile_offsets_list = [0]
-    for mt in m_tiles:
-        tile_offsets_list.append(tile_offsets_list[-1] + mt)
-    total_m_tiles = tile_offsets_list[-1]
-    tile_offsets = torch.tensor(tile_offsets_list, dtype=torch.int32, device=device)
+    m_tiles = (group_sizes + tile_m - 1) // tile_m
+    tile_offsets = torch.zeros(len(group_indices) + 1, dtype=torch.int32, device=device)
+    torch.cumsum(m_tiles, dim=0, out=tile_offsets[1:])
+    total_m_tiles = int(tile_offsets[-1])
 
-    # weight_ptrs: device pointers to weight[k] for each group
-    weight_ptrs_list = [weight[k].data_ptr() for k in group_indices]
-    weight_ptrs = torch.tensor(weight_ptrs_list, dtype=torch.int64, device=device)
+    # weight_ptrs: stride arithmetic instead of per-element data_ptr()
+    base_ptr = weight.data_ptr()
+    stride_bytes = weight.stride(0) * weight.element_size()
+    weight_ptrs = (
+        torch.tensor(base_ptr, dtype=torch.int64, device=device)
+        + group_indices.to(dtype=torch.int64, device=device) * stride_bytes
+    )
 
     return (
         weight_ptrs,
         tile_offsets,
         group_sizes,
         map_offsets,
-        group_indices,
+        group_indices.tolist(),
         total_m_tiles,
     )
 
@@ -85,37 +91,32 @@ def _prepare_grouped_trAB_params(
     identity_map_index: Optional[int],
     device: torch.device,
 ) -> Optional[Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]]:
-    """Build device-side arrays for fused grouped TrAB GEMM (weight gradient).
+    """Build device-side arrays for fused grouped TrAB GEMM (vectorized).
 
     Returns (output_ptrs, gather_sizes, map_offsets, in_map, out_map)
     or None if no non-identity groups exist.
     """
-    offsets_cpu = kernel_map.offsets  # already on CPU
+    offsets_cpu = kernel_map.offsets  # [K+1] int32, on CPU
+    group_indices = _get_group_indices(offsets_cpu, identity_map_index)
 
-    group_indices = []
-    for k in range(len(offsets_cpu) - 1):
-        if k == identity_map_index:
-            continue
-        m_k = int(offsets_cpu[k + 1] - offsets_cpu[k])
-        if m_k > 0:
-            group_indices.append(k)
-
-    if not group_indices:
+    if len(group_indices) == 0:
         return None
 
-    # gather_sizes: number of matching pairs per group
-    gather_sizes_list = [
-        int(offsets_cpu[k + 1] - offsets_cpu[k]) for k in group_indices
-    ]
-    gather_sizes = torch.tensor(gather_sizes_list, dtype=torch.int32, device=device)
+    # gather_sizes: vectorized diff
+    gather_sizes = (offsets_cpu[group_indices + 1] - offsets_cpu[group_indices]).to(
+        dtype=torch.int32, device=device
+    )
 
-    # map_offsets: start offset into in_map/out_map per group
-    map_offsets_list = [int(offsets_cpu[k]) for k in group_indices]
-    map_offsets = torch.tensor(map_offsets_list, dtype=torch.int32, device=device)
+    # map_offsets: start offset per group
+    map_offsets = offsets_cpu[group_indices].to(dtype=torch.int32, device=device)
 
-    # output_ptrs: device pointers to grad_weight[k] for each group
-    output_ptrs_list = [grad_weight[k].data_ptr() for k in group_indices]
-    output_ptrs = torch.tensor(output_ptrs_list, dtype=torch.int64, device=device)
+    # output_ptrs: stride arithmetic
+    base_ptr = grad_weight.data_ptr()
+    stride_bytes = grad_weight.stride(0) * grad_weight.element_size()
+    output_ptrs = (
+        torch.tensor(base_ptr, dtype=torch.int64, device=device)
+        + group_indices.to(dtype=torch.int64, device=device) * stride_bytes
+    )
 
     in_map_dev = kernel_map.in_maps.to(device).int().contiguous()
     out_map_dev = kernel_map.out_maps.to(device).int().contiguous()
@@ -155,31 +156,23 @@ def _cute_grouped_forward_logic(
     _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = (
-        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
-    )
+    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
 
     # The C++ binding downcasts float32 inputs to float16 for the CuTe kernel.
     # Weight data is passed as raw device pointers, so we must cast weights
     # to the same compute dtype here to avoid type mismatch (root cause of
     # garbage output / NaN with float32 inputs).
-    compute_dtype = (
-        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
-    )
+    compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
     _weight_compute = _weight.to(dtype=compute_dtype).contiguous()
 
     # Initialize output
     if iden_idx is not None:
         output = torch.matmul(_in_features, _weight[iden_idx]).to(dtype=out_dtype)
     else:
-        output = torch.zeros(
-            num_out_coords, weight.shape[-1], device=device, dtype=out_dtype
-        )
+        output = torch.zeros(num_out_coords, weight.shape[-1], device=device, dtype=out_dtype)
 
     tile_m = _TILE_M_SIZES.get(mma_tile, 64)
-    params = _prepare_grouped_params(
-        kernel_map, _weight_compute, iden_idx, tile_m, device
-    )
+    params = _prepare_grouped_params(kernel_map, _weight_compute, iden_idx, tile_m, device)
 
     if params is None:
         return output
@@ -239,14 +232,10 @@ def _cute_grouped_backward_logic(
     _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = (
-        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
-    )
+    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
 
     # Match the C++ binding's float32→float16 downcast for weight pointers
-    compute_dtype = (
-        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
-    )
+    compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
 
     iden_idx = kernel_map.identity_map_index
     grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
@@ -254,9 +243,7 @@ def _cute_grouped_backward_logic(
     # --- Input gradient: fused grouped GEMM ---
     if requires_grad[0]:
         if iden_idx is not None:
-            grad_in_features = torch.matmul(_grad_output, _weight[iden_idx].T).to(
-                dtype=out_dtype
-            )
+            grad_in_features = torch.matmul(_grad_output, _weight[iden_idx].T).to(dtype=out_dtype)
         else:
             grad_in_features = torch.zeros(
                 _in_features.shape[0],
@@ -312,18 +299,12 @@ def _cute_grouped_backward_logic(
     # --- Weight gradient: fused grouped TrAB ---
     if requires_grad[1]:
         if iden_idx is not None:
-            grad_weight[iden_idx] = torch.matmul(_in_features.T, _grad_output).to(
-                dtype=out_dtype
-            )
+            grad_weight[iden_idx] = torch.matmul(_in_features.T, _grad_output).to(dtype=out_dtype)
 
-        trAB_params = _prepare_grouped_trAB_params(
-            kernel_map, grad_weight, iden_idx, device
-        )
+        trAB_params = _prepare_grouped_trAB_params(kernel_map, grad_weight, iden_idx, device)
 
         if trAB_params is not None:
-            output_ptrs, gather_sizes, map_offsets_t, in_map_dev, out_map_dev = (
-                trAB_params
-            )
+            output_ptrs, gather_sizes, map_offsets_t, in_map_dev, out_map_dev = trAB_params
             C_in = _in_features.shape[1]
             C_out = _grad_output.shape[1]
 
