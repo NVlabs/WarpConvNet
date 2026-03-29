@@ -23,13 +23,11 @@ def batch_index_from_offset(
     `offsets` has B+1 elements, defining B batches.
     Output has N = offsets[B] elements.
     """
-    assert (
-        len(offsets) > 1
-    ), "offsets must have at least two elements. [0, N] for batch size 1"
+    assert len(offsets) > 1, "offsets must have at least two elements. [0, N] for batch size 1"
     count = torch.diff(offsets)
-    batch = torch.arange(
-        len(count), device=offsets.device, dtype=torch.long
-    ).repeat_interleave(count)
+    batch = torch.arange(len(count), device=offsets.device, dtype=torch.long).repeat_interleave(
+        count
+    )
     return batch
 
 
@@ -55,9 +53,7 @@ def batch_index_from_indices(
         elif offsets.is_cuda:
             _dev = str(offsets.device)
         else:
-            raise ValueError(
-                "At least one tensor must be on CUDA if device is not specified."
-            )
+            raise ValueError("At least one tensor must be on CUDA if device is not specified.")
 
     if not indices.is_cuda or str(indices.device) != _dev:
         indices = indices.to(_dev)
@@ -74,9 +70,7 @@ def batch_index_from_indices(
         return torch.empty(0, dtype=torch.int32, device=_dev)
     if M_len == 0:  # No offsets defined, cannot determine batch
         raise ValueError("Offsets cannot be empty.")
-    if (
-        M_len == 1
-    ):  # Only one offset value, e.g. offsets=[limit]. All indices < limit are batch 0.
+    if M_len == 1:  # Only one offset value, e.g. offsets=[limit]. All indices < limit are batch 0.
         return torch.zeros(N_indices, dtype=torch.int32, device=_dev)
 
     batch_index_buffer = torch.empty(N_indices, dtype=torch.int32, device=_dev)
@@ -127,13 +121,20 @@ def offsets_from_batch_index_consecutive(
 @torch.inference_mode()
 def offsets_from_batch_index(
     batch_index: Int[Tensor, "N"],  # noqa: F821
+    num_batches: Optional[int] = None,
 ) -> Int[Tensor, "B + 1"]:  # noqa: F821
     """
     Given a list of batch indices [0, 0, 1, 1, 2, 2, 2, 3, 3],
     return the offsets [0, 2, 4, 7, 9].
+
+    Args:
+        batch_index: 1D tensor of batch indices.
+        num_batches: Total number of batches. If provided, ensures the returned
+            offsets have exactly num_batches + 1 elements, even when trailing
+            batches are empty.
     """
-    # Get unique elements
-    counts = torch.bincount(batch_index)
+    minlength = num_batches if num_batches is not None else 0
+    counts = torch.bincount(batch_index, minlength=minlength)
     counts = counts.cpu()
     # Get the offsets by cumsum
     offsets = torch.cat(
@@ -166,9 +167,7 @@ def offsets_from_offsets(
         else:
             # if no device is specified, use the device of sorted_indices
             batch_index = batch_index.to(sorted_indices.device)
-        _, batch_counts = torch.unique_consecutive(
-            batch_index[sorted_indices], return_counts=True
-        )
+        _, batch_counts = torch.unique_consecutive(batch_index[sorted_indices], return_counts=True)
         batch_counts = batch_counts.cpu()
         new_offsets = torch.cat((batch_counts.new_zeros(1), batch_counts.cumsum(dim=0)))
     return new_offsets
