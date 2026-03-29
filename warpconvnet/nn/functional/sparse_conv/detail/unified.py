@@ -261,26 +261,27 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 fwd_block_size,
             )
 
-        ctx.save_for_backward(in_features, weight)
-        ctx.kernel_map = kernel_map
-
-        # For SpatiallySparseConvConfig in backward if bwd_algo is AUTO
-        ctx.config_params_for_bwd = {
-            "num_in_coords": in_features.shape[0],
-            "num_out_coords": num_out_coords,
-            "in_channels": in_features.shape[1],
-            "out_channels": weight.shape[2],
-            "kernel_volume": weight.shape[0],
-            "implicit_matmul_fwd_block_size": chosen_fwd_params.get(
-                "fwd_block_size", fwd_block_size
-            ),  # from fwd decision
-            "implicit_matmul_bwd_block_size": bwd_block_size,  # from user input for bwd
-            "compute_dtype": compute_dtype,
-            "device": in_features.device,
-            "initial_dgrad_algo": dgrad_algo,
-            "initial_wgrad_algo": wgrad_algo,
-            "initial_bwd_block_size": bwd_block_size,
-        }
+        # Only save backward state when grad is enabled to avoid retaining
+        # features, weights, and kernel maps during inference (no_grad).
+        if torch.is_grad_enabled():
+            ctx.save_for_backward(in_features, weight)
+            ctx.kernel_map = kernel_map
+            ctx.config_params_for_bwd = {
+                "num_in_coords": in_features.shape[0],
+                "num_out_coords": num_out_coords,
+                "in_channels": in_features.shape[1],
+                "out_channels": weight.shape[2],
+                "kernel_volume": weight.shape[0],
+                "implicit_matmul_fwd_block_size": chosen_fwd_params.get(
+                    "fwd_block_size", fwd_block_size
+                ),
+                "implicit_matmul_bwd_block_size": bwd_block_size,
+                "compute_dtype": compute_dtype,
+                "device": in_features.device,
+                "initial_dgrad_algo": dgrad_algo,
+                "initial_wgrad_algo": wgrad_algo,
+                "initial_bwd_block_size": bwd_block_size,
+            }
 
         return output_feature_tensor
 
@@ -297,9 +298,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
     ]:
+        kernel_map = getattr(ctx, "kernel_map", None)
+        config_params = getattr(ctx, "config_params_for_bwd", None)
+        if kernel_map is None or config_params is None or len(ctx.saved_tensors) == 0:
+            # Forward ran without grad (e.g., frozen backbone with torch.no_grad())
+            return _pad_tuple(None, None, 11)
+
         in_features, weight = ctx.saved_tensors
-        kernel_map = ctx.kernel_map
-        config_params = ctx.config_params_for_bwd
         num_out_coords = config_params["num_out_coords"]
         compute_dtype = config_params["compute_dtype"]
         device = config_params["device"]
