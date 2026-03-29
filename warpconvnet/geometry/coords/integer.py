@@ -22,18 +22,14 @@ from warpconvnet.utils.ntuple import ntuple
 
 class IntCoords(Coords):
     voxel_size: float
-    voxel_origin: Float[Tensor, "D"]  # noqa: F821
     tensor_stride: Optional[Tuple[int, ...]]
     _hashmap: Optional[TorchHashTable]
 
     def __init__(
         self,
-        batched_tensor: (
-            List[Float[Tensor, "N D"]] | Float[Tensor, "N D"]
-        ),  # noqa: F722,F821
+        batched_tensor: List[Float[Tensor, "N D"]] | Float[Tensor, "N D"],  # noqa: F722,F821
         offsets: Optional[Union[List[int], Int[Tensor, "B+1"]]] = None,
         voxel_size: Optional[float] = None,
-        voxel_origin: Optional[Float[Tensor, "D"]] = None,  # noqa: F821
         tensor_stride: Optional[Union[int, Tuple[int, ...]]] = None,
         device: Optional[str] = None,
     ):
@@ -43,13 +39,10 @@ class IntCoords(Coords):
             batched_tensor: provides the coordinates of the points
             offsets: provides the offsets for each batch
             voxel_size: provides the size of the voxel for converting the coordinates to points
-            voxel_origin: provides the origin of the voxel for converting the coordinates to points
             tensor_stride: provides the stride of the tensor for converting the coordinates to points
         """
         if isinstance(batched_tensor, list):
-            assert (
-                offsets is None
-            ), "If batched_tensors is a list, offsets must be None."
+            assert offsets is None, "If batched_tensors is a list, offsets must be None."
             batched_tensor, offsets, _ = list_to_cat_tensor(batched_tensor)
 
         if isinstance(offsets, list):
@@ -61,12 +54,9 @@ class IntCoords(Coords):
         self.offsets = offsets.cpu()
         self.batched_tensor = batched_tensor
         self.voxel_size = voxel_size
-        self.voxel_origin = voxel_origin
         # Convert the tensor stride to ntuple
         if tensor_stride is not None:
-            self.tensor_stride = ntuple(
-                tensor_stride, ndim=self.batched_tensor.shape[1]
-            )
+            self.tensor_stride = ntuple(tensor_stride, ndim=self.batched_tensor.shape[1])
         else:
             self.tensor_stride = None
 
@@ -88,13 +78,23 @@ class IntCoords(Coords):
             order=ordering,
             return_perm=True,
         )
-        return self.__class__(self.batched_tensor[result.perm], self.offsets)
+        return self.__class__(
+            self.batched_tensor[result.perm],
+            self.offsets,
+            voxel_size=self.voxel_size,
+            tensor_stride=self.tensor_stride,
+        )
 
     def unique(self) -> "IntCoords":
         unique_indices, batch_offsets = voxel_downsample_random_indices(
-            self.batched_tensor, self.offsets, self.voxel_size, self.voxel_origin
+            self.batched_tensor, self.offsets, self.voxel_size
         )
-        return self.__class__(self.batched_tensor[unique_indices], batch_offsets)
+        return self.__class__(
+            self.batched_tensor[unique_indices],
+            batch_offsets,
+            voxel_size=self.voxel_size,
+            tensor_stride=self.tensor_stride,
+        )
 
     def prune(
         self,
@@ -109,18 +109,14 @@ class IntCoords(Coords):
         Returns:
             New IntCoords instance with pruned coordinates.
         """
-        assert (
-            mask.shape[0] == self.batched_tensor.shape[0]
-        ), "Mask must match tensor shape"
+        assert mask.shape[0] == self.batched_tensor.shape[0], "Mask must match tensor shape"
 
         mask = mask.to(self.batched_tensor.device)
         if mask.dtype != torch.bool:
             mask = mask.bool()
 
         # Get original batch indices
-        batch_indices = batch_index_from_offset(self.offsets).to(
-            self.batched_tensor.device
-        )
+        batch_indices = batch_index_from_offset(self.offsets).to(self.batched_tensor.device)
 
         # Filter tensor and batch indices
         new_tensor = self.batched_tensor[mask]
@@ -144,7 +140,6 @@ class IntCoords(Coords):
             new_tensor,
             new_offsets,
             voxel_size=self.voxel_size,
-            voxel_origin=self.voxel_origin,
             tensor_stride=self.tensor_stride,
             device=self.batched_tensor.device,
         )
@@ -173,9 +168,7 @@ class IntCoords(Coords):
         _kernel_size = ntuple(kernel_size, ndim=ndim)
         _dilation = ntuple(dilation, ndim=ndim)
 
-        batch_indexed_coords = batch_indexed_coordinates(
-            self.batched_tensor, self.offsets
-        )
+        batch_indexed_coords = batch_indexed_coordinates(self.batched_tensor, self.offsets)
 
         # Call expand_coords
         out_coords, out_offsets = expand_coords(
@@ -192,7 +185,6 @@ class IntCoords(Coords):
             new_batched_tensor,
             out_offsets_cpu,
             voxel_size=self.voxel_size,
-            voxel_origin=self.voxel_origin,
             tensor_stride=self.tensor_stride,
             device=self.batched_tensor.device,
         )
