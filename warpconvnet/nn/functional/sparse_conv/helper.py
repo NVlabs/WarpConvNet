@@ -50,7 +50,6 @@ def _intcoords_from_batch_indexed(
         batch_indexed_coords[:, 1:],
         offsets_cpu,
         voxel_size=reference.voxel_size,
-        voxel_origin=reference.voxel_origin,
         tensor_stride=reference.tensor_stride,
         device=reference.batched_tensor.device,
     )
