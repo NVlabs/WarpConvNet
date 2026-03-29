@@ -136,36 +136,37 @@ class TestMemoryLeak:
             growth_mb < 500
         ), f"Memory grew by {growth_mb:.1f}MB over 100 varying-size iterations (expected <500MB)"
 
-    def test_mask_data_cache_bounded(self, device):
-        """Verify _MASK_DATA_CACHE does not grow beyond max size."""
-        from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import (
-            _MASK_DATA_CACHE,
-            _MASK_DATA_CACHE_MAX_SIZE,
-        )
-
+    def test_mask_data_lives_on_kernel_map(self, device):
+        """Verify mask data is cached on IntSearchResult and freed with it."""
         C_in, C_out = 32, 32
         conv = SpatiallySparseConv(C_in, C_out, kernel_size=3, bias=False).to(
             device, torch.float16
         )
 
-        initial_cache_size = len(_MASK_DATA_CACHE)
+        # Run with many different N values — mask data lives on each
+        # kernel_map and is freed when the kernel_map is garbage collected.
+        torch.cuda.reset_peak_memory_stats(device)
+        baseline_mb = torch.cuda.memory_allocated(device) / 1e6
 
-        # Run with many different N values to create many unique cache keys
         for i in range(50):
-            N = 1000 + i * 200  # 50 different N values
+            N = 1000 + i * 200
             voxels = _make_random_voxels(N, C_in, device)
             feats = voxels.feature_tensor.requires_grad_(True)
             out = conv(voxels)
             out.feature_tensor.sum().backward()
             del out, voxels, feats
 
-        cache_size = len(_MASK_DATA_CACHE)
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        final_mb = torch.cuda.memory_allocated(device) / 1e6
+        growth_mb = final_mb - baseline_mb
         print(
-            f"Cache size after 50 unique configs: {cache_size} (max={_MASK_DATA_CACHE_MAX_SIZE})"
+            f"Mask-on-kernel-map: baseline={baseline_mb:.1f}MB, final={final_mb:.1f}MB, growth={growth_mb:.1f}MB"
         )
-        assert (
-            cache_size <= _MASK_DATA_CACHE_MAX_SIZE
-        ), f"Cache grew to {cache_size} entries, exceeding max of {_MASK_DATA_CACHE_MAX_SIZE}"
+        # No global cache means memory is bounded by live kernel_maps only
+        assert growth_mb < 200, f"Memory grew by {growth_mb:.1f}MB (expected <200MB)"
 
     def test_ctx_kernel_map_released(self, device):
         """Verify kernel_map is released after backward."""

@@ -102,11 +102,11 @@ def _build_reverse_mask_data(
     pair_table_2d = pair_table.reshape(K, N_out)
     reverse_pair_table = torch.full((K, N_in), -1, dtype=torch.int32, device=device)
 
-    for k in range(K):
-        valid = pair_table_2d[k] >= 0
-        out_rows = torch.where(valid)[0].int()
-        in_rows = pair_table_2d[k, valid].long()
-        reverse_pair_table[k].scatter_(0, in_rows, out_rows)
+    # Vectorized reverse: scatter all K offsets at once
+    valid = pair_table_2d >= 0  # [K, N_out] bool
+    k_idx, out_idx = torch.where(valid)  # flat indices of valid entries
+    in_idx = pair_table_2d[k_idx, out_idx].long()  # corresponding input rows
+    reverse_pair_table[k_idx, in_idx] = out_idx.int()
 
     reverse_flat = reverse_pair_table.reshape(-1).contiguous()
     reverse_pair_mask, reverse_mask_argsort = _build_mask_and_argsort(
@@ -115,41 +115,15 @@ def _build_reverse_mask_data(
     return reverse_flat, reverse_pair_mask, reverse_mask_argsort
 
 
-# Cache mask data by content hash of kernel_map offsets.
-# Keys: (offsets_tuple, num_out_coords) for forward data
-#        (offsets_tuple, num_out_coords, "reverse", num_in_coords) for reverse data
-#
-# Bounded to prevent GPU OOM from variable-size training batches.
-# Each entry holds ~11-22MB of GPU tensors (pair_table + mask + argsort).
-_MASK_DATA_CACHE = {}
-_MASK_DATA_CACHE_MAX_SIZE = 16  # Max entries (forward + reverse combined)
-
-
-def _content_key(kernel_map: IntSearchResult, num_out_coords: int):
-    """Content-based cache key from kernel_map offsets (28 ints for K=27)."""
-    offsets = kernel_map.offsets
-    if offsets.is_cuda:
-        offsets = offsets.cpu()
-    return (tuple(offsets.tolist()), num_out_coords)
-
-
-def _evict_if_needed():
-    """Evict oldest entries from mask data cache if over limit."""
-    while len(_MASK_DATA_CACHE) >= _MASK_DATA_CACHE_MAX_SIZE:
-        _MASK_DATA_CACHE.pop(next(iter(_MASK_DATA_CACHE)))
-
-
 def _get_mask_data(
     kernel_map: IntSearchResult,
     num_out_coords: int,
     device: torch.device,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """Get or compute cached forward mask data for a kernel_map."""
-    cache_key = _content_key(kernel_map, num_out_coords)
-    if cache_key not in _MASK_DATA_CACHE:
-        _evict_if_needed()
-        _MASK_DATA_CACHE[cache_key] = _kernel_map_to_mask_data(kernel_map, num_out_coords, device)
-    return _MASK_DATA_CACHE[cache_key]
+    """Get or compute mask data, cached on the kernel_map object."""
+    if kernel_map._mask_data is None:
+        kernel_map._mask_data = _kernel_map_to_mask_data(kernel_map, num_out_coords, device)
+    return kernel_map._mask_data
 
 
 def _get_reverse_mask_data(
@@ -158,17 +132,14 @@ def _get_reverse_mask_data(
     num_out_coords: int,
     device: torch.device,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """Get or compute cached reverse mask data for atomicAdd-free dgrad."""
-    K = len(kernel_map)
-    base_key = _content_key(kernel_map, num_out_coords)
-    cache_key = (*base_key, "reverse", num_in_coords)
-    if cache_key not in _MASK_DATA_CACHE:
-        _evict_if_needed()
+    """Get or compute reverse mask data, cached on the kernel_map object."""
+    if kernel_map._reverse_mask_data is None:
+        K = len(kernel_map)
         fwd_pair_table, _, _ = _get_mask_data(kernel_map, num_out_coords, device)
-        _MASK_DATA_CACHE[cache_key] = _build_reverse_mask_data(
+        kernel_map._reverse_mask_data = _build_reverse_mask_data(
             fwd_pair_table, num_in_coords, num_out_coords, K, device
         )
-    return _MASK_DATA_CACHE[cache_key]
+    return kernel_map._reverse_mask_data
 
 
 def _mask_implicit_gemm_forward_logic(

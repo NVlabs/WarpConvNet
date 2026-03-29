@@ -65,17 +65,25 @@ FP32_TOL = 0.001
 FP16_TOL = 0.02
 DEVICE = torch.device("cuda")
 
+
 # Detect broken fp16 cuBLAS. torch 2.10+cu128 has a bug where
 # cublasGemmEx with CUDA_R_16F returns CUBLAS_STATUS_INVALID_VALUE.
 # We detect via a subprocess to avoid poisoning our own CUDA context.
 def _check_fp16_cublas_broken():
-    import subprocess, sys
+    import subprocess
+    import sys
+
     result = subprocess.run(
-        [sys.executable, "-c",
-         "import torch; a=torch.ones(2,2,device='cuda',dtype=torch.float16); print((a@a).sum().item())"],
-        capture_output=True, timeout=30,
+        [
+            sys.executable,
+            "-c",
+            "import torch; a=torch.ones(2,2,device='cuda',dtype=torch.float16); print((a@a).sum().item())",
+        ],
+        capture_output=True,
+        timeout=30,
     )
     return result.returncode != 0
+
 
 _FP16_CUBLAS_BROKEN = _check_fp16_cublas_broken()
 
@@ -87,9 +95,7 @@ _skip_fp16_cublas = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _clear_cuda_state():
-    """Clear CUDA error state and mask data cache before each test."""
-    from warpconvnet.nn.functional.sparse_conv.detail import mask_gemm
-    mask_gemm._MASK_DATA_CACHE.clear()
+    """Clear CUDA error state before each test."""
     for _ in range(2):
         try:
             torch.cuda.synchronize()
@@ -106,9 +112,7 @@ def _clear_cuda_state():
 def _make_test_data(N, C_in, C_out, stride=(1, 1, 1), seed=42):
     """Create test voxels, kernel map, weight, and grad_output."""
     torch.manual_seed(seed)
-    coords = torch.randint(
-        0, max(int(N**0.33 * 5), 10), (N, 3), device="cuda", dtype=torch.int32
-    )
+    coords = torch.randint(0, max(int(N**0.33 * 5), 10), (N, 3), device="cuda", dtype=torch.int32)
     feats = torch.randn(N, C_in, device="cuda", dtype=torch.float32)
     offsets = torch.tensor([0, N], dtype=torch.int32, device="cuda")
     voxels = Voxels(
@@ -177,9 +181,7 @@ def conv_data(request):
     N, C_in, C_out, stride, _ = request.param
     in_feats, weight, grad_out, kmap, N_out = _make_test_data(N, C_in, C_out, stride)
     # Compute reference
-    fwd_ref = _explicit_gemm_forward_logic(
-        in_feats, weight, kmap, N_out, torch.float32
-    )
+    fwd_ref = _explicit_gemm_forward_logic(in_feats, weight, kmap, N_out, torch.float32)
     gi_ref, gw_ref = _explicit_gemm_backward_logic(
         grad_out, in_feats, weight, kmap, torch.float32, DEVICE
     )
@@ -204,24 +206,42 @@ class TestImplicitGemm:
     def test_forward(self, conv_data):
         d = conv_data
         fwd = _implicit_gemm_forward_logic(
-            d["in_feats"], d["weight"], d["kmap"], d["N_out"],
-            torch.float32, fwd_block_size=16,
+            d["in_feats"],
+            d["weight"],
+            d["kmap"],
+            d["N_out"],
+            torch.float32,
+            fwd_block_size=16,
         )
         _assert_close("implicit_gemm fwd", fwd, d["fwd_ref"], FP32_TOL)
 
     def test_dgrad(self, conv_data):
         d = conv_data
         gi, _ = _implicit_gemm_backward_logic(
-            d["grad_out"], d["in_feats"], d["weight"], d["kmap"],
-            d["N_out"], 16, 256, 4, torch.float32,
+            d["grad_out"],
+            d["in_feats"],
+            d["weight"],
+            d["kmap"],
+            d["N_out"],
+            16,
+            256,
+            4,
+            torch.float32,
         )
         _assert_close("implicit_gemm dgrad", gi, d["gi_ref"], FP32_TOL)
 
     def test_wgrad(self, conv_data):
         d = conv_data
         _, gw = _implicit_gemm_backward_logic(
-            d["grad_out"], d["in_feats"], d["weight"], d["kmap"],
-            d["N_out"], 16, 256, 4, torch.float32,
+            d["grad_out"],
+            d["in_feats"],
+            d["weight"],
+            d["kmap"],
+            d["N_out"],
+            16,
+            256,
+            4,
+            torch.float32,
         )
         _assert_close("implicit_gemm wgrad", gw, d["gw_ref"], FP32_TOL)
 
@@ -230,24 +250,45 @@ class TestImplicitGemmGrouped:
     def test_forward(self, conv_data):
         d = conv_data
         fwd = _implicit_gemm_forward_grouped(
-            d["in_feats"], d["weight"], d["kmap"], d["N_out"],
-            torch.float32, fwd_block_size=16, saturation_m=5000,
+            d["in_feats"],
+            d["weight"],
+            d["kmap"],
+            d["N_out"],
+            torch.float32,
+            fwd_block_size=16,
+            saturation_m=5000,
         )
         _assert_close("implicit_grouped fwd", fwd, d["fwd_ref"], FP32_TOL)
 
     def test_dgrad(self, conv_data):
         d = conv_data
         gi, _ = _implicit_gemm_backward_grouped(
-            d["grad_out"], d["in_feats"], d["weight"], d["kmap"],
-            d["N_out"], 16, 256, 4, torch.float32, saturation_m=5000,
+            d["grad_out"],
+            d["in_feats"],
+            d["weight"],
+            d["kmap"],
+            d["N_out"],
+            16,
+            256,
+            4,
+            torch.float32,
+            saturation_m=5000,
         )
         _assert_close("implicit_grouped dgrad", gi, d["gi_ref"], FP32_TOL)
 
     def test_wgrad(self, conv_data):
         d = conv_data
         _, gw = _implicit_gemm_backward_grouped(
-            d["grad_out"], d["in_feats"], d["weight"], d["kmap"],
-            d["N_out"], 16, 256, 4, torch.float32, saturation_m=5000,
+            d["grad_out"],
+            d["in_feats"],
+            d["weight"],
+            d["kmap"],
+            d["N_out"],
+            16,
+            256,
+            4,
+            torch.float32,
+            saturation_m=5000,
         )
         _assert_close("implicit_grouped wgrad", gw, d["gw_ref"], FP32_TOL)
 
@@ -263,7 +304,10 @@ class TestCutlassImplicitGemm:
         d = conv_data
         result = _skip_if_cublas_error(
             _cutlass_implicit_gemm_forward_logic,
-            d["in_feats"].half(), d["weight"].half(), d["kmap"], d["N_out"],
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
         )
         if isinstance(result, int):
             pytest.skip(f"cutlass unsupported (status={result})")
@@ -273,8 +317,11 @@ class TestCutlassImplicitGemm:
         d = conv_data
         result = _skip_if_cublas_error(
             _cutlass_implicit_gemm_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], device=DEVICE,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            device=DEVICE,
         )
         if isinstance(result[0], int):
             pytest.skip(f"cutlass unsupported (status={result[0]})")
@@ -284,8 +331,11 @@ class TestCutlassImplicitGemm:
         d = conv_data
         result = _skip_if_cublas_error(
             _cutlass_implicit_gemm_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], device=DEVICE,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            device=DEVICE,
         )
         if isinstance(result[0], int):
             pytest.skip(f"cutlass unsupported (status={result[0]})")
@@ -304,7 +354,10 @@ class TestCuteImplicitGemm:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_implicit_gemm_forward_logic,
-            d["in_feats"].half(), d["weight"].half(), d["kmap"], d["N_out"],
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
         )
         if isinstance(result, int):
             pytest.skip(f"cute unsupported (status={result})")
@@ -314,8 +367,11 @@ class TestCuteImplicitGemm:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_implicit_gemm_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], device=DEVICE,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            device=DEVICE,
         )
         if isinstance(result[0], int):
             pytest.skip(f"cute unsupported (status={result[0]})")
@@ -336,7 +392,10 @@ class TestCuteGrouped:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_grouped_forward_logic,
-            d["in_feats"].half(), d["weight"].half(), d["kmap"], d["N_out"],
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
             mma_tile=mma_tile,
         )
         if isinstance(result, int):
@@ -347,8 +406,13 @@ class TestCuteGrouped:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_grouped_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], requires_grad=(True, True), device=DEVICE, mma_tile=3,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            requires_grad=(True, True),
+            device=DEVICE,
+            mma_tile=3,
         )
         if isinstance(result[0], int):
             pytest.skip(f"cute_grouped unsupported (status={result[0]})")
@@ -358,8 +422,13 @@ class TestCuteGrouped:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_grouped_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], requires_grad=(True, True), device=DEVICE, mma_tile=3,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            requires_grad=(True, True),
+            device=DEVICE,
+            mma_tile=3,
         )
         if isinstance(result[0], int):
             pytest.skip(f"cute_grouped unsupported (status={result[0]})")
@@ -378,7 +447,10 @@ class TestCuteSM90:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_implicit_gemm_sm90_forward_logic,
-            d["in_feats"].half(), d["weight"].half(), d["kmap"], d["N_out"],
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
             mma_tile=100,
         )
         if isinstance(result, int):
@@ -389,8 +461,13 @@ class TestCuteSM90:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_implicit_gemm_sm90_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], requires_grad=(True, True), device=DEVICE, mma_tile=100,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            requires_grad=(True, True),
+            device=DEVICE,
+            mma_tile=100,
         )
         if isinstance(result[0], int):
             pytest.skip(f"sm90 unsupported (status={result[0]})")
@@ -405,7 +482,10 @@ class TestCuteGroupedSM90:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_grouped_sm90_forward_logic,
-            d["in_feats"].half(), d["weight"].half(), d["kmap"], d["N_out"],
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
             mma_tile=100,
         )
         if isinstance(result, int):
@@ -416,8 +496,13 @@ class TestCuteGroupedSM90:
         d = conv_data
         result = _skip_if_cublas_error(
             _cute_grouped_sm90_backward_logic,
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], requires_grad=(True, True), device=DEVICE, mma_tile=100,
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            requires_grad=(True, True),
+            device=DEVICE,
+            mma_tile=100,
         )
         if isinstance(result[0], int):
             pytest.skip(f"sm90 grouped unsupported (status={result[0]})")
@@ -439,8 +524,12 @@ class TestMaskImplicitGemmCuTe:
     def test_forward(self, conv_data, mma_tile):
         d = conv_data
         fwd = _mask_implicit_gemm_forward_logic(
-            d["in_feats"].half(), d["weight"].half(), d["kmap"], d["N_out"],
-            compute_dtype=torch.float16, mma_tile=mma_tile,
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
+            compute_dtype=torch.float16,
+            mma_tile=mma_tile,
         )
         _assert_close(f"mask_fwd tile={mma_tile}", fwd, d["fwd_ref"], FP16_TOL)
 
@@ -449,9 +538,13 @@ class TestMaskImplicitGemmCuTe:
         """Dgrad via reverse pair_table + forward kernel (no atomicAdd)."""
         d = conv_data
         gi, _ = _mask_implicit_gemm_backward_logic(
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], d["N_out"],
-            compute_dtype=torch.float16, needs_input_grad=(True, False),
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
+            compute_dtype=torch.float16,
+            needs_input_grad=(True, False),
             mma_tile=mma_tile,
         )
         _assert_close(f"mask_dgrad_reverse tile={mma_tile}", gi, d["gi_ref"], FP16_TOL)
@@ -459,9 +552,13 @@ class TestMaskImplicitGemmCuTe:
     def test_wgrad(self, conv_data):
         d = conv_data
         _, gw = _mask_implicit_gemm_backward_logic(
-            d["grad_out"].half(), d["in_feats"].half(), d["weight"].half(),
-            d["kmap"], d["N_out"],
-            compute_dtype=torch.float16, needs_input_grad=(False, True),
+            d["grad_out"].half(),
+            d["in_feats"].half(),
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
+            compute_dtype=torch.float16,
+            needs_input_grad=(False, True),
         )
         _assert_close("mask_wgrad", gw, d["gw_ref"], FP16_TOL)
 
@@ -478,13 +575,17 @@ class TestMaskImplicitGemmCuTe:
 class TestMaskImplicitGemmSIMT:
     def test_forward(self, conv_data):
         d = conv_data
-        pair_table, pair_mask, mask_argsort = _get_mask_data(
-            d["kmap"], d["N_out"], DEVICE
-        )
+        pair_table, pair_mask, mask_argsort = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
         output = torch.zeros(d["N_out"], d["weight"].shape[2], dtype=torch.float16, device=DEVICE)
         status = _C.gemm.mask_implicit_gemm_fwd(
-            d["in_feats"].half(), d["weight"].half(), output,
-            pair_table, pair_mask, mask_argsort, 27, 16,
+            d["in_feats"].half(),
+            d["weight"].half(),
+            output,
+            pair_table,
+            pair_mask,
+            mask_argsort,
+            27,
+            16,
         )
         assert status == 0, f"mask_fwd_SIMT failed: {status}"
         _assert_close("mask_fwd_SIMT", output, d["fwd_ref"], FP16_TOL)
@@ -493,13 +594,17 @@ class TestMaskImplicitGemmSIMT:
         d = conv_data
         N_in = d["in_feats"].shape[0]
         C_in = d["in_feats"].shape[1]
-        pair_table, pair_mask, mask_argsort = _get_mask_data(
-            d["kmap"], d["N_out"], DEVICE
-        )
+        pair_table, pair_mask, mask_argsort = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
         gi = torch.zeros(N_in, C_in, dtype=torch.float16, device=DEVICE)
         status = _C.gemm.mask_implicit_gemm_bwd_dgrad(
-            d["grad_out"].half(), d["weight"].half(), gi,
-            pair_table, pair_mask, mask_argsort, 27, 16,
+            d["grad_out"].half(),
+            d["weight"].half(),
+            gi,
+            pair_table,
+            pair_mask,
+            mask_argsort,
+            27,
+            16,
         )
         assert status == 0, f"mask_dgrad_SIMT failed: {status}"
         _assert_close("mask_dgrad_SIMT", gi, d["gi_ref"], FP16_TOL)
@@ -507,13 +612,16 @@ class TestMaskImplicitGemmSIMT:
     def test_wgrad(self, conv_data):
         d = conv_data
         K, C_in, C_out = d["weight"].shape
-        pair_table, pair_mask, _ = _get_mask_data(
-            d["kmap"], d["N_out"], DEVICE
-        )
+        pair_table, pair_mask, _ = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
         gw = torch.zeros(K, C_in, C_out, dtype=torch.float16, device=DEVICE)
         status = _C.gemm.mask_implicit_gemm_bwd_wgrad(
-            d["in_feats"].half(), d["grad_out"].half(), gw,
-            pair_table, pair_mask, K, 16,
+            d["in_feats"].half(),
+            d["grad_out"].half(),
+            gw,
+            pair_table,
+            pair_mask,
+            K,
+            16,
         )
         assert status == 0, f"mask_wgrad_SIMT failed: {status}"
         _assert_close("mask_wgrad_SIMT", gw, d["gw_ref"], FP16_TOL)
@@ -533,14 +641,19 @@ class TestMaskDgradAtomic:
         d = conv_data
         N_in = d["in_feats"].shape[0]
         C_in = d["in_feats"].shape[1]
-        pair_table, pair_mask, mask_argsort = _get_mask_data(
-            d["kmap"], d["N_out"], DEVICE
-        )
+        pair_table, pair_mask, mask_argsort = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
         w_T = d["weight"].half().transpose(1, 2).contiguous()
         gi = torch.zeros(N_in, C_in, dtype=torch.float16, device=DEVICE)
         status = _C.gemm.cute_gemm_mask_dgrad(
-            d["grad_out"].half(), w_T, gi,
-            pair_table, pair_mask, mask_argsort, 27, 3, 1.0,
+            d["grad_out"].half(),
+            w_T,
+            gi,
+            pair_table,
+            pair_mask,
+            mask_argsort,
+            27,
+            3,
+            1.0,
         )
         if status != 0:
             pytest.skip(f"cute_gemm_mask_dgrad unsupported (status={status})")
