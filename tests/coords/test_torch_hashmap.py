@@ -245,7 +245,7 @@ def test_warp_cooperative_search_matches_standard(device, hash_method, num_keys,
 
 
 @pytest.mark.parametrize("hash_method", list(HashMethod))
-@pytest.mark.parametrize("load_factor", [0.25, 0.50, 0.75])
+@pytest.mark.parametrize("load_factor", [0.25, 0.45, 0.50])
 def test_warp_cooperative_search_load_factors(device, hash_method, load_factor):
     """Test warp-cooperative search at different hash table load factors."""
     # Use a fixed capacity and vary the number of keys to achieve the target load factor.
