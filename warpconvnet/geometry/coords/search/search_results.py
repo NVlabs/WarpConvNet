@@ -79,6 +79,9 @@ class IntSearchResult:
         # Built on first use, then reused for all subsequent calls.
         self._mask_data: Optional[Tuple[Tensor, Tensor, Tensor]] = None
         self._reverse_mask_data: Optional[Tuple[Tensor, Tensor, Tensor]] = None
+        # Lazy-computed grouped GEMM params (depend only on offsets).
+        # Dict keyed by (tile_m,) for AB params or "trAB" for AtB params.
+        self._grouped_params_cache: dict = {}
 
     @torch.no_grad()
     def __getitem__(self, idx: int) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821

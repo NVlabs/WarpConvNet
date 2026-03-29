@@ -107,9 +107,7 @@ def _execute_forward(
             )
         return result
     elif algo == "cute_implicit_gemm":
-        result = _cute_implicit_gemm_forward_logic(
-            in_features, weight, kernel_map, num_out_coords
-        )
+        result = _cute_implicit_gemm_forward_logic(in_features, weight, kernel_map, num_out_coords)
         if isinstance(result, int) and result != 0:
             raise RuntimeError(
                 f"cute fwd error: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
@@ -215,8 +213,13 @@ def _execute_backward(
     compute_dtype: Optional[torch.dtype],
     device: torch.device,
     needs_input_grad: Tuple[bool, ...],
+    weight_T: Optional[Tensor] = None,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Dispatch backward pass to the selected algorithm.
+
+    Args:
+        weight_T: Pre-computed weight.transpose(1,2).contiguous() to avoid
+            redundant copies when dgrad and wgrad are dispatched separately.
 
     Returns (grad_in_features, grad_weight). Either can be None if the
     corresponding needs_input_grad flag is False AND the algorithm supports it.
@@ -312,6 +315,7 @@ def _execute_backward(
             requires_grad=(needs_input_grad[0], needs_input_grad[1]),
             device=device,
             mma_tile=params.get("mma_tile", 3),
+            weight_T=weight_T,
         )
         if isinstance(result[0], int) and result[0] != 0:
             raise RuntimeError(
@@ -360,6 +364,7 @@ def _execute_backward(
             needs_input_grad=needs_input_grad,
             block_size=params.get("block_size", 16),
             mma_tile=params.get("mma_tile", 3),
+            weight_T=weight_T,
         )
     else:
         raise ValueError(f"Unsupported backward algorithm: {algo}")
