@@ -3,12 +3,14 @@
 
 Usage:
     python scripts/generate_index.py <wheel_dir> <output_dir>
+    python scripts/generate_index.py <wheel_dir> <output_dir> --base-url <url>
 
-Creates:
-    <output_dir>/warpconvnet/index.html   - package index with links to all wheels
-    <output_dir>/warpconvnet/<wheel>.whl   - copies of the wheel files
+Without --base-url: copies wheels into output_dir and links to local files.
+With --base-url: links point to <url>/<wheel_name> (e.g. GitHub Release assets).
+                 No wheel files are copied — only HTML index is generated.
 """
 
+import argparse
 import hashlib
 import shutil
 import sys
@@ -23,7 +25,7 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def generate_index(wheel_dir: Path, output_dir: Path) -> None:
+def generate_index(wheel_dir: Path, output_dir: Path, base_url: str = "") -> None:
     pkg_dir = output_dir / "warpconvnet"
     pkg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -34,14 +36,18 @@ def generate_index(wheel_dir: Path, output_dir: Path) -> None:
 
     links = []
     for whl in wheels:
-        dest = pkg_dir / whl.name
-        shutil.copy2(whl, dest)
-        digest = sha256(dest)
-        links.append(f'    <a href="{whl.name}#sha256={digest}">{whl.name}</a>')
+        digest = sha256(whl)
+        if base_url:
+            # Link to external URL (e.g. GitHub Release asset)
+            url = f"{base_url.rstrip('/')}/{whl.name}"
+        else:
+            # Copy wheel locally and link to it
+            shutil.copy2(whl, pkg_dir / whl.name)
+            url = whl.name
+        links.append(f'    <a href="{url}#sha256={digest}">{whl.name}</a>')
         print(f"  {whl.name}")
 
-    index_html = "<!DOCTYPE html>\n" "<html><body>\n" + "\n".join(links) + "\n</body></html>\n"
-
+    index_html = "<!DOCTYPE html>\n<html><body>\n" + "\n".join(links) + "\n</body></html>\n"
     (pkg_dir / "index.html").write_text(index_html)
 
     # Root index pointing to the package
@@ -53,12 +59,18 @@ def generate_index(wheel_dir: Path, output_dir: Path) -> None:
     )
     (output_dir / "index.html").write_text(root_index)
 
-    print(f"\nGenerated index with {len(wheels)} wheels at {pkg_dir / 'index.html'}")
+    mode = f"linking to {base_url}" if base_url else "with local copies"
+    print(f"\nGenerated index with {len(wheels)} wheels ({mode})")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <wheel_dir> <output_dir>", file=sys.stderr)
-        sys.exit(1)
-
-    generate_index(Path(sys.argv[1]), Path(sys.argv[2]))
+    parser = argparse.ArgumentParser(description="Generate PEP 503 wheel index")
+    parser.add_argument("wheel_dir", type=Path, help="Directory containing .whl files")
+    parser.add_argument("output_dir", type=Path, help="Output directory for index")
+    parser.add_argument(
+        "--base-url",
+        default="",
+        help="Base URL for wheel links (e.g. GitHub Release download URL)",
+    )
+    args = parser.parse_args()
+    generate_index(args.wheel_dir, args.output_dir, args.base_url)
