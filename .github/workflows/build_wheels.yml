@@ -112,6 +112,10 @@ jobs:
       - name: Build sdist
         run: |
           pip install build setuptools-scm
+          # Strip local version segment (+g1234567) — PyPI rejects local identifiers
+          BASE_VERSION=$(python -m setuptools_scm | cut -d'+' -f1)
+          export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}"
+          echo "Building sdist version: ${BASE_VERSION}"
           python -m build --sdist
 
       - uses: actions/upload-artifact@v4
@@ -161,9 +165,7 @@ jobs:
     name: Publish sdist to PyPI
     needs: build_sdist
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
