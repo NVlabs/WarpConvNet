@@ -261,9 +261,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 fwd_block_size,
             )
 
-        # Only save backward state when grad is enabled to avoid retaining
-        # features, weights, and kernel maps during inference (no_grad).
-        if torch.is_grad_enabled():
+        # Save backward state when any input requires gradients.
+        # Note: torch.is_grad_enabled() is False inside Function.forward()
+        # by design (PyTorch >= 2.1), so we check needs_input_grad instead.
+        if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
             ctx.save_for_backward(in_features, weight)
             ctx.kernel_map = kernel_map
             ctx.config_params_for_bwd = {
