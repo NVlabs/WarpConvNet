@@ -239,10 +239,15 @@ def spatially_sparse_conv(
             o < i for o, i in zip(out_tensor_stride, in_tensor_stride)
         ), "Output stride is larger than input stride"
 
-    # Determine effective compute_dtype
-    effective_compute_dtype = (
-        compute_dtype if compute_dtype is not None else input_sparse_tensor.feature_tensor.dtype
-    )
+    # Determine effective compute_dtype. Under AMP autocast, use the
+    # autocast dtype (fp16/bf16) rather than the tensor's storage dtype
+    # (fp32) so that saved-for-backward tensors are in compute precision.
+    if compute_dtype is not None:
+        effective_compute_dtype = compute_dtype
+    elif torch.is_autocast_enabled():
+        effective_compute_dtype = torch.get_autocast_dtype("cuda")
+    else:
+        effective_compute_dtype = input_sparse_tensor.feature_tensor.dtype
 
     if stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and any(s != 1 for s in _stride):
         reduced_input_voxels = sparse_reduce(
@@ -273,9 +278,21 @@ def spatially_sparse_conv(
     )
     num_out_coords = batch_indexed_out_coords.shape[0]
 
+    # Pre-cast features and weight to compute_dtype BEFORE Function.apply()
+    # so that save_for_backward stores them in compute precision (fp16 under
+    # AMP). This eliminates fp32→fp16 casts in every backward call and avoids
+    # the cudaMalloc/cudaFree overhead from dtype conversion temporaries.
+    _features_for_gemm = current_input_features_for_gemm
+    _weight_for_gemm = weight
+    if effective_compute_dtype is not None:
+        if _features_for_gemm.dtype != effective_compute_dtype:
+            _features_for_gemm = _features_for_gemm.to(dtype=effective_compute_dtype)
+        if _weight_for_gemm.dtype != effective_compute_dtype:
+            _weight_for_gemm = _weight_for_gemm.to(dtype=effective_compute_dtype)
+
     out_feature_tensor = UnifiedSpatiallySparseConvFunction.apply(
-        current_input_features_for_gemm,
-        weight,
+        _features_for_gemm,
+        _weight_for_gemm,
         kernel_map,
         num_out_coords,
         fwd_algo,

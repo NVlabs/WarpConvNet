@@ -265,6 +265,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # Note: torch.is_grad_enabled() is False inside Function.forward()
         # by design (PyTorch >= 2.1), so we check needs_input_grad instead.
         if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
+            # Features and weight are pre-cast to compute_dtype in helper.py
+            # before Function.apply(), so they are already fp16 under AMP.
             ctx.save_for_backward(in_features, weight)
             ctx.kernel_map = kernel_map
             ctx.config_params_for_bwd = {
@@ -446,9 +448,15 @@ class UnifiedSpatiallySparseConvFunction(Function):
         _min_dt = _min_dtype(_cast_dtype, weight.dtype)
         if _min_dt == torch.float64:
             _min_dt = torch.float32
-        _grad_output = grad_output.contiguous().detach().to(dtype=_min_dt)
-        _in_features = in_features.contiguous().detach().to(dtype=_min_dt)
-        _weight = weight.contiguous().detach().to(dtype=_min_dt)
+
+        def _prepare(t: torch.Tensor, dt: torch.dtype) -> torch.Tensor:
+            if t.dtype == dt and t.is_contiguous() and not t.requires_grad:
+                return t
+            return t.contiguous().detach().to(dtype=dt)
+
+        _grad_output = _prepare(grad_output, _min_dt)
+        _in_features = _prepare(in_features, _min_dt)
+        _weight = _prepare(weight, _min_dt)
 
         # Pre-compute weight transpose once for dgrad (both mask and
         # cute_grouped need [K, C_out, C_in] contiguous for the AB kernel).

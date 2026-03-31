@@ -156,8 +156,13 @@ def _mask_implicit_gemm_forward_logic(
     feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
     min_dtype = _min_dtype(feature_dtype, weight.dtype)
 
-    _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
-    _weight = weight.contiguous().detach().to(dtype=min_dtype)
+    def _prep(t: Tensor, dt: torch.dtype) -> Tensor:
+        if t.dtype == dt and t.is_contiguous() and not t.requires_grad:
+            return t
+        return t.contiguous().detach().to(dtype=dt)
+
+    _in_features = _prep(in_features, min_dtype)
+    _weight = _prep(weight, min_dtype)
 
     N_in, C_in = _in_features.shape
     K, _, C_out = _weight.shape
@@ -243,9 +248,16 @@ def _mask_implicit_gemm_backward_logic(
     feature_dtype = compute_dtype if compute_dtype is not None else in_features.dtype
     min_dtype = _min_dtype(feature_dtype, weight.dtype)
 
-    _grad_output = grad_output.contiguous().detach().to(dtype=min_dtype)
-    _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
-    _weight = weight.contiguous().detach().to(dtype=min_dtype)
+    # Avoid redundant copies when tensors already match the target dtype and
+    # layout (the caller in unified.py already pre-casts).
+    def _prepare(t: Tensor, dt: torch.dtype) -> Tensor:
+        if t.dtype == dt and t.is_contiguous() and not t.requires_grad:
+            return t
+        return t.contiguous().detach().to(dtype=dt)
+
+    _grad_output = _prepare(grad_output, min_dtype)
+    _in_features = _prepare(in_features, min_dtype)
+    _weight = _prepare(weight, min_dtype)
 
     N_in, C_in = _in_features.shape
     K, _, C_out = _weight.shape
@@ -255,23 +267,34 @@ def _mask_implicit_gemm_backward_logic(
     grad_in = None
     grad_weight = None
 
+    # When inputs are fp32, downcast to fp16 for the CuTe tensor-core mask
+    # kernel which is ~15x faster than the SIMT fallback. The fp32
+    # accumulator inside the CuTe kernel preserves sufficient precision.
+
     if needs_input_grad[0]:
         _has_cute_fwd = hasattr(_C.gemm, "cute_gemm_mask_fwd")
-        vec_width_bwd = 16 // _grad_output.element_size()
+
+        cute_dtype = min_dtype
+        if _has_cute_fwd and min_dtype == torch.float32:
+            cute_dtype = torch.float16
+
+        _go_bwd = _prepare(_grad_output, cute_dtype)
+        _w_bwd = _prepare(_weight, cute_dtype)
+
+        vec_width_bwd = 16 // _go_bwd.element_size()
         orig_C_in_bwd, orig_C_out_bwd = C_in, C_out
-        _go_bwd, _w_bwd = _grad_output, _weight
         needs_padding_bwd = (C_in % vec_width_bwd != 0) or (C_out % vec_width_bwd != 0)
-        if needs_padding_bwd and _has_cute_fwd and min_dtype in (torch.float16, torch.bfloat16):
+        if needs_padding_bwd and _has_cute_fwd:
             tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
             tco = ((C_out + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
-            _go_bwd = torch.nn.functional.pad(_grad_output, (0, tco - C_out))
-            _w_bwd = torch.nn.functional.pad(_weight, (0, tco - C_out, 0, tc - C_in))
-            grad_in = torch.zeros((N_in, tc), dtype=min_dtype, device=device)
+            _go_bwd = torch.nn.functional.pad(_go_bwd, (0, tco - C_out))
+            _w_bwd = torch.nn.functional.pad(_w_bwd, (0, tco - C_out, 0, tc - C_in))
+            grad_in = torch.zeros((N_in, tc), dtype=cute_dtype, device=device)
         else:
-            grad_in = torch.zeros((N_in, C_in), dtype=min_dtype, device=device)
+            grad_in = torch.zeros((N_in, C_in), dtype=cute_dtype, device=device)
         used_cute = False
 
-        if _has_cute_fwd and min_dtype in (torch.float16, torch.bfloat16):
+        if _has_cute_fwd and cute_dtype in (torch.float16, torch.bfloat16):
             # AtomicAdd-free dgrad: reuse the forward kernel with reverse
             # pair data. The reverse pair_table maps (offset_k, in_row) ->
             # out_row, so the kernel iterates over input rows and gathers
@@ -281,9 +304,9 @@ def _mask_implicit_gemm_backward_logic(
             )
             # Weight transposed: [K, C_in, C_out] -> [K, C_out, C_in]
             if weight_T is not None:
-                _weight_T = weight_T
-                # Apply same padding as _w_bwd if needed
-                if needs_padding_bwd and min_dtype in (torch.float16, torch.bfloat16):
+                _weight_T = _prepare(weight_T, cute_dtype)
+                # Apply same padding if needed
+                if needs_padding_bwd:
                     tc = ((C_in + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
                     tco = ((C_out + vec_width_bwd - 1) // vec_width_bwd) * vec_width_bwd
                     _weight_T = torch.nn.functional.pad(_weight_T, (0, tc - C_in, 0, tco - C_out))
@@ -304,10 +327,14 @@ def _mask_implicit_gemm_backward_logic(
                 used_cute = True
 
         if not used_cute:
-            # SIMT fallback (still uses atomicAdd scatter)
+            # SIMT fallback (still uses atomicAdd scatter) — also uses
+            # cute_dtype (fp16) to avoid the slow fp32 SIMT kernel.
+            _go_simt = _prepare(_grad_output, cute_dtype)
+            _w_simt = _prepare(_weight, cute_dtype)
+            grad_in = torch.zeros((N_in, C_in), dtype=cute_dtype, device=device)
             status = _C.gemm.mask_implicit_gemm_bwd_dgrad(
-                _grad_output,
-                _weight,
+                _go_simt,
+                _w_simt,
                 grad_in,
                 pair_table,
                 pair_mask,
@@ -324,21 +351,28 @@ def _mask_implicit_gemm_backward_logic(
 
     if needs_input_grad[1]:
         _has_cute_wgrad = hasattr(_C.gemm, "cute_gemm_mask_wgrad")
-        vec_width_w = 16 // _in_features.element_size()
+
+        cute_dtype_w = min_dtype
+        if _has_cute_wgrad and min_dtype == torch.float32:
+            cute_dtype_w = torch.float16
+
+        _in_w = _prepare(_in_features, cute_dtype_w)
+        _go_w = _prepare(_grad_output, cute_dtype_w)
+
+        vec_width_w = 16 // _in_w.element_size()
         orig_C_in_w, orig_C_out_w = C_in, C_out
-        _in_w, _go_w = _in_features, _grad_output
         needs_padding_w = (C_in % vec_width_w != 0) or (C_out % vec_width_w != 0)
-        if needs_padding_w and _has_cute_wgrad and min_dtype in (torch.float16, torch.bfloat16):
+        if needs_padding_w and _has_cute_wgrad:
             tc = ((C_in + vec_width_w - 1) // vec_width_w) * vec_width_w
             tco = ((C_out + vec_width_w - 1) // vec_width_w) * vec_width_w
-            _in_w = torch.nn.functional.pad(_in_features, (0, tc - C_in))
-            _go_w = torch.nn.functional.pad(_grad_output, (0, tco - C_out))
-            grad_weight = torch.zeros((K, tc, tco), dtype=min_dtype, device=device)
+            _in_w = torch.nn.functional.pad(_in_w, (0, tc - C_in))
+            _go_w = torch.nn.functional.pad(_go_w, (0, tco - C_out))
+            grad_weight = torch.zeros((K, tc, tco), dtype=cute_dtype_w, device=device)
         else:
-            grad_weight = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
+            grad_weight = torch.zeros((K, C_in, C_out), dtype=cute_dtype_w, device=device)
         used_cute = False
 
-        if _has_cute_wgrad and min_dtype in (torch.float16, torch.bfloat16):
+        if _has_cute_wgrad and cute_dtype_w in (torch.float16, torch.bfloat16):
             # Heuristic split_k: target ~4K pairs per split for good parallelism
             # without excessive atomicAdd contention
             split_k = max(1, num_out_coords // 4096)
@@ -360,12 +394,13 @@ def _mask_implicit_gemm_backward_logic(
                 used_cute = True
 
         if not used_cute:
-            # SIMT fallback
-            if needs_padding_w:
-                grad_weight = torch.zeros((K, C_in, C_out), dtype=min_dtype, device=device)
+            # SIMT fallback — also uses cute_dtype_w (fp16) for speed.
+            _in_simt = _prepare(_in_features, cute_dtype_w)
+            _go_simt = _prepare(_grad_output, cute_dtype_w)
+            grad_weight = torch.zeros((K, C_in, C_out), dtype=cute_dtype_w, device=device)
             status = _C.gemm.mask_implicit_gemm_bwd_wgrad(
-                _in_features,
-                _grad_output,
+                _in_simt,
+                _go_simt,
                 grad_weight,
                 pair_table,
                 pair_mask,
