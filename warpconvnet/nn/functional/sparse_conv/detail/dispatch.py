@@ -34,10 +34,6 @@ from .cutlass import (
     _cutlass_implicit_gemm_forward_grouped,
     _cutlass_implicit_gemm_backward_grouped,
 )
-from .mask_gemm import (
-    _mask_implicit_gemm_forward_logic,
-    _mask_implicit_gemm_backward_logic,
-)
 from .algo_params import (
     _HAS_CUTE_BACKEND,
     _HAS_CUTE_GROUPED,
@@ -188,16 +184,46 @@ def _execute_forward(
                 f"cute_grouped_sm90 fwd error: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
             )
         return result
-    elif algo == "mask_implicit_gemm":
-        return _mask_implicit_gemm_forward_logic(
+    elif algo == "production":
+        from .mask_gemm import _get_mask_data
+
+        tile_id = params.get("tile_id", 41)
+        pair_table, pair_mask, mask_argsort = _get_mask_data(
+            kernel_map, num_out_coords, in_features.device
+        )
+        N_in = in_features.shape[0]
+        C_in = in_features.shape[1]
+        C_out = weight.shape[2]
+        K = len(kernel_map)
+
+        # Select scalar tile for unaligned channels
+        vec_width = 16 // in_features.element_size()
+        cin_aligned = C_in % vec_width == 0
+        cout_aligned = C_out % vec_width == 0
+        if not cin_aligned and not cout_aligned:
+            tile_id = 70  # SAB_SE
+        elif not cin_aligned:
+            tile_id = 71  # SA
+        elif not cout_aligned:
+            tile_id = 72  # SB_SE
+
+        output = torch.zeros(
+            (num_out_coords, C_out), dtype=in_features.dtype, device=in_features.device
+        )
+        status = _C.production.fwd(
             in_features,
             weight,
-            kernel_map,
-            num_out_coords,
-            compute_dtype,
-            block_size=params.get("block_size", 16),
-            mma_tile=params.get("mma_tile", 3),
+            output,
+            pair_table,
+            pair_mask,
+            mask_argsort,
+            K,
+            tile_id,
+            1.0,
         )
+        if status != 0:
+            raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
+        return output
     else:
         raise ValueError(f"Unsupported forward algorithm: {algo}")
 
@@ -307,6 +333,23 @@ def _execute_backward(
             )
         return result
     elif algo == "cute_grouped":
+        # Use fused C++ wgrad when available (works for any stride)
+        _has_fused = hasattr(_C.gemm, "sparse_conv_wgrad")
+        if _has_fused and needs_input_grad[1] and not needs_input_grad[0]:
+            iden = (
+                kernel_map.identity_map_index if kernel_map.identity_map_index is not None else -1
+            )
+            grad_weight = _C.gemm.sparse_conv_wgrad(
+                in_features,
+                grad_output,
+                kernel_map.in_maps,
+                kernel_map.out_maps,
+                kernel_map.offsets,
+                iden,
+                len(kernel_map),
+                params.get("mma_tile", 3),
+            )
+            return None, grad_weight
         result = _cute_grouped_backward_logic(
             grad_output,
             in_features,
@@ -353,18 +396,100 @@ def _execute_backward(
                 f"cute_grouped_sm90 bwd error: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
             )
         return result
-    elif algo == "mask_implicit_gemm":
-        return _mask_implicit_gemm_backward_logic(
-            grad_output,
-            in_features,
-            weight,
-            kernel_map,
-            num_out_coords,
-            compute_dtype,
-            needs_input_grad=needs_input_grad,
-            block_size=params.get("block_size", 16),
-            mma_tile=params.get("mma_tile", 3),
-            weight_T=weight_T,
-        )
+    elif algo == "production":
+        from .mask_gemm import _get_mask_data, _get_reverse_mask_data
+
+        tile_id = params.get("tile_id", 60)
+        split_k = params.get("split_k", 64)
+        K = weight.shape[0]
+        N_in = in_features.shape[0]
+        C_in = in_features.shape[1]
+        C_out = weight.shape[2]
+
+        grad_in = None
+        grad_weight = None
+
+        if needs_input_grad[0]:
+            # Dgrad via production dgrad kernel with reverse pair data
+            rev_pt, rev_pm, rev_as = _get_reverse_mask_data(
+                kernel_map, N_in, num_out_coords, grad_output.device
+            )
+            _wT = weight_T if weight_T is not None else weight.transpose(1, 2).contiguous()
+
+            # Select dgrad tile
+            vec_width = 16 // grad_output.element_size()
+            cin_aligned = C_in % vec_width == 0
+            cout_aligned = C_out % vec_width == 0
+            if not cin_aligned and not cout_aligned:
+                dgrad_tile = 70
+            elif not cout_aligned:
+                dgrad_tile = 71  # C_out is "A" in dgrad (reversed)
+            elif not cin_aligned:
+                dgrad_tile = 72
+            else:
+                C = max(C_in, C_out)
+                is_fp16 = grad_output.dtype == torch.float16
+                if C <= 48:
+                    dgrad_tile = 50
+                elif C <= 96:
+                    dgrad_tile = 53 if is_fp16 else 51  # F16Acc for fp16
+                else:
+                    dgrad_tile = 54 if is_fp16 else 52  # F16Acc for fp16
+
+            grad_in = torch.zeros((N_in, C_in), dtype=grad_output.dtype, device=grad_output.device)
+            status = _C.production.dgrad(
+                grad_output,
+                _wT,
+                grad_in,
+                rev_pt,
+                rev_pm,
+                rev_as,
+                K,
+                dgrad_tile,
+                1.0,
+            )
+            if status != 0:
+                raise RuntimeError(f"production dgrad failed: status={status}")
+
+        if needs_input_grad[1]:
+            # Wgrad via production wgrad kernel with reduced_mask
+            pair_table, pair_mask, mask_argsort = _get_mask_data(
+                kernel_map, num_out_coords, grad_output.device
+            )
+
+            # Build reduced_mask (cached on kernel_map)
+            if not hasattr(kernel_map, "_reduced_mask") or kernel_map._reduced_mask is None:
+                kernel_map._reduced_mask = _C.production.build_reduced_mask(
+                    pair_mask, mask_argsort, 32
+                )
+
+            # Select wgrad tile
+            vec_width = 16 // in_features.element_size()
+            if C_in % vec_width != 0 or C_out % vec_width != 0:
+                wgrad_tile = 73  # scalar SAB
+            else:
+                wgrad_tile = tile_id  # from autotune (60 = aligned)
+
+            grad_weight = torch.zeros(
+                (K, C_in, C_out), dtype=torch.float32, device=grad_output.device
+            )
+            status = _C.production.wgrad(
+                in_features,
+                grad_output,
+                grad_weight,
+                pair_table,
+                pair_mask,
+                mask_argsort,
+                kernel_map._reduced_mask,
+                K,
+                wgrad_tile,
+                split_k,
+                1.0,
+            )
+            if status != 0:
+                raise RuntimeError(f"production wgrad failed: status={status}")
+            grad_weight = grad_weight.to(dtype=weight.dtype)
+
+        return grad_in, grad_weight
     else:
         raise ValueError(f"Unsupported backward algorithm: {algo}")

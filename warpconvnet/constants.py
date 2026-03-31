@@ -107,6 +107,7 @@ VALID_ALGOS = [
     "cutlass_grouped_hybrid",
     "cute_grouped",
     "mask_implicit_gemm",
+    "production",
     "auto",
     "all",
     "trimmed",

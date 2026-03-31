@@ -98,6 +98,7 @@ class SPARSE_CONV_AB_ALGO_MODE(Enum):
     CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
     CUTE_GROUPED_SM90 = "cute_grouped_sm90"
     MASK_IMPLICIT_GEMM = "mask_implicit_gemm"
+    PRODUCTION = "production"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
     TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
@@ -115,6 +116,7 @@ class SPARSE_CONV_ATB_ALGO_MODE(Enum):
     CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
     CUTE_GROUPED_SM90 = "cute_grouped_sm90"
     MASK_IMPLICIT_GEMM = "mask_implicit_gemm"
+    PRODUCTION = "production"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
     TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
@@ -192,18 +194,39 @@ _AB_CUTE_GROUPED = (
         ("cute_grouped", {"mma_tile": 1}),
     ]
 )
-_AB_MASK_IMPLICIT_GEMM = [
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),  # Tile128x64x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),  # Tile64x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
-]
+_AB_MASK_IMPLICIT_GEMM = []  # Removed: superseded by production kernels
+_ATB_MASK_IMPLICIT_GEMM = []  # Removed: superseded by production kernels
 
-# Mask wgrad candidates for AtB (uses CuTe split-K wgrad kernel internally)
-_ATB_MASK_IMPLICIT_GEMM = [
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),  # Tile128x128x32
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),  # Tile64x64x32
-]
+# Production kernel candidates (warp shuffle + precomp rows + double-buffered MMA)
+# Dispatched through _C.production.*, NOT _C.gemm.*
+_HAS_PRODUCTION = False
+try:
+    import warpconvnet._C as _test_C
+
+    _HAS_PRODUCTION = hasattr(_test_C, "production")
+except ImportError:
+    pass
+
+_AB_PRODUCTION = (
+    [
+        ("production", {"tile_id": 40}),  # Prod 32x32 F16Acc (fp16 only, C<=48)
+        ("production", {"tile_id": 41}),  # Prod 64x64
+        ("production", {"tile_id": 42}),  # Prod 64x128 F16Acc (fp16 only, C>=128)
+        ("production", {"tile_id": 43}),  # Prod 64x128 3-stage
+        ("production", {"tile_id": 44}),  # Prod 128x64
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
+
+_ATB_PRODUCTION = (
+    [
+        ("production", {"tile_id": 60, "split_k": 64}),  # Aligned, high split_k
+        ("production", {"tile_id": 60, "split_k": 16}),  # Aligned, low split_k
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
 
 # ---------------------------------------------------------------------------
 # AtB (gather-gather / wgrad) specific building blocks
@@ -244,6 +267,7 @@ def _get_adaptive_AB_params(
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_AB_PRODUCTION)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
@@ -254,6 +278,7 @@ def _get_adaptive_AB_params(
     # Include cutlass as fallback in case mask fails (e.g., unsupported config)
     if max_ch <= 128:
         params = []
+        params.extend(_AB_PRODUCTION)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
@@ -263,6 +288,7 @@ def _get_adaptive_AB_params(
     # ch 129-256: mask dominates small/medium N, cutlass_grouped at large N
     if max_ch <= 256:
         params = []
+        params.extend(_AB_PRODUCTION)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         if log_n == 0 or log_n > 17:
             params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
@@ -274,6 +300,7 @@ def _get_adaptive_AB_params(
     # ch > 256: cute_grouped wins at ch>=384, cutlass at ch=512 large N,
     # mask still competitive at ch=256-384 small N
     params = []
+    params.extend(_AB_PRODUCTION)
     params.extend(_AB_MASK_IMPLICIT_GEMM)
     params.extend(_AB_CUTE_GROUPED)
     params.extend(_AB_CUTLASS_IMPLICIT)
@@ -297,6 +324,7 @@ def _get_trimmed_AB_params(
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_AB_PRODUCTION)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -308,6 +336,7 @@ def _get_trimmed_AB_params(
     # ch <= 128: mask dominant, cutlass as fallback
     if max_ch <= 128:
         params = []
+        params.extend(_AB_PRODUCTION)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
@@ -317,6 +346,7 @@ def _get_trimmed_AB_params(
     # ch 129-256: mask + cutlass + cutlass_grouped
     if max_ch <= 256:
         params = []
+        params.extend(_AB_PRODUCTION)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -326,6 +356,7 @@ def _get_trimmed_AB_params(
 
     # ch > 256: all major backends
     params = []
+    params.extend(_AB_PRODUCTION)
     params.extend(_AB_MASK_IMPLICIT_GEMM)
     params.extend(_AB_CUTLASS_IMPLICIT)
     params.extend(_AB_CUTLASS_GROUPED)
@@ -376,11 +407,6 @@ _ALL_AB_PARAMS = [
             for cp in [True, False]
         ]
     ),
-    # Mask-based fused implicit GEMM (all tile configs)
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
 ]
 
 # ---------------------------------------------------------------------------
@@ -411,6 +437,8 @@ _ALL_AB_PARAMS = [
 
 # Static AtB auto superset (union of all _get_adaptive_AtB_params branches).
 _ATB_PARAMS_AUTO = [
+    *_ATB_PRODUCTION,
+    *_ATB_MASK_IMPLICIT_GEMM,
     *_AB_CUTE_GROUPED,
     *_AB_CUTLASS_GROUPED,
     *_ATB_EXPLICIT,
@@ -443,6 +471,8 @@ def _get_adaptive_AtB_params(
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTLASS_GROUPED)
         params.extend(_AB_CUTE_SM90)
@@ -452,6 +482,8 @@ def _get_adaptive_AtB_params(
     # ch > 128: cute_grouped wins 82-100% at all N
     if max_ch > 128:
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
@@ -460,6 +492,8 @@ def _get_adaptive_AtB_params(
     # ch 65-128, small/medium N: cute_grouped dominant, mask competitive
     if max_ch > 64 and (0 < log_n <= 17):
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
 
         params.extend(_AB_CUTE_SM90)
@@ -469,6 +503,8 @@ def _get_adaptive_AtB_params(
     # ch 65-128, large N: cutlass_grouped 58%, cute_grouped 23%
     if max_ch > 64:
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTE_SM90)
@@ -478,6 +514,9 @@ def _get_adaptive_AtB_params(
     # ch <= 64, small N: cute_grouped 57%, implicit 29%, mask competitive
     if 0 < log_n <= 14:
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
 
         params.extend(_ATB_IMPLICIT_GEMM)
@@ -488,6 +527,9 @@ def _get_adaptive_AtB_params(
     # ch <= 64, medium N: cute_grouped 57%, explicit_grouped 43%, mask competitive
     if 0 < log_n <= 17:
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
 
         params.extend(_ATB_EXPLICIT_GROUPED)
@@ -497,6 +539,9 @@ def _get_adaptive_AtB_params(
 
     # ch <= 64, large N or unknown: cutlass_grouped 43%, explicit 43%
     params = []
+    params.extend(_ATB_PRODUCTION)
+    params.extend(_ATB_PRODUCTION)
+    params.extend(_ATB_MASK_IMPLICIT_GEMM)
     params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
     params.extend(_ATB_EXPLICIT)
     params.extend(_AB_CUTE_SM90)
@@ -519,6 +564,8 @@ def _get_trimmed_AtB_params(
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTLASS_GROUPED)
         params.extend(_ATB_EXPLICIT)
@@ -531,6 +578,8 @@ def _get_trimmed_AtB_params(
     # ch > 128: cute_grouped dominant + cutlass_grouped fallback
     if max_ch > 128:
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         if log_n == 0 or log_n > 17:
             params.extend(_AB_CUTLASS_GROUPED)
@@ -541,6 +590,8 @@ def _get_trimmed_AtB_params(
     # ch 65-128: cute_grouped + cutlass_grouped + cutlass
     if max_ch > 64:
         params = []
+        params.extend(_ATB_PRODUCTION)
+        params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTLASS_GROUPED)
         params.extend(_AB_CUTLASS_IMPLICIT)
@@ -551,6 +602,7 @@ def _get_trimmed_AtB_params(
 
     # ch <= 64: all wgrad-relevant backends
     params = []
+    params.extend(_ATB_MASK_IMPLICIT_GEMM)
     params.extend(_AB_CUTE_GROUPED)
     params.extend(_AB_CUTLASS_GROUPED)
     params.extend(_ATB_EXPLICIT)
@@ -621,11 +673,6 @@ _ALL_ATB_PARAMS = [
             for cp in [True, False]
         ]
     ),
-    # Mask-based fused implicit GEMM
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 0}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 1}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 2}),
-    ("mask_implicit_gemm", {"block_size": 16, "mma_tile": 3}),
 ]
 
 # ---------------------------------------------------------------------------
@@ -636,6 +683,7 @@ _ALL_ATB_PARAMS = [
 # Static superset of all AB "auto" candidates (union of all adaptive branches).
 # Used by _get_filtered_AB_params for env var filtering.
 _AB_PARAMS_AUTO = [
+    *_AB_PRODUCTION,
     *_AB_MASK_IMPLICIT_GEMM,
     *_AB_CUTLASS_IMPLICIT,
     *_AB_CUTLASS_GROUPED,

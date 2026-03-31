@@ -39,9 +39,7 @@ def kernel_offsets_from_size(
     num_spatial_dims = len(kernel_size)
 
     # Create meshgrid for arbitrary dimensions
-    ranges = [
-        torch.arange(size, dtype=torch.int32, device="cpu") for size in kernel_size
-    ]
+    ranges = [torch.arange(size, dtype=torch.int32, device="cpu") for size in kernel_size]
     grids = torch.meshgrid(*ranges, indexing="ij")
     flattened_grids = [grid.flatten() for grid in grids]
 
@@ -52,8 +50,7 @@ def kernel_offsets_from_size(
 
     # Create offsets for each dimension
     offsets = [
-        (grid - center_offset[i]) * kernel_dilation[i]
-        for i, grid in enumerate(flattened_grids)
+        (grid - center_offset[i]) * kernel_dilation[i] for i, grid in enumerate(flattened_grids)
     ]
 
     # Add batch dimension (zeros)
@@ -87,16 +84,11 @@ def _kernel_map_search_to_result(
 
     # get the index of the non zero elements
     mapped_indices = (
-        torch.cumsum(
-            found_in_coord_index_bool.to(torch.int32), dim=1, dtype=torch.int32
-        )
-        - 1
+        torch.cumsum(found_in_coord_index_bool.to(torch.int32), dim=1, dtype=torch.int32) - 1
     )
     # Need to handle rows with zero valid maps correctly (cumsum results in -1)
     # Clamp minimum value to 0 after subtracting 1
-    mapped_indices = torch.clamp(
-        mapped_indices, min=-1
-    )  # Keep -1 for rows with no hits
+    mapped_indices = torch.clamp(mapped_indices, min=-1)  # Keep -1 for rows with no hits
 
     # Count valid maps per kernel offset row
     # If mapped_indices is -1 everywhere in a row, max will be -1, add 1 -> 0 count.
@@ -104,9 +96,7 @@ def _kernel_map_search_to_result(
 
     # Calculate offsets
     offsets = torch.cumsum(num_valid_maps, dim=0, dtype=torch.int32)
-    offsets = torch.cat(
-        [torch.zeros(1, dtype=torch.int32, device=target_device), offsets], dim=0
-    )
+    offsets = torch.cat([torch.zeros(1, dtype=torch.int32, device=target_device), offsets], dim=0)
     num_total_maps = offsets[-1].item()
 
     # Allocate output tensors
@@ -155,9 +145,7 @@ def _kernel_map_from_offsets(
     assert (
         target_device == batched_query_coords.device
     ), f"{target_device} != {batched_query_coords.device}"
-    assert (
-        target_device == kernel_offsets.device
-    ), f"{target_device} != {kernel_offsets.device}"
+    assert target_device == kernel_offsets.device, f"{target_device} != {kernel_offsets.device}"
     assert batched_query_coords.shape[1] == kernel_offsets.shape[1]
     assert batched_query_coords.ndim == 2
     assert kernel_offsets.ndim == 2
@@ -266,9 +254,7 @@ def _kernel_map_from_size(
                 assert identity_map_index == num_offsets
 
         # Prepare kernel size tensor
-        kernel_size_tensor = torch.tensor(
-            kernel_sizes, dtype=torch.int32, device=target_device
-        )
+        kernel_size_tensor = torch.tensor(kernel_sizes, dtype=torch.int32, device=target_device)
 
         if return_type == "indices":
             # For "indices" return type, use the original search kernel
@@ -360,9 +346,7 @@ def _kernel_map_from_size(
 
         if num_total_maps > 0:
             # Step 4: Fused scatter on intermediate (sequential scan, no hash access)
-            scatter_counters = torch.zeros(
-                num_offsets, dtype=torch.int32, device=target_device
-            )
+            scatter_counters = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
             _C.coords.postprocess_scatter(
                 found_in_coord_index,
                 offsets,
@@ -462,9 +446,7 @@ def generate_kernel_map(
     identity_map_index = None
     # Check if kernel is odd and potentially symmetric
     is_odd_kernel = all(k % 2 == 1 for k in kernel_size)
-    same_in_out_coords = (
-        batch_indexed_in_coords.shape[0] == batch_indexed_out_coords.shape[0]
-    )
+    same_in_out_coords = batch_indexed_in_coords.shape[0] == batch_indexed_out_coords.shape[0]
     if is_odd_kernel and same_in_out_coords:
         total_kernels = int(np.prod(kernel_size))
         center_idx = total_kernels // 2
@@ -503,7 +485,45 @@ def generate_kernel_map(
         assert (
             kernel_center_offset is None
         ), "Custom kernel_center_offset is not supported with method='size'. Use method='offset' instead."
-        return _kernel_map_from_size(
+        # For stride-1 with standard 3D kernels (K<=32), use the fused C++
+        # path that generates kernel_map + pair_table + mask + argsort + reverse
+        # in one call with no Python round-trips.
+        _has_direct = (
+            same_in_out_coords
+            and not skip_symmetric_kernel_map
+            and hasattr(_C, "coords")
+            and hasattr(_C.coords, "fused_kernel_map_direct")
+            and int(np.prod(kernel_size)) <= 32
+        )
+        _has_fused = (
+            not _has_direct
+            and same_in_out_coords
+            and not skip_symmetric_kernel_map
+            and hasattr(_C, "coords")
+            and hasattr(_C.coords, "fused_kernel_map_with_mask")
+            and int(np.prod(kernel_size)) <= 32
+        )
+        if _has_direct or _has_fused:
+            _fn = (
+                _C.coords.fused_kernel_map_direct
+                if _has_direct
+                else _C.coords.fused_kernel_map_with_mask
+            )
+            im, om, off, pt, pm, ms, rpt, rpm, rms = _fn(
+                strided_out_coords.contiguous(),
+                hashtable._table_kvs.contiguous(),
+                hashtable.vector_keys.contiguous(),
+                hashtable.capacity,
+                list(kernel_size),
+                hash_method.value,
+                True,  # build_reverse
+            )
+            result = IntSearchResult(im, om, off, identity_map_index=identity_map_index)
+            result._mask_data = (pt, pm, ms)
+            result._reverse_mask_data = (rpt, rpm, rms)
+            return result
+
+        result = _kernel_map_from_size(
             hashtable,
             strided_out_coords,
             kernel_size,
@@ -511,6 +531,7 @@ def generate_kernel_map(
             skip_symmetric_kernel_map=skip_symmetric_kernel_map,
             identity_map_index=identity_map_index,
         )
+        return result
     else:
         raise ValueError(f"Invalid method: {method}. Choose 'offset', or 'size'.")
 
