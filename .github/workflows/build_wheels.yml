@@ -62,7 +62,7 @@ jobs:
         run: |
           python${{ matrix.python }} -m venv /tmp/buildenv
           . /tmp/buildenv/bin/activate
-          pip install --upgrade pip setuptools setuptools-scm wheel pybind11 ninja
+          pip install --upgrade pip setuptools 'setuptools-scm<10' wheel pybind11 ninja
           pip install torch==${{ matrix.torch }}+${{ matrix.cuda }} \
             --index-url https://download.pytorch.org/whl/${{ matrix.cuda }}
 
@@ -111,7 +111,7 @@ jobs:
 
       - name: Build sdist
         run: |
-          pip install build setuptools-scm
+          pip install build 'setuptools-scm<10'
           # Suppress local version segment (+g1234567) — PyPI rejects local identifiers
           export SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version
           python -m build --sdist
@@ -142,7 +142,7 @@ jobs:
       - name: Determine version tag
         id: version
         run: |
-          pip install setuptools-scm
+          pip install 'setuptools-scm<10'
           VERSION=$(SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version python -c "from setuptools_scm import get_version; print(get_version())")
           TAG="v${VERSION}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
