@@ -4,6 +4,8 @@
 // Pybind11 bindings for coordinate hash table and search kernels.
 // Exposes _C.coords submodule.
 
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
@@ -161,6 +163,33 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> launch_fused_kernel_map(
     int table_capacity,
     std::vector<int> kernel_size,
     int hash_method);
+
+// Forward declaration: fused kernel map + mask data
+using MaskResult = std::tuple<torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor>;
+MaskResult launch_fused_kernel_map_with_mask(torch::Tensor output_coords,
+                                             torch::Tensor table_kvs,
+                                             torch::Tensor vector_keys,
+                                             int table_capacity,
+                                             std::vector<int> kernel_size,
+                                             int hash_method,
+                                             bool build_reverse);
+
+// Forward declaration: direct single-pass fused kernel map with mask data
+MaskResult launch_fused_kernel_map_direct(torch::Tensor output_coords,
+                                          torch::Tensor table_kvs,
+                                          torch::Tensor vector_keys,
+                                          int table_capacity,
+                                          std::vector<int> kernel_size,
+                                          int hash_method,
+                                          bool build_reverse);
 
 // Forward declarations: window grouping (counting sort)
 void coords_window_group_histogram(torch::Tensor grid_coord,
@@ -397,6 +426,32 @@ void register_coords(py::module_ &m) {
              py::arg("table_capacity"),
              py::arg("kernel_size"),
              py::arg("hash_method") = 1);
+
+  // --- Fused kernel map + mask data (kernel_map → pair_table → mask → sort, all in C++) ---
+  coords.def(
+      "fused_kernel_map_with_mask",
+      &launch_fused_kernel_map_with_mask,
+      "Fused kernel map + mask data generation (CSR + pair_table + mask + argsort + reverse)",
+      py::arg("output_coords"),
+      py::arg("table_kvs"),
+      py::arg("vector_keys"),
+      py::arg("table_capacity"),
+      py::arg("kernel_size"),
+      py::arg("hash_method") = 1,
+      py::arg("build_reverse") = true);
+
+  // --- Direct single-pass fused kernel map + mask data (1 kernel + argsort) ---
+  coords.def("fused_kernel_map_direct",
+             &launch_fused_kernel_map_direct,
+             "Single-pass fused kernel map + mask data (direct-write with atomics)",
+             py::arg("output_coords"),
+             py::arg("table_kvs"),
+             py::arg("vector_keys"),
+             py::arg("table_capacity"),
+             py::arg("kernel_size"),
+             py::arg("hash_method") = 1,
+             py::arg("build_reverse") = true);
+
   // --- Window grouping (counting sort) ---
   coords.def("window_group_histogram",
              &coords_window_group_histogram,

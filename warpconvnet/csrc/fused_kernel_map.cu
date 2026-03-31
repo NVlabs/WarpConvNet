@@ -162,11 +162,16 @@ __device__ void fused_kernel_map_direct_impl(
     const int* __restrict__ kernel_sizes,  // [3] (kx, ky, kz)
     int num_output_coords,                 // M
     int kernel_volume,                     // K = product(kernel_size)
-    // Outputs:
+    // CSR outputs:
     int* __restrict__ in_maps,      // [K * max_pairs_per_offset]
     int* __restrict__ out_maps,     // [K * max_pairs_per_offset]
     int* __restrict__ pair_counts,  // [K] atomic counters per offset
-    int max_pairs_per_offset        // max allocation per offset
+    int max_pairs_per_offset,       // max allocation per offset
+    // Mask outputs (optional, nullptr to skip):
+    int* __restrict__ pair_table,      // [K * M] or nullptr
+    uint32_t* __restrict__ pair_mask,  // [M] or nullptr
+    int* __restrict__ rev_pair_table,  // [K * M] or nullptr
+    uint32_t* __restrict__ rev_mask    // [M] or nullptr
 ) {
   // Cache kernel sizes and center offsets in shared memory
   __shared__ int s_ksz[3];
@@ -215,34 +220,56 @@ __device__ void fused_kernel_map_direct_impl(
       in_maps[kernel_map_idx * max_pairs_per_offset + pos] = in_idx;
       out_maps[kernel_map_idx * max_pairs_per_offset + pos] = out_idx;
     }
+
+    // Write mask data (if requested) — no extra hash lookup needed
+    if (pair_table != nullptr) {
+      pair_table[kernel_map_idx * num_output_coords + out_idx] = in_idx;
+    }
+    if (pair_mask != nullptr && kernel_volume <= 32) {
+      atomicOr(&pair_mask[out_idx], 1u << kernel_map_idx);
+    }
+    if (rev_pair_table != nullptr) {
+      rev_pair_table[kernel_map_idx * num_output_coords + in_idx] = out_idx;
+    }
+    if (rev_mask != nullptr && kernel_volume <= 32) {
+      atomicOr(&rev_mask[in_idx], 1u << kernel_map_idx);
+    }
   }
 }
 
 // --- Extern "C" Wrappers for direct-write variant ---
 
-#define DEFINE_DIRECT_WRAPPER(suffix, HashFunc)                                           \
-  extern "C" __global__ void fused_kernel_map_direct_##suffix(const int* output_coords,   \
-                                                              const int* table_kvs,       \
-                                                              const int* vector_keys,     \
-                                                              int table_capacity,         \
-                                                              const int* kernel_sizes,    \
-                                                              int num_output_coords,      \
-                                                              int kernel_volume,          \
-                                                              int* in_maps,               \
-                                                              int* out_maps,              \
-                                                              int* pair_counts,           \
-                                                              int max_pairs_per_offset) { \
-    fused_kernel_map_direct_impl<HashFunc>(output_coords,                                 \
-                                           table_kvs,                                     \
-                                           vector_keys,                                   \
-                                           table_capacity,                                \
-                                           kernel_sizes,                                  \
-                                           num_output_coords,                             \
-                                           kernel_volume,                                 \
-                                           in_maps,                                       \
-                                           out_maps,                                      \
-                                           pair_counts,                                   \
-                                           max_pairs_per_offset);                         \
+#define DEFINE_DIRECT_WRAPPER(suffix, HashFunc)                                         \
+  extern "C" __global__ void fused_kernel_map_direct_##suffix(const int* output_coords, \
+                                                              const int* table_kvs,     \
+                                                              const int* vector_keys,   \
+                                                              int table_capacity,       \
+                                                              const int* kernel_sizes,  \
+                                                              int num_output_coords,    \
+                                                              int kernel_volume,        \
+                                                              int* in_maps,             \
+                                                              int* out_maps,            \
+                                                              int* pair_counts,         \
+                                                              int max_pairs_per_offset, \
+                                                              int* pair_table,          \
+                                                              uint32_t* pair_mask,      \
+                                                              int* rev_pair_table,      \
+                                                              uint32_t* rev_mask) {     \
+    fused_kernel_map_direct_impl<HashFunc>(output_coords,                               \
+                                           table_kvs,                                   \
+                                           vector_keys,                                 \
+                                           table_capacity,                              \
+                                           kernel_sizes,                                \
+                                           num_output_coords,                           \
+                                           kernel_volume,                               \
+                                           in_maps,                                     \
+                                           out_maps,                                    \
+                                           pair_counts,                                 \
+                                           max_pairs_per_offset,                        \
+                                           pair_table,                                  \
+                                           pair_mask,                                   \
+                                           rev_pair_table,                              \
+                                           rev_mask);                                   \
   }
 
 DEFINE_DIRECT_WRAPPER(fnv1a, FNV1AHash_fkm)

@@ -248,7 +248,6 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/bindings/utils_bindings.cpp",
                 "warpconvnet/csrc/cutlass_gemm_gather_scatter.cu",
                 "warpconvnet/csrc/cutlass_cute_gemm_gather_scatter.cu",
-                "warpconvnet/csrc/cutlass_cute_gemm_mask.cu",
                 "warpconvnet/csrc/cutlass_cute_gemm_staged.cu",
                 "warpconvnet/csrc/cutlass_cute_gemm_sm90.cu",  # SM90 (Hopper) WGMMA GEMM
                 "warpconvnet/csrc/cutlass_gemm_gather_scatter_sm80_fp32.cu",
@@ -264,6 +263,7 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/bindings/sampling_bindings.cpp",
                 "warpconvnet/csrc/farthest_point_sampling.cu",
                 "warpconvnet/csrc/bindings/coords_bindings.cpp",
+                "warpconvnet/csrc/bindings/production_bindings.cu",
                 "warpconvnet/csrc/coords_launch.cu",
                 "warpconvnet/csrc/hashmap_kernels.cu",
                 "warpconvnet/csrc/discrete_kernels.cu",
@@ -271,6 +271,7 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/find_first_gt_bsearch.cu",
                 "warpconvnet/csrc/radius_search_kernels.cu",
                 "warpconvnet/csrc/fused_kernel_map.cu",
+                "warpconvnet/csrc/production_mask_kernels.cu",
                 "warpconvnet/csrc/cutlass_cute_gemm_grouped_sm90.cu",
                 "warpconvnet/csrc/window_grouping_kernels.cu",
             ],

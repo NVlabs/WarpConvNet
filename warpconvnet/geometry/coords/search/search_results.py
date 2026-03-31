@@ -79,9 +79,14 @@ class IntSearchResult:
         # Built on first use, then reused for all subsequent calls.
         self._mask_data: Optional[Tuple[Tensor, Tensor, Tensor]] = None
         self._reverse_mask_data: Optional[Tuple[Tensor, Tensor, Tensor]] = None
+        self._reduced_mask: Optional[Tensor] = None  # For production wgrad
         # Lazy-computed grouped GEMM params (depend only on offsets).
         # Dict keyed by (tile_m,) for AB params or "trAB" for AtB params.
         self._grouped_params_cache: dict = {}
+        # Hash table + coords reference for fused mask data construction.
+        # Set by generate_kernel_map when the fused path is available.
+        self._hashtable = None
+        self._kernel_size = None
 
     @torch.no_grad()
     def __getitem__(self, idx: int) -> Tuple[Int[Tensor, "N"], Int[Tensor, "N"]]:  # noqa: F821

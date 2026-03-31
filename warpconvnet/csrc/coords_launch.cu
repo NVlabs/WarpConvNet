@@ -5,11 +5,13 @@
 // These wrap the extern "C" __global__ kernels from hashmap_kernels.cu,
 // discrete_kernels.cu, morton_code.cu, and find_first_gt_bsearch.cu.
 
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
 #include <cstdint>
+#include <cub/cub.cuh>
 #include <tuple>
 #include <vector>
 
@@ -908,6 +910,337 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> launch_fused_kernel_map(
   }
 
   return std::make_tuple(in_maps, out_maps, offsets);
+}
+
+// ============================================================================
+// Fused kernel map + mask data: kernel_map → pair_table → mask → CUB sort
+// All in one C++ call, no Python round-trips between steps.
+// ============================================================================
+
+// Forward declarations from mask_data_kernels.cu
+namespace warpconvnet {
+namespace mask_data {
+void csr_to_pair_table(const int* in_maps,
+                       const int* out_maps,
+                       const int* offsets,
+                       int* pair_table,
+                       int N_out,
+                       int K,
+                       int L);
+
+void build_pair_mask(const int* pair_table, uint32_t* pair_mask, int N_out, int K);
+}  // namespace mask_data
+}  // namespace warpconvnet
+
+// Helper: fill array with 0, 1, 2, ..., N-1
+static __global__ void iota_kernel(int* vals, int N) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < N) vals[idx] = idx;
+}
+
+// CUB radix sort wrapper for mask_argsort (replaces torch.argsort, no CPU sync)
+void cub_argsort_uint32(const uint32_t* d_keys_in, int* d_values_out, int N, cudaStream_t stream) {
+  auto* alloc = c10::cuda::CUDACachingAllocator::get();
+
+  auto keys_buf = alloc->allocate(N * sizeof(uint32_t));
+  auto vals_buf = alloc->allocate(N * sizeof(int));
+  auto* d_keys_out = static_cast<uint32_t*>(keys_buf.get());
+  auto* d_values_in = static_cast<int*>(vals_buf.get());
+
+  {
+    int threads = 256, blocks = (N + threads - 1) / threads;
+    iota_kernel<<<blocks, threads, 0, stream>>>(d_values_in, N);
+  }
+
+  size_t temp_bytes = 0;
+  cub::DeviceRadixSort::SortPairs(
+      nullptr, temp_bytes, d_keys_in, d_keys_out, d_values_in, d_values_out, N, 0, 32, stream);
+
+  auto temp_buf = alloc->allocate(temp_bytes);
+  cub::DeviceRadixSort::SortPairs(temp_buf.get(),
+                                  temp_bytes,
+                                  d_keys_in,
+                                  d_keys_out,
+                                  d_values_in,
+                                  d_values_out,
+                                  N,
+                                  0,
+                                  32,
+                                  stream);
+}
+
+using MaskResult = std::tuple<torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,  // in_maps, out_maps, offsets
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor,  // pair_table, pair_mask, mask_argsort
+                              torch::Tensor,
+                              torch::Tensor,
+                              torch::Tensor>;  // rev_pair_table, rev_mask, rev_argsort
+
+MaskResult launch_fused_kernel_map_with_mask(torch::Tensor output_coords,
+                                             torch::Tensor table_kvs,
+                                             torch::Tensor vector_keys,
+                                             int table_capacity,
+                                             std::vector<int> kernel_size,
+                                             int hash_method,
+                                             bool build_reverse) {
+  // Step 1: Generate kernel map (reuses existing two-pass implementation)
+  auto [in_maps, out_maps, offsets] = launch_fused_kernel_map(
+      output_coords, table_kvs, vector_keys, table_capacity, kernel_size, hash_method);
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto device = output_coords.device();
+  auto opts = torch::TensorOptions().dtype(torch::kInt32).device(device);
+  int N = output_coords.size(0);
+  int K = kernel_size[0] * kernel_size[1] * kernel_size[2];
+
+  // Step 2: Build pair_table from CSR kernel map
+  auto pair_table = torch::full({K * N}, -1, opts);
+  int num_pairs = offsets[K].item<int>();
+  if (num_pairs > 0 && K <= 32) {
+    auto offsets_gpu = offsets.to(device).to(torch::kInt32).contiguous();
+    warpconvnet::mask_data::csr_to_pair_table(in_maps.data_ptr<int>(),
+                                              out_maps.data_ptr<int>(),
+                                              offsets_gpu.data_ptr<int>(),
+                                              pair_table.data_ptr<int>(),
+                                              N,
+                                              K,
+                                              num_pairs);
+  }
+
+  // Step 3: Build pair_mask from pair_table
+  auto pair_mask = torch::zeros({N}, opts);
+  if (num_pairs > 0 && K <= 32) {
+    warpconvnet::mask_data::build_pair_mask(
+        pair_table.data_ptr<int>(), reinterpret_cast<uint32_t*>(pair_mask.data_ptr<int>()), N, K);
+  }
+
+  // Step 4: CUB sort for mask_argsort
+  auto mask_argsort = torch::empty({N}, opts);
+  cub_argsort_uint32(reinterpret_cast<const uint32_t*>(pair_mask.data_ptr<int>()),
+                     mask_argsort.data_ptr<int>(),
+                     N,
+                     stream);
+
+  // Step 5: Build reverse mask data (for dgrad)
+  auto rev_pair_table = torch::full({K * N}, -1, opts);
+  auto rev_mask = torch::zeros({N}, opts);
+  auto rev_argsort = torch::empty({N}, opts);
+
+  if (build_reverse && num_pairs > 0 && K <= 32) {
+    // Build reverse pair_table: for each valid entry in pair_table,
+    // swap in_row and out_row. Vectorized via torch ops (no Python loop).
+    auto pt_2d = pair_table.view({K, N});
+    auto valid = pt_2d.ge(0);              // [K, N] bool
+    auto indices = torch::nonzero(valid);  // [num_valid, 2] — (k, out_row)
+    if (indices.numel() > 0) {
+      auto k_idx = indices.select(1, 0);            // offset indices
+      auto out_idx = indices.select(1, 1);          // out_row indices
+      auto in_idx = pt_2d.index({k_idx, out_idx});  // in_row values
+      // Scatter: rev_pair_table[k, in_row] = out_row
+      auto rev_2d = rev_pair_table.view({K, N});
+      rev_2d.index_put_({k_idx, in_idx.to(torch::kInt64)}, out_idx.to(torch::kInt32));
+    }
+    // Reverse mask + sort
+    warpconvnet::mask_data::build_pair_mask(rev_pair_table.data_ptr<int>(),
+                                            reinterpret_cast<uint32_t*>(rev_mask.data_ptr<int>()),
+                                            N,
+                                            K);
+    cub_argsort_uint32(reinterpret_cast<const uint32_t*>(rev_mask.data_ptr<int>()),
+                       rev_argsort.data_ptr<int>(),
+                       N,
+                       stream);
+  }
+
+  return {in_maps,
+          out_maps,
+          offsets,
+          pair_table,
+          pair_mask,
+          mask_argsort,
+          rev_pair_table,
+          rev_mask,
+          rev_argsort};
+}
+
+// =============================================================================
+// Direct single-pass fused kernel map with mask data
+// Replaces the multi-kernel pipeline (count + scatter + csr_to_pair + mask)
+// with a single kernel that uses atomics for direct-write output.
+// =============================================================================
+
+// Forward declarations for the direct-write kernels (defined in fused_kernel_map.cu)
+extern "C" __global__ void fused_kernel_map_direct_fnv1a(const int*,
+                                                         const int*,
+                                                         const int*,
+                                                         int,
+                                                         const int*,
+                                                         int,
+                                                         int,
+                                                         int*,
+                                                         int*,
+                                                         int*,
+                                                         int,
+                                                         int*,
+                                                         uint32_t*,
+                                                         int*,
+                                                         uint32_t*);
+extern "C" __global__ void fused_kernel_map_direct_city(const int*,
+                                                        const int*,
+                                                        const int*,
+                                                        int,
+                                                        const int*,
+                                                        int,
+                                                        int,
+                                                        int*,
+                                                        int*,
+                                                        int*,
+                                                        int,
+                                                        int*,
+                                                        uint32_t*,
+                                                        int*,
+                                                        uint32_t*);
+extern "C" __global__ void fused_kernel_map_direct_murmur(const int*,
+                                                          const int*,
+                                                          const int*,
+                                                          int,
+                                                          const int*,
+                                                          int,
+                                                          int,
+                                                          int*,
+                                                          int*,
+                                                          int*,
+                                                          int,
+                                                          int*,
+                                                          uint32_t*,
+                                                          int*,
+                                                          uint32_t*);
+
+MaskResult launch_fused_kernel_map_direct(torch::Tensor output_coords,
+                                          torch::Tensor table_kvs,
+                                          torch::Tensor vector_keys,
+                                          int table_capacity,
+                                          std::vector<int> kernel_size,
+                                          int hash_method,
+                                          bool build_reverse) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto device = output_coords.device();
+  auto opts = torch::TensorOptions().dtype(torch::kInt32).device(device);
+
+  int M = output_coords.size(0);
+  int K = kernel_size[0] * kernel_size[1] * kernel_size[2];
+
+  // Allocate all outputs
+  auto pair_counts = torch::zeros({K}, opts);
+  auto pair_table = torch::full({K * M}, -1, opts);
+  auto pair_mask = torch::zeros({M}, opts);
+
+  // CSR output: use M as max_pairs_per_offset (conservative upper bound)
+  auto in_maps_padded = torch::empty({K * M}, opts);
+  auto out_maps_padded = torch::empty({K * M}, opts);
+
+  // Reverse outputs
+  int N_in = vector_keys.size(0);
+  auto rev_pair_table = torch::full({K * N_in}, -1, opts);
+  auto rev_mask = torch::zeros({N_in}, opts);
+
+  // Kernel size on GPU
+  auto kernel_size_tensor = torch::tensor({kernel_size[0], kernel_size[1], kernel_size[2]}, opts);
+
+  // Launch 2D grid: (output voxels, kernel offsets)
+  dim3 block(256, 1);
+  dim3 grid((M + block.x - 1) / block.x, K);
+
+  auto launch_kernel = [&](auto kernel_fn) {
+    kernel_fn<<<grid, block, 0, stream>>>(
+        output_coords.data_ptr<int>(),
+        table_kvs.data_ptr<int>(),
+        vector_keys.data_ptr<int>(),
+        table_capacity,
+        kernel_size_tensor.data_ptr<int>(),
+        M,
+        K,
+        in_maps_padded.data_ptr<int>(),
+        out_maps_padded.data_ptr<int>(),
+        pair_counts.data_ptr<int>(),
+        M,  // max_pairs_per_offset
+        pair_table.data_ptr<int>(),
+        reinterpret_cast<uint32_t*>(pair_mask.data_ptr<int>()),
+        build_reverse ? rev_pair_table.data_ptr<int>() : nullptr,
+        build_reverse ? reinterpret_cast<uint32_t*>(rev_mask.data_ptr<int>()) : nullptr);
+  };
+
+  switch (hash_method) {
+    case 0:
+      launch_kernel(fused_kernel_map_direct_fnv1a);
+      break;
+    case 1:
+      launch_kernel(fused_kernel_map_direct_city);
+      break;
+    case 2:
+      launch_kernel(fused_kernel_map_direct_murmur);
+      break;
+    default:
+      TORCH_CHECK(false, "Unknown hash method: ", hash_method);
+  }
+
+  // Compact CSR from padded layout using pair_counts
+  auto counts_cpu = pair_counts.cpu();
+  auto counts_ptr = counts_cpu.data_ptr<int>();
+  int64_t total_pairs = 0;
+  std::vector<int64_t> offsets_vec(K + 1);
+  offsets_vec[0] = 0;
+  for (int i = 0; i < K; ++i) {
+    total_pairs += counts_ptr[i];
+    offsets_vec[i + 1] = total_pairs;
+  }
+
+  auto offsets = torch::tensor(offsets_vec, torch::TensorOptions().dtype(torch::kInt64));
+  auto in_maps = torch::empty({total_pairs}, opts);
+  auto out_maps = torch::empty({total_pairs}, opts);
+
+  // Copy compacted CSR data
+  for (int i = 0; i < K; ++i) {
+    int count = counts_ptr[i];
+    if (count > 0) {
+      in_maps.slice(0, offsets_vec[i], offsets_vec[i + 1])
+          .copy_(in_maps_padded.slice(0, (int64_t)i * M, (int64_t)i * M + count));
+      out_maps.slice(0, offsets_vec[i], offsets_vec[i + 1])
+          .copy_(out_maps_padded.slice(0, (int64_t)i * M, (int64_t)i * M + count));
+    }
+  }
+
+  // Argsort for pair_mask
+  auto mask_argsort = torch::empty({M}, opts);
+  cub_argsort_uint32(reinterpret_cast<const uint32_t*>(pair_mask.data_ptr<int>()),
+                     mask_argsort.data_ptr<int>(),
+                     M,
+                     stream);
+
+  // Argsort for reverse mask
+  auto rev_argsort = torch::empty({N_in}, opts);
+  if (build_reverse) {
+    warpconvnet::mask_data::build_pair_mask(rev_pair_table.data_ptr<int>(),
+                                            reinterpret_cast<uint32_t*>(rev_mask.data_ptr<int>()),
+                                            N_in,
+                                            K);
+    cub_argsort_uint32(reinterpret_cast<const uint32_t*>(rev_mask.data_ptr<int>()),
+                       rev_argsort.data_ptr<int>(),
+                       N_in,
+                       stream);
+  }
+
+  return {in_maps,
+          out_maps,
+          offsets,
+          pair_table,
+          pair_mask,
+          mask_argsort,
+          rev_pair_table,
+          rev_mask,
+          rev_argsort};
 }
 
 void coords_radius_search_count(torch::Tensor points,
