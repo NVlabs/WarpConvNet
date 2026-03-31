@@ -70,8 +70,8 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . /tmp/buildenv/bin/activate
-          # Strip any existing local segment (+g1234567) before appending torch tag
-          BASE_VERSION=$(python -m setuptools_scm | cut -d'+' -f1)
+          # Get base version without local segment, then append torch tag
+          BASE_VERSION=$(SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version python -c "from setuptools_scm import get_version; print(get_version())")
           export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+torch${{ matrix.torch_short }}${{ matrix.cuda }}"
           echo "Building version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
           python setup.py bdist_wheel
@@ -112,10 +112,8 @@ jobs:
       - name: Build sdist
         run: |
           pip install build setuptools-scm
-          # Strip local version segment (+g1234567) — PyPI rejects local identifiers
-          BASE_VERSION=$(python -m setuptools_scm | cut -d'+' -f1)
-          export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}"
-          echo "Building sdist version: ${BASE_VERSION}"
+          # Suppress local version segment (+g1234567) — PyPI rejects local identifiers
+          export SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version
           python -m build --sdist
 
       - uses: actions/upload-artifact@v4
@@ -145,7 +143,7 @@ jobs:
         id: version
         run: |
           pip install setuptools-scm
-          VERSION=$(python -m setuptools_scm | cut -d'+' -f1)
+          VERSION=$(SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version python -c "from setuptools_scm import get_version; print(get_version())")
           TAG="v${VERSION}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}, Tag: ${TAG}"
