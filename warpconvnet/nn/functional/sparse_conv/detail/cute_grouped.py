@@ -217,8 +217,13 @@ def _cute_grouped_forward_logic(
     if min_dtype == torch.float64:
         min_dtype = torch.float32
 
-    _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
-    _weight = weight.contiguous().detach().to(dtype=min_dtype)
+    def _prep(t, dt):
+        if t.dtype == dt and t.is_contiguous() and not t.requires_grad:
+            return t
+        return t.contiguous().detach().to(dtype=dt)
+
+    _in_features = _prep(in_features, min_dtype)
+    _weight = _prep(weight, min_dtype)
 
     out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
 
@@ -227,7 +232,7 @@ def _cute_grouped_forward_logic(
     # to the same compute dtype here to avoid type mismatch (root cause of
     # garbage output / NaN with float32 inputs).
     compute_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float16
-    _weight_compute = _weight.to(dtype=compute_dtype).contiguous()
+    _weight_compute = _prep(_weight, compute_dtype)
 
     # Initialize output
     if iden_idx is not None:
@@ -293,9 +298,16 @@ def _cute_grouped_backward_logic(
     min_dtype = _min_dtype(in_features.dtype, weight.dtype, grad_output.dtype)
     if min_dtype == torch.float64:
         min_dtype = torch.float32
-    _grad_output = grad_output.contiguous().detach().to(dtype=min_dtype)
-    _in_features = in_features.contiguous().detach().to(dtype=min_dtype)
-    _weight = weight.contiguous().detach().to(dtype=min_dtype)
+
+    # Skip copies when tensors already match (pre-cast by unified.py).
+    def _prep(t, dt):
+        if t.dtype == dt and t.is_contiguous() and not t.requires_grad:
+            return t
+        return t.contiguous().detach().to(dtype=dt)
+
+    _grad_output = _prep(grad_output, min_dtype)
+    _in_features = _prep(in_features, min_dtype)
+    _weight = _prep(weight, min_dtype)
 
     out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
 
@@ -319,10 +331,10 @@ def _cute_grouped_backward_logic(
 
         # For input grad: A=grad_output gathered by out_map, B=weight.T, scatter to in_map
         if weight_T is not None:
-            _weight_t = weight_T.to(dtype=compute_dtype).contiguous()
+            _weight_t = _prep(weight_T, compute_dtype)
         else:
-            _weight_t = (
-                _weight.to(dtype=compute_dtype).transpose(-1, -2).contiguous()
+            _weight_t = _prep(
+                _weight.transpose(-1, -2).contiguous(), compute_dtype
             )  # [K, C_out, C_in]
 
         tile_m = _TILE_M_SIZES.get(mma_tile, 64)
