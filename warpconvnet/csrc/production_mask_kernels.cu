@@ -17,10 +17,17 @@
 #include "include/MaskGemm_forward_64x64x32_1s_flat_sab_se.h"
 #include "include/MaskGemm_forward_64x64x32_1s_flat_sb_se.h"
 
+// Forward fp32 output kernels (fp16/bf16 input, f32 output)
+#include "include/MaskGemm_forward_64x64x32_1s_flat.h"
+#include "include/MaskGemm_forward_64x64x32_1s_flat_direpi_sb.h"
+
 // Dgrad kernels
 #include "include/MaskGemm_dgrad_32x32x32_1s_flat.h"
 #include "include/MaskGemm_dgrad_64x128x32_1s_flat_direpi.h"
 #include "include/MaskGemm_dgrad_64x64x32_1s_flat.h"
+// Dgrad fp32 output kernel
+#include "include/MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb.h"
+
 // Dgrad scalar variants
 #include "include/MaskGemm_dgrad_64x64x32_1s_flat_sa.h"
 #include "include/MaskGemm_dgrad_64x64x32_1s_flat_sab_se.h"
@@ -261,6 +268,137 @@ INSTANTIATE_PROD_FWD(MaskGemm_forward_128x64x32_2s_fused,
                      Tile128x64x32,
                      cutlass::bfloat16_t)
 INSTANTIATE_PROD_FWD(MaskGemm_forward_128x64x32_2s_fused, cutlass::bfloat16_t, Tile128x64x32, float)
+
+// Forward: 64x64x32 flat with fp32 output — uses dedicated launch function
+// to avoid conflict with existing (half_t, Tile64x64x32, float) instantiation
+template <typename ElemIn>
+int launch_production_fwd_f32out(const void *a,
+                                 const void *b,
+                                 void *d,
+                                 const int *pt,
+                                 const uint32_t *pm,
+                                 const int *ms,
+                                 int N_in,
+                                 int N_out,
+                                 int C_in,
+                                 int C_out,
+                                 int K,
+                                 float alpha,
+                                 cudaStream_t stream);
+
+#define INST_FWD_F32OUT(ElemIn)                                                 \
+  template <>                                                                   \
+  int launch_production_fwd_f32out<ElemIn>(const void *a,                       \
+                                           const void *b,                       \
+                                           void *d,                             \
+                                           const int *pt,                       \
+                                           const uint32_t *pm,                  \
+                                           const int *ms,                       \
+                                           int N_in,                            \
+                                           int N_out,                           \
+                                           int C_in,                            \
+                                           int C_out,                           \
+                                           int K,                               \
+                                           float alpha,                         \
+                                           cudaStream_t stream) {               \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
+    using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, float>;            \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});          \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                        \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                  \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                  \
+    dim3 grid(m_tiles *n_tiles);                                                \
+    size_t smem = Kernel::SharedStorageSize;                                    \
+    if (smem > 48 * 1024)                                                       \
+      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,     \
+                               smem) != cudaSuccess)                            \
+        return -1;                                                              \
+    production_mask_kernel_entry<Kernel>                                        \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
+                                                             (const ElemIn *)b, \
+                                                             (float *)d,        \
+                                                             pt,                \
+                                                             pm,                \
+                                                             ms,                \
+                                                             N_in,              \
+                                                             N_out,             \
+                                                             C_in,              \
+                                                             C_out,             \
+                                                             K,                 \
+                                                             alpha);            \
+    return 0;                                                                   \
+  }
+
+INST_FWD_F32OUT(cutlass::half_t)
+INST_FWD_F32OUT(cutlass::bfloat16_t)
+#undef INST_FWD_F32OUT
+
+// Forward: scalar B + fp32 output (unaligned C + non-AMP)
+template <typename ElemIn>
+int launch_production_fwd_f32out_sb(const void *a,
+                                    const void *b,
+                                    void *d,
+                                    const int *pt,
+                                    const uint32_t *pm,
+                                    const int *ms,
+                                    int N_in,
+                                    int N_out,
+                                    int C_in,
+                                    int C_out,
+                                    int K,
+                                    float alpha,
+                                    cudaStream_t stream);
+
+#define INST_FWD_F32OUT_SB(ElemIn)                                              \
+  template <>                                                                   \
+  int launch_production_fwd_f32out_sb<ElemIn>(const void *a,                    \
+                                              const void *b,                    \
+                                              void *d,                          \
+                                              const int *pt,                    \
+                                              const uint32_t *pm,               \
+                                              const int *ms,                    \
+                                              int N_in,                         \
+                                              int N_out,                        \
+                                              int C_in,                         \
+                                              int C_out,                        \
+                                              int K,                            \
+                                              float alpha,                      \
+                                              cudaStream_t stream) {            \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
+    using Kernel = MaskGemm_forward_64x64x32_1s_flat_direpi_sb<Config, float>;  \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});          \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                        \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                  \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                  \
+    dim3 grid(m_tiles *n_tiles);                                                \
+    size_t smem = Kernel::SharedStorageSize;                                    \
+    if (smem > 48 * 1024)                                                       \
+      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,     \
+                               smem) != cudaSuccess)                            \
+        return -1;                                                              \
+    production_mask_kernel_entry<Kernel>                                        \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
+                                                             (const ElemIn *)b, \
+                                                             (float *)d,        \
+                                                             pt,                \
+                                                             pm,                \
+                                                             ms,                \
+                                                             N_in,              \
+                                                             N_out,             \
+                                                             C_in,              \
+                                                             C_out,             \
+                                                             K,                 \
+                                                             alpha);            \
+    return 0;                                                                   \
+  }
+
+INST_FWD_F32OUT_SB(cutlass::half_t)
+INST_FWD_F32OUT_SB(cutlass::bfloat16_t)
+#undef INST_FWD_F32OUT_SB
 
 // =============================================================================
 // Scalar variant launch functions (separate from generic template to avoid
@@ -512,6 +650,71 @@ INSTANTIATE_PROD_DGRAD(MaskGemm_dgrad_64x128x32_1s_flat_direpi,
                        cutlass::bfloat16_t,
                        Tile64x128x32,
                        cutlass::bfloat16_t)
+
+// Dgrad: 64x64x32 flat with fp32 output — dedicated launch function
+template <typename ElemIn>
+int launch_production_dgrad_f32out(const void *a,
+                                   const void *b,
+                                   void *d,
+                                   const int *pt,
+                                   const uint32_t *pm,
+                                   const int *ms,
+                                   int N_in,
+                                   int N_out,
+                                   int C_in,
+                                   int C_out,
+                                   int K,
+                                   float alpha,
+                                   cudaStream_t stream);
+
+#define INST_DGRAD_F32OUT(ElemIn)                                               \
+  template <>                                                                   \
+  int launch_production_dgrad_f32out<ElemIn>(const void *a,                     \
+                                             const void *b,                     \
+                                             void *d,                           \
+                                             const int *pt,                     \
+                                             const uint32_t *pm,                \
+                                             const int *ms,                     \
+                                             int N_in,                          \
+                                             int N_out,                         \
+                                             int C_in,                          \
+                                             int C_out,                         \
+                                             int K,                             \
+                                             float alpha,                       \
+                                             cudaStream_t stream) {             \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
+    using Kernel = MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb<Config, float>;    \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});          \
+    if (N_in == 0 || C_in == 0 || C_out == 0) return 0;                         \
+    int m_tiles = (N_in + TileM - 1) / TileM;                                   \
+    int n_tiles = (C_in + TileN - 1) / TileN;                                   \
+    dim3 grid(m_tiles *n_tiles);                                                \
+    size_t smem = Kernel::SharedStorageSize;                                    \
+    if (smem > 48 * 1024)                                                       \
+      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,     \
+                               smem) != cudaSuccess)                            \
+        return -1;                                                              \
+    production_mask_kernel_entry<Kernel>                                        \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
+                                                             (const ElemIn *)b, \
+                                                             (float *)d,        \
+                                                             pt,                \
+                                                             pm,                \
+                                                             ms,                \
+                                                             N_in,              \
+                                                             N_out,             \
+                                                             C_in,              \
+                                                             C_out,             \
+                                                             K,                 \
+                                                             alpha);            \
+    return 0;                                                                   \
+  }
+
+INST_DGRAD_F32OUT(cutlass::half_t)
+INST_DGRAD_F32OUT(cutlass::bfloat16_t)
+#undef INST_DGRAD_F32OUT
 
 // =============================================================================
 // Wgrad instantiations
