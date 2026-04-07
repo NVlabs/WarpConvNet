@@ -145,6 +145,50 @@ int launch_scalar_dgrad_sb_se(const void *,
                               float,
                               cudaStream_t);
 
+// fp32 output launch functions
+template <typename ElemIn>
+int launch_production_fwd_f32out(const void *,
+                                 const void *,
+                                 void *,
+                                 const int *,
+                                 const uint32_t *,
+                                 const int *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 float,
+                                 cudaStream_t);
+template <typename ElemIn>
+int launch_production_fwd_f32out_sb(const void *,
+                                    const void *,
+                                    void *,
+                                    const int *,
+                                    const uint32_t *,
+                                    const int *,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    float,
+                                    cudaStream_t);
+template <typename ElemIn>
+int launch_production_dgrad_f32out(const void *,
+                                   const void *,
+                                   void *,
+                                   const int *,
+                                   const uint32_t *,
+                                   const int *,
+                                   int,
+                                   int,
+                                   int,
+                                   int,
+                                   int,
+                                   float,
+                                   cudaStream_t);
+
 // Scalar wgrad launch function
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_wgrad_sab(const void *,
@@ -201,6 +245,8 @@ int production_fwd(torch::Tensor input,
                    int tile_id,
                    float alpha) {
   TORCH_CHECK(input.is_cuda() && weight.is_cuda() && output.is_cuda());
+  TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
+              "production_fwd requires fp16 or bf16 input (cast in Python before calling)");
   input = input.contiguous();
   weight = weight.contiguous();
   output = output.contiguous();
@@ -208,19 +254,13 @@ int production_fwd(torch::Tensor input,
   int N_in = input.size(0), N_out = output.size(0);
   int C_in = input.size(1), C_out = output.size(1);
 
-  // Alignment check — skip for scalar tiles (70-72) which handle any C
+  // Alignment check — skip for scalar tiles which handle any C
   int elem_sz = input.element_size(), vec = 16 / elem_sz;
-  bool is_scalar_tile = (tile_id >= 70 && tile_id <= 72);
+  bool is_scalar_tile = (tile_id >= 70 && tile_id <= 72) || tile_id == 82;
   if (!is_scalar_tile && (C_in % vec != 0 || C_out % vec != 0))
     return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
 
   auto si = input.scalar_type();
-  if (si == torch::kFloat32) {
-    si = torch::kFloat16;
-    input = input.to(torch::kFloat16);
-    weight = weight.to(torch::kFloat16);
-    output = output.to(torch::kFloat16);
-  }
   auto so = output.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   auto tile = static_cast<gemm::MMATile>(tile_id);
@@ -238,6 +278,42 @@ int production_fwd(torch::Tensor input,
                               K,
                               alpha,
                               stream);
+
+  // fp32 output tiles (fp16/bf16 input, f32 output — for non-AMP)
+  if (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out ||
+      tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out_sb) {
+    bool use_sb = (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out_sb);
+    if (si == torch::kFloat16) {
+      if (use_sb)
+        return std::apply(
+            [](auto &&...a) {
+              return cute_gemm::launch_production_fwd_f32out_sb<cutlass::half_t>(a...);
+            },
+            args);
+      else
+        return std::apply(
+            [](auto &&...a) {
+              return cute_gemm::launch_production_fwd_f32out<cutlass::half_t>(a...);
+            },
+            args);
+    }
+#ifndef DISABLE_BFLOAT16
+    if (si == torch::kBFloat16) {
+      if (use_sb)
+        return std::apply(
+            [](auto &&...a) {
+              return cute_gemm::launch_production_fwd_f32out_sb<cutlass::bfloat16_t>(a...);
+            },
+            args);
+      else
+        return std::apply(
+            [](auto &&...a) {
+              return cute_gemm::launch_production_fwd_f32out<cutlass::bfloat16_t>(a...);
+            },
+            args);
+    }
+#endif
+  }
 
   // Scalar tiles — work with any dtype (fp16 and bf16)
   if (si == torch::kFloat16 && so == torch::kFloat16) {
@@ -337,6 +413,9 @@ int production_dgrad(torch::Tensor grad_output,
                      int tile_id,
                      float alpha) {
   TORCH_CHECK(grad_output.is_cuda() && weight_T.is_cuda() && grad_input.is_cuda());
+  TORCH_CHECK(
+      grad_output.scalar_type() == torch::kFloat16 || grad_output.scalar_type() == torch::kBFloat16,
+      "production_dgrad requires fp16 or bf16 input (cast in Python before calling)");
   grad_output = grad_output.contiguous();
   weight_T = weight_T.contiguous();
 
@@ -344,12 +423,6 @@ int production_dgrad(torch::Tensor grad_output,
   int C_in = grad_input.size(1), C_out = grad_output.size(1);
 
   auto si = grad_output.scalar_type();
-  if (si == torch::kFloat32) {
-    si = torch::kFloat16;
-    grad_output = grad_output.to(torch::kFloat16);
-    weight_T = weight_T.to(torch::kFloat16);
-    grad_input = grad_input.to(torch::kFloat16);
-  }
   auto so = grad_input.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   auto tile = static_cast<gemm::MMATile>(tile_id);
@@ -367,6 +440,24 @@ int production_dgrad(torch::Tensor grad_output,
                               K,
                               alpha,
                               stream);
+
+  // fp32 output dgrad tile
+  if (tile == gemm::MMATile::Prod_Dgrad_64x64x32_f32out) {
+    if (si == torch::kFloat16)
+      return std::apply(
+          [](auto &&...a) {
+            return cute_gemm::launch_production_dgrad_f32out<cutlass::half_t>(a...);
+          },
+          args);
+#ifndef DISABLE_BFLOAT16
+    if (si == torch::kBFloat16)
+      return std::apply(
+          [](auto &&...a) {
+            return cute_gemm::launch_production_dgrad_f32out<cutlass::bfloat16_t>(a...);
+          },
+          args);
+#endif
+  }
 
   // Scalar tiles — any dtype
   if (si == torch::kFloat16 && so == torch::kFloat16) {
@@ -464,6 +555,8 @@ int production_wgrad(torch::Tensor input,
                      int split_k,
                      float alpha) {
   TORCH_CHECK(input.is_cuda() && grad_output.is_cuda() && grad_weight.is_cuda());
+  TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
+              "production_wgrad requires fp16 or bf16 input (cast in Python before calling)");
   input = input.contiguous();
   grad_output = grad_output.contiguous();
 
@@ -476,11 +569,6 @@ int production_wgrad(torch::Tensor input,
     return static_cast<int>(warpconvnet::gemm::GemmStatus::kErrorUnsupportedConfig);
 
   auto si = input.scalar_type();
-  if (si == torch::kFloat32) {
-    si = torch::kFloat16;
-    input = input.to(torch::kFloat16);
-    grad_output = grad_output.to(torch::kFloat16);
-  }
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   auto tile = static_cast<gemm::MMATile>(tile_id);

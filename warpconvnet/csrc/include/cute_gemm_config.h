@@ -18,9 +18,8 @@
 #pragma once
 
 // clang-format off
-// IMPORTANT: cute/tensor.hpp MUST come before cute/algorithm/copy.hpp
-// and cute/atom/copy_atom.hpp — reversed order causes Copy_Atom undefined
-// errors with nvcc 12.9+.
+// IMPORTANT: cute/tensor.hpp MUST come before cute/atom/copy_atom.hpp
+// with nvcc 12.9+ (reversed order causes Copy_Atom undefined errors).
 #include "cute/tensor.hpp"
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
@@ -52,6 +51,17 @@ using SmemLayoutAtomA_FP16 = decltype(cute::composition(
 using SmemLayoutAtomB_FP16 = decltype(cute::composition(
     cute::Swizzle<3, 3, 3>{},
     cute::Layout<cute::Shape<cute::_64, cute::_8>, cute::Stride<cute::_1, cute::_64>>{}));
+
+// SmemLayoutAtom for FP32/TF32 operand A: K-contiguous (row-major).
+// Shape matches MMA fragment: 16 M rows × 8 K columns of float.
+// Plain layout (no swizzle) — accepts bank conflicts for correctness-first.
+using SmemLayoutAtomA_FP32 =
+    cute::Layout<cute::Shape<cute::_16, cute::_8>, cute::Stride<cute::_8, cute::_1>>;
+
+// SmemLayoutAtom for FP32/TF32 operand B: N-contiguous (column-major).
+// 8 N rows × 8 K columns, N stride-1.
+using SmemLayoutAtomB_FP32 =
+    cute::Layout<cute::Shape<cute::_8, cute::_8>, cute::Stride<cute::_1, cute::_8>>;
 
 // ============================================================================
 // Macro for FP16 tile configs — reduces boilerplate with cute:: qualification
@@ -139,6 +149,30 @@ using SmemLayoutAtomB_FP16 = decltype(cute::composition(
     using SmemLayoutAtomB = SmemLayoutAtomB_FP16;                                            \
     using SmemCopyAtomA = cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, ElementInput>;            \
     using SmemCopyAtomB = cute::Copy_Atom<cute::SM75_U16x8_LDSM_T, ElementInput>;            \
+    using GmemTiledCopyA = void;                                                             \
+    using GmemTiledCopyB = void;                                                             \
+    static constexpr int NumStages = 2;                                                      \
+    static constexpr int AlignmentA = 4;                                                     \
+    static constexpr int AlignmentB = 4;                                                     \
+    static constexpr bool UseCpAsyncGatherA = false;                                         \
+  };
+
+// FP32 input (TF32 tensor core) — for full-precision training.
+// SM80_16x8x8: K=8 per MMA, float inputs truncated to TF32 by hardware.
+// kVec = 16/4 = 4 floats per 128-bit vector.
+// Uses UniversalCopy for smem→reg (no LDSM for 32-bit element transpose).
+#define DEFINE_CUTE_TILE_CONFIG_FP32(TileTag, M_DIM, N_DIM, K_DIM)                           \
+  template <>                                                                                \
+  struct CuteTileConfig<float, gemm::TileTag> {                                              \
+    using ElementInput = float;                                                              \
+    using TileShape = cute::Shape<cute::Int<M_DIM>, cute::Int<N_DIM>, cute::Int<K_DIM>>;     \
+    using TiledMma = cute::TiledMMA<cute::MMA_Atom<cute::SM80_16x8x8_F32TF32TF32F32_TN>,     \
+                                    cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>, \
+                                    cute::Tile<cute::_32, cute::_32, cute::_8>>;             \
+    using SmemLayoutAtomA = SmemLayoutAtomA_FP32;                                            \
+    using SmemLayoutAtomB = SmemLayoutAtomB_FP32;                                            \
+    using SmemCopyAtomA = cute::Copy_Atom<cute::UniversalCopy<ElementInput>, ElementInput>;  \
+    using SmemCopyAtomB = cute::Copy_Atom<cute::UniversalCopy<ElementInput>, ElementInput>;  \
     using GmemTiledCopyA = void;                                                             \
     using GmemTiledCopyB = void;                                                             \
     static constexpr int NumStages = 2;                                                      \
@@ -306,6 +340,11 @@ DEFINE_CUTE_TILE_CONFIG_FP16_K8(Tile64x128x32, 64, 128, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x64x32, 64, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile128x64x32, 128, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x128x32, 64, 128, 32)
+
+// FP32 input (TF32 tensor cores) — for full-precision training
+DEFINE_CUTE_TILE_CONFIG_FP32(Tile64x64x32, 64, 64, 32)
+DEFINE_CUTE_TILE_CONFIG_FP32(Tile128x64x32, 128, 64, 32)
+DEFINE_CUTE_TILE_CONFIG_FP32(Tile64x128x32, 64, 128, 32)
 
 // tK=64 tiles
 DEFINE_CUTE_TILE_CONFIG_FP16(Tile64x64x64, 64, 64, 64)

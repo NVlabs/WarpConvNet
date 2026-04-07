@@ -187,32 +187,51 @@ def _execute_forward(
     elif algo == "production":
         from .mask_gemm import _get_mask_data
 
+        K = len(kernel_map)
+        # Mask kernels use uint32 bitmask — only works for K<=32
+        if K > 32:
+            return _explicit_gemm_forward_logic(
+                in_features, weight, kernel_map, num_out_coords, compute_dtype
+            )
+
         tile_id = params.get("tile_id", 41)
         pair_table, pair_mask, mask_argsort = _get_mask_data(
             kernel_map, num_out_coords, in_features.device
         )
-        N_in = in_features.shape[0]
         C_in = in_features.shape[1]
         C_out = weight.shape[2]
-        K = len(kernel_map)
 
-        # Select scalar tile for unaligned channels
-        vec_width = 16 // in_features.element_size()
+        # Cast to fp16 if needed (production kernels require fp16/bf16)
+        orig_dtype = in_features.dtype
+        use_f32_output = orig_dtype == torch.float32
+        if orig_dtype == torch.float32:
+            _in = in_features.half()
+            _w = weight.half()
+        else:
+            _in = in_features
+            _w = weight
+
+        # Select tile based on channel alignment and output dtype
+        vec_width = 16 // _in.element_size()
         cin_aligned = C_in % vec_width == 0
         cout_aligned = C_out % vec_width == 0
-        if not cin_aligned and not cout_aligned:
+        if use_f32_output:
+            if cin_aligned and cout_aligned:
+                tile_id = 80  # fp32 output, vectorized B
+            else:
+                tile_id = 82  # fp32 output, scalar B (any C)
+        elif not cin_aligned and not cout_aligned:
             tile_id = 70  # SAB_SE
         elif not cin_aligned:
             tile_id = 71  # SA
         elif not cout_aligned:
             tile_id = 72  # SB_SE
 
-        output = torch.zeros(
-            (num_out_coords, C_out), dtype=in_features.dtype, device=in_features.device
-        )
+        out_dtype = torch.float32 if use_f32_output else _in.dtype
+        output = torch.zeros((num_out_coords, C_out), dtype=out_dtype, device=in_features.device)
         status = _C.production.fwd(
-            in_features,
-            weight,
+            _in,
+            _w,
             output,
             pair_table,
             pair_mask,
@@ -223,7 +242,7 @@ def _execute_forward(
         )
         if status != 0:
             raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
-        return output
+        return output.to(dtype=orig_dtype)
     else:
         raise ValueError(f"Unsupported forward algorithm: {algo}")
 
@@ -399,12 +418,34 @@ def _execute_backward(
     elif algo == "production":
         from .mask_gemm import _get_mask_data, _get_reverse_mask_data
 
+        K = weight.shape[0]
+        # Mask kernels use uint32 bitmask — only works for K<=32
+        if K > 32:
+            return _explicit_gemm_backward_logic(
+                grad_output, in_features, weight, kernel_map, compute_dtype, device
+            )
+
         tile_id = params.get("tile_id", 60)
         split_k = params.get("split_k", 64)
-        K = weight.shape[0]
         N_in = in_features.shape[0]
         C_in = in_features.shape[1]
         C_out = weight.shape[2]
+
+        # Cast to fp16 if needed (production kernels require fp16/bf16)
+        orig_dtype = grad_output.dtype
+        use_f32_output = orig_dtype == torch.float32
+        if orig_dtype == torch.float32:
+            _go = grad_output.half()
+            _in = in_features.half()
+            _w = weight.half()
+            _wT_raw = weight_T.half() if weight_T is not None else None
+        else:
+            _go = grad_output
+            _in = in_features
+            _w = weight
+            _wT_raw = weight_T
+
+        compute_dtype = _go.dtype
 
         grad_in = None
         grad_weight = None
@@ -414,31 +455,34 @@ def _execute_backward(
             rev_pt, rev_pm, rev_as = _get_reverse_mask_data(
                 kernel_map, N_in, num_out_coords, grad_output.device
             )
-            _wT = weight_T if weight_T is not None else weight.transpose(1, 2).contiguous()
+            _wT = _wT_raw if _wT_raw is not None else _w.transpose(1, 2).contiguous()
 
             # Select dgrad tile
-            vec_width = 16 // grad_output.element_size()
+            vec_width = 16 // _go.element_size()
             cin_aligned = C_in % vec_width == 0
             cout_aligned = C_out % vec_width == 0
             if not cin_aligned and not cout_aligned:
                 dgrad_tile = 70
             elif not cout_aligned:
-                dgrad_tile = 71  # C_out is "A" in dgrad (reversed)
+                dgrad_tile = 71
             elif not cin_aligned:
                 dgrad_tile = 72
+            elif use_f32_output:
+                dgrad_tile = 81  # fp32 output tile
             else:
                 C = max(C_in, C_out)
-                is_fp16 = grad_output.dtype == torch.float16
+                is_fp16 = compute_dtype == torch.float16
                 if C <= 48:
                     dgrad_tile = 50
                 elif C <= 96:
-                    dgrad_tile = 53 if is_fp16 else 51  # F16Acc for fp16
+                    dgrad_tile = 53 if is_fp16 else 51
                 else:
-                    dgrad_tile = 54 if is_fp16 else 52  # F16Acc for fp16
+                    dgrad_tile = 54 if is_fp16 else 52
 
-            grad_in = torch.zeros((N_in, C_in), dtype=grad_output.dtype, device=grad_output.device)
+            dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
+            grad_in = torch.zeros((N_in, C_in), dtype=dgrad_out_dtype, device=grad_output.device)
             status = _C.production.dgrad(
-                grad_output,
+                _go,
                 _wT,
                 grad_in,
                 rev_pt,
@@ -450,6 +494,7 @@ def _execute_backward(
             )
             if status != 0:
                 raise RuntimeError(f"production dgrad failed: status={status}")
+            grad_in = grad_in.to(dtype=orig_dtype)
 
         if needs_input_grad[1]:
             # Wgrad via production wgrad kernel with reduced_mask
@@ -464,18 +509,18 @@ def _execute_backward(
                 )
 
             # Select wgrad tile
-            vec_width = 16 // in_features.element_size()
+            vec_width = 16 // _in.element_size()
             if C_in % vec_width != 0 or C_out % vec_width != 0:
-                wgrad_tile = 73  # scalar SAB
+                wgrad_tile = 73
             else:
-                wgrad_tile = tile_id  # from autotune (60 = aligned)
+                wgrad_tile = tile_id
 
             grad_weight = torch.zeros(
                 (K, C_in, C_out), dtype=torch.float32, device=grad_output.device
             )
             status = _C.production.wgrad(
-                in_features,
-                grad_output,
+                _in,
+                _go,
                 grad_weight,
                 pair_table,
                 pair_mask,

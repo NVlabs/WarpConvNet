@@ -100,6 +100,10 @@ enum class MMATile : int {
   Prod_Scalar_SA = 71,         // C_in unaligned, C_out aligned (fwd/dgrad)
   Prod_Scalar_SB_SE = 72,      // C_in aligned, C_out unaligned (fwd/dgrad)
   Prod_Wgrad_Scalar_SAB = 73,  // Wgrad with scalar A+B loads (any C)
+  // fp32 output kernels (fp16 compute, f32 output — for non-AMP)
+  Prod_Fwd_64x64x32_f32out = 80,     // Vectorized B (aligned C)
+  Prod_Dgrad_64x64x32_f32out = 81,   // Vectorized B (aligned C)
+  Prod_Fwd_64x64x32_f32out_sb = 82,  // Scalar B (any C) + f32 output
 #if defined(WARPCONVNET_SM90_ENABLED)
   // SM90 (Hopper) WGMMA tiles
   SM90_Tile64x128x64 = 100,
