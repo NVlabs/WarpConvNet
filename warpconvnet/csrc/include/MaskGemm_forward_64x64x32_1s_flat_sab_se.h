@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Auto-generated — DO NOT EDIT
 // Config: MaskGemm_forward_64x64x32_1s_flat_sab_se
 //   op_type=forward, tile=(64x64x32), stages=1
@@ -21,8 +24,9 @@
 namespace warpconvnet {
 namespace cute_gemm {
 
-template <class TileConfig, typename ElementOutput_ = float>
+template <class TileConfig, typename ElementOutput_ = float, int MaskWords_ = 1>
 struct MaskGemm_forward_64x64x32_1s_flat_sab_se {
+  static constexpr int MaskWords = MaskWords_;
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
@@ -63,9 +67,9 @@ struct MaskGemm_forward_64x64x32_1s_flat_sab_se {
   struct SharedStorage {
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutB>> smem_b;
-    uint32_t warp_masks[NumWarps];
+    uint32_t warp_masks[NumWarps * MaskWords];
     int real_rows[tM];
-    uint32_t row_masks[tM];
+    uint32_t row_masks[tM * MaskWords];
   };
 
   static constexpr size_t EpilogueSmemSize = UseSmemEpilogue ? tM * (tN + 8) * 2 : 0;
@@ -100,51 +104,80 @@ struct MaskGemm_forward_64x64x32_1s_flat_sab_se {
     SharedStorage &storage = *reinterpret_cast<SharedStorage *>(smem_buf);
 
     // Warp-shuffle mask union + precompute row info
-    uint32_t active_offsets;
+    // MaskWords=1: single uint32 active_offsets (original fast path).
+    // MaskWords>1: array of uint32 words for K>32.
+    uint32_t active_offsets_arr[MaskWords];
     if (K == 1) {
-      // K=1 fast path: single offset always active, skip mask union
-      active_offsets = 1;
+      for (int _w = 0; _w < MaskWords; ++_w) active_offsets_arr[_w] = 0;
+      active_offsets_arr[0] = 1;
       CUTLASS_PRAGMA_UNROLL
       for (int m_local = threadIdx.x; m_local < tM; m_local += MaxThreadsPerBlock) {
         int sorted_row = m_start + m_local;
         if (sorted_row < N_out) {
           int rr = __ldg(&mask_argsort[sorted_row]);
           storage.real_rows[m_local] = rr;
-          storage.row_masks[m_local] = 1;
+          storage.row_masks[m_local * MaskWords] = 1;
+          for (int _w = 1; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         } else {
           storage.real_rows[m_local] = -1;
-          storage.row_masks[m_local] = 0;
+          for (int _w = 0; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         }
       }
       __syncthreads();
     } else {
       int warp_id = threadIdx.x / 32;
       int lane_id = threadIdx.x % 32;
-      uint32_t my_mask = 0;
+      uint32_t my_mask[MaskWords];
+      for (int _w = 0; _w < MaskWords; ++_w) my_mask[_w] = 0;
       CUTLASS_PRAGMA_UNROLL
       for (int m_local = threadIdx.x; m_local < tM; m_local += MaxThreadsPerBlock) {
         int sorted_row = m_start + m_local;
         if (sorted_row < N_out) {
           int rr = __ldg(&mask_argsort[sorted_row]);
-          uint32_t rm = __ldg(&pair_mask[rr]);
           storage.real_rows[m_local] = rr;
-          storage.row_masks[m_local] = rm;
-          my_mask |= rm;
+          for (int _w = 0; _w < MaskWords; ++_w) {
+            uint32_t rm = __ldg(&pair_mask[rr * MaskWords + _w]);
+            storage.row_masks[m_local * MaskWords + _w] = rm;
+            my_mask[_w] |= rm;
+          }
         } else {
           storage.real_rows[m_local] = -1;
-          storage.row_masks[m_local] = 0;
+          for (int _w = 0; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         }
       }
-      CUTLASS_PRAGMA_UNROLL
-      for (int s = 16; s >= 1; s >>= 1) {
-        my_mask |= __shfl_xor_sync(0xffffffff, my_mask, s);
+      for (int _w = 0; _w < MaskWords; ++_w) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int s = 16; s >= 1; s >>= 1) {
+          my_mask[_w] |= __shfl_xor_sync(0xffffffff, my_mask[_w], s);
+        }
+        if (lane_id == 0) storage.warp_masks[warp_id * MaskWords + _w] = my_mask[_w];
       }
-      if (lane_id == 0) storage.warp_masks[warp_id] = my_mask;
       __syncthreads();
-      active_offsets = 0;
-      CUTLASS_PRAGMA_UNROLL
-      for (int w = 0; w < NumWarps; ++w) active_offsets |= storage.warp_masks[w];
+      for (int _w = 0; _w < MaskWords; ++_w) {
+        active_offsets_arr[_w] = 0;
+        CUTLASS_PRAGMA_UNROLL
+        for (int _w2 = 0; _w2 < NumWarps; ++_w2)
+          active_offsets_arr[_w] |= storage.warp_masks[_w2 * MaskWords + _w];
+      }
     }
+    // Alias for backward compatibility with existing mainloop code
+    uint32_t &active_offsets = active_offsets_arr[0];
+
+    // Multi-word offset iterator: extracts offsets one at a time across words.
+    int _mw_iter_word = 0;
+    uint32_t _mw_iter_bits = active_offsets_arr[0];
+    auto _mw_has_next = [&]() {
+      while (!_mw_iter_bits && _mw_iter_word + 1 < MaskWords) {
+        ++_mw_iter_word;
+        _mw_iter_bits = active_offsets_arr[_mw_iter_word];
+      }
+      return _mw_iter_bits != 0;
+    };
+    auto _mw_next = [&]() {
+      int bit = __ffs(_mw_iter_bits) - 1;
+      _mw_iter_bits &= _mw_iter_bits - 1;
+      return _mw_iter_word * 32 + bit;
+    };
 
     // --- MMA setup with register double-buffering ---
     Tensor sA = make_tensor(make_smem_ptr(storage.smem_a.data()), SmemLayoutA{});
@@ -179,56 +212,58 @@ struct MaskGemm_forward_64x64x32_1s_flat_sab_se {
     AIteratorState a_state;
     _init_A_iterator(a_state);
 
-    // --- Offset loop (iterate only active offsets via __ffs) ---
+    // --- Offset loop (iterate active offsets via __ffs, multi-word mask) ---
     int num_k_tiles = (C_in + tK - 1) / tK;
-    uint32_t offsets_remaining = active_offsets;
-    int _offset_idx = 0;  // for stage alternation across offsets
-    while (offsets_remaining) {
-      int k = __ffs(offsets_remaining) - 1;
-      offsets_remaining &= offsets_remaining - 1;
+    int _offset_idx = 0;
+    for (int _mw = 0; _mw < MaskWords; ++_mw) {
+      uint32_t _word = active_offsets_arr[_mw];
+      while (_word) {
+        int k = _mw * 32 + __ffs(_word) - 1;
+        _word &= _word - 1;
 
-      const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
+        const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
 
-      _update_A_indices(
-          a_state, pair_table, storage.real_rows, storage.row_masks, N_in, N_out, C_in, k, K);
+        _update_A_indices(
+            a_state, pair_table, storage.real_rows, storage.row_masks, N_in, N_out, C_in, k, K);
 
-      // ---- Pipelined flat with offset-alternating stages ----
-      // Stage alternates per offset (not per k-tile) so consecutive offsets
-      // use different smem buffers. This eliminates 1 __syncthreads per offset
-      // for single-k-tile cases (common at small C).
-      if (num_k_tiles == 1) {
-        // Single k-tile: alternate stage per offset, skip post-MMA sync
-        int smem_stage = _offset_idx & 1;
-        _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_in);
-        _load_B_tile(
-            ptr_Bk, sB(_, _, smem_stage), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
-        cute::cp_async_fence();
-        cute::cp_async_wait<0>();
-        __syncthreads();
-        MMA_DOUBLE_BUFFERED(smem_stage)
-        // No __syncthreads here — next offset uses the OTHER stage
-      } else {
-        // Multi k-tile: stage alternates per k-tile within offset
-        for (int kt = 0; kt < num_k_tiles; ++kt) {
-          int k_start_cin = kt * tK;
-          int smem_stage = kt & 1;
-          _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), k_start_cin, C_in);
-          _load_B_tile(ptr_Bk,
-                       sB(_, _, smem_stage),
-                       gmem_thr_copy_B,
-                       n_start,
-                       k_start_cin,
-                       C_out,
-                       C_in,
-                       n_full_tile);
+        // ---- Pipelined flat with offset-alternating stages ----
+        // Stage alternates per offset (not per k-tile) so consecutive offsets
+        // use different smem buffers. This eliminates 1 __syncthreads per offset
+        // for single-k-tile cases (common at small C).
+        if (num_k_tiles == 1) {
+          // Single k-tile: alternate stage per offset, skip post-MMA sync
+          int smem_stage = _offset_idx & 1;
+          _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_in);
+          _load_B_tile(
+              ptr_Bk, sB(_, _, smem_stage), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
           cute::cp_async_fence();
           cute::cp_async_wait<0>();
           __syncthreads();
           MMA_DOUBLE_BUFFERED(smem_stage)
-          __syncthreads();
+          // No __syncthreads here — next offset uses the OTHER stage
+        } else {
+          // Multi k-tile: stage alternates per k-tile within offset
+          for (int kt = 0; kt < num_k_tiles; ++kt) {
+            int k_start_cin = kt * tK;
+            int smem_stage = kt & 1;
+            _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), k_start_cin, C_in);
+            _load_B_tile(ptr_Bk,
+                         sB(_, _, smem_stage),
+                         gmem_thr_copy_B,
+                         n_start,
+                         k_start_cin,
+                         C_out,
+                         C_in,
+                         n_full_tile);
+            cute::cp_async_fence();
+            cute::cp_async_wait<0>();
+            __syncthreads();
+            MMA_DOUBLE_BUFFERED(smem_stage)
+            __syncthreads();
+          }
         }
+        ++_offset_idx;
       }
-      ++_offset_idx;
     }
 
     // --- Epilogue ---
@@ -248,8 +283,8 @@ private:
   static constexpr int kItersPerThread =
       (total_vecs_A + MaxThreadsPerBlock - 1) / MaxThreadsPerBlock;
 
-  static constexpr int kWarpRows = 8;
   static constexpr int kWarpKVecs = k_vecs_A;
+  static constexpr int kWarpRows = 32 / kWarpKVecs;  // unique M-rows per warp per iter
   static constexpr int kRowDelta = kWarpRows;
   static constexpr int kRowsPerWarp = kWarpRows * kItersPerThread;
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Production mask kernel bindings — separate from gemm_bindings.cpp to handle
 // dtype-specific dispatch (F16Accum tiles are fp16-only).
 
@@ -145,6 +148,66 @@ int launch_scalar_dgrad_sb_se(const void *,
                               float,
                               cudaStream_t);
 
+// MaskWords>1 forward/dgrad launch functions (K>32)
+template <typename ElemIn, int MaskWords>
+int launch_production_fwd_mw(const void *,
+                             const void *,
+                             void *,
+                             const int *,
+                             const uint32_t *,
+                             const int *,
+                             int,
+                             int,
+                             int,
+                             int,
+                             int,
+                             float,
+                             cudaStream_t);
+template <typename ElemIn, int MaskWords>
+int launch_production_dgrad_mw(const void *,
+                               const void *,
+                               void *,
+                               const int *,
+                               const uint32_t *,
+                               const int *,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               float,
+                               cudaStream_t);
+
+// Scalar MW>1 launch functions (K>32 with unaligned channels)
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_fwd_sab_se_mw(const void *,
+                                const void *,
+                                void *,
+                                const int *,
+                                const uint32_t *,
+                                const int *,
+                                int,
+                                int,
+                                int,
+                                int,
+                                int,
+                                float,
+                                cudaStream_t);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_dgrad_sab_se_mw(const void *,
+                                  const void *,
+                                  void *,
+                                  const int *,
+                                  const uint32_t *,
+                                  const int *,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  float,
+                                  cudaStream_t);
+
 // fp32 output launch functions
 template <typename ElemIn>
 int launch_production_fwd_f32out(const void *,
@@ -243,6 +306,7 @@ int production_fwd(torch::Tensor input,
                    torch::Tensor mask_argsort,
                    int K,
                    int tile_id,
+                   int mask_words,
                    float alpha) {
   TORCH_CHECK(input.is_cuda() && weight.is_cuda() && output.is_cuda());
   TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
@@ -278,6 +342,17 @@ int production_fwd(torch::Tensor input,
                               K,
                               alpha,
                               stream);
+
+  // MW>1 dispatch helper macro
+#define DISPATCH_MW(CALL_MW1, CALL_MW2, CALL_MW4) \
+  do {                                            \
+    if (mask_words <= 1)                          \
+      return CALL_MW1;                            \
+    else if (mask_words <= 2)                     \
+      return CALL_MW2;                            \
+    else                                          \
+      return CALL_MW4;                            \
+  } while (0)
 
   // fp32 output tiles (fp16/bf16 input, f32 output — for non-AMP)
   if (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out ||
@@ -315,14 +390,24 @@ int production_fwd(torch::Tensor input,
 #endif
   }
 
-  // Scalar tiles — work with any dtype (fp16 and bf16)
+  // Scalar tiles — work with any dtype and any C alignment.
+  // SAB_SE supports MW>1 for K>32; SA/SB_SE are MW=1 only (K>32 not common with partial unalign).
+#define SCALAR_FWD_SAB_SE_MW(In, Out)                                                           \
+  DISPATCH_MW(                                                                                  \
+      std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sab_se, In, Out, a...); }, args),   \
+      std::apply(                                                                               \
+          [](auto &&...a) { return cute_gemm::launch_scalar_fwd_sab_se_mw<In, Out, 2>(a...); }, \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) { return cute_gemm::launch_scalar_fwd_sab_se_mw<In, Out, 4>(a...); }, \
+          args))
+
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sab_se, In, Out, a...); },
-                          args);
+        SCALAR_FWD_SAB_SE_MW(In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
         return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sa, In, Out, a...); }, args);
       case gemm::MMATile::Prod_Scalar_SB_SE:
@@ -338,8 +423,7 @@ int production_fwd(torch::Tensor input,
     using Out = cutlass::bfloat16_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sab_se, In, Out, a...); },
-                          args);
+        SCALAR_FWD_SAB_SE_MW(In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
         return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sa, In, Out, a...); }, args);
       case gemm::MMATile::Prod_Scalar_SB_SE:
@@ -350,8 +434,19 @@ int production_fwd(torch::Tensor input,
     }
   }
 #endif
+#undef SCALAR_FWD_SAB_SE_MW
 
-  // fp16 dispatch (includes F16Accum tiles)
+  // Vectorized fp16 dispatch (includes F16Accum tiles)
+  // For MW>1 (K>32) with aligned C, the 64x64 flat tile is used via launch_production_fwd_mw.
+#define FWD_64x64_MW(ElemIn)                                                                       \
+  DISPATCH_MW(                                                                                     \
+      std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile64x64x32, ElemIn, a...); },       \
+                 args),                                                                            \
+      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 2>(a...); }, \
+                 args),                                                                            \
+      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 4>(a...); }, \
+                 args))
+
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
@@ -360,8 +455,7 @@ int production_fwd(torch::Tensor input,
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile32x32x32_F16Accum, Out, a...); }, args);
       case gemm::MMATile::Prod_Fwd_64x64x32:
-        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32, Out, a...); },
-                          args);
+        FWD_64x64_MW(In);
       case gemm::MMATile::Prod_Fwd_64x128x32_F16Acc:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_F16Accum, Out, a...); }, args);
@@ -376,14 +470,12 @@ int production_fwd(torch::Tensor input,
     }
   }
 #ifndef DISABLE_BFLOAT16
-  // bf16 dispatch (no F16Accum tiles)
   if (si == torch::kBFloat16 && so == torch::kBFloat16) {
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
       case gemm::MMATile::Prod_Fwd_64x64x32:
-        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32, Out, a...); },
-                          args);
+        FWD_64x64_MW(In);
       case gemm::MMATile::Prod_Fwd_64x128x32_3s:
         return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32, Out, a...); },
                           args);
@@ -395,6 +487,7 @@ int production_fwd(torch::Tensor input,
     }
   }
 #endif
+#undef FWD_64x64_MW
   TORCH_CHECK(false, "Unsupported tile_id/dtype for production_fwd: tile=", tile_id);
   return -1;
 }
@@ -411,6 +504,7 @@ int production_dgrad(torch::Tensor grad_output,
                      torch::Tensor mask_argsort,
                      int K,
                      int tile_id,
+                     int mask_words,
                      float alpha) {
   TORCH_CHECK(grad_output.is_cuda() && weight_T.is_cuda() && grad_input.is_cuda());
   TORCH_CHECK(
@@ -459,14 +553,23 @@ int production_dgrad(torch::Tensor grad_output,
 #endif
   }
 
-  // Scalar tiles — any dtype
+  // Scalar dgrad tiles — any dtype, SAB_SE supports MW>1
+#define SCALAR_DGRAD_SAB_SE_MW(In, Out)                                                           \
+  DISPATCH_MW(                                                                                    \
+      std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sab_se, In, Out, a...); }, args),   \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_scalar_dgrad_sab_se_mw<In, Out, 2>(a...); }, \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_scalar_dgrad_sab_se_mw<In, Out, 4>(a...); }, \
+          args))
+
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sab_se, In, Out, a...); },
-                          args);
+        SCALAR_DGRAD_SAB_SE_MW(In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
         return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sa, In, Out, a...); }, args);
       case gemm::MMATile::Prod_Scalar_SB_SE:
@@ -482,8 +585,7 @@ int production_dgrad(torch::Tensor grad_output,
     using Out = cutlass::bfloat16_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sab_se, In, Out, a...); },
-                          args);
+        SCALAR_DGRAD_SAB_SE_MW(In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
         return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sa, In, Out, a...); }, args);
       case gemm::MMATile::Prod_Scalar_SB_SE:
@@ -494,8 +596,20 @@ int production_dgrad(torch::Tensor grad_output,
     }
   }
 #endif
+#undef SCALAR_DGRAD_SAB_SE_MW
 
-  // Vectorized tiles — dtype-specific
+  // Vectorized dgrad tiles — 64x64 supports MW>1
+#define DGRAD_64x64_MW(ElemIn)                                                                 \
+  DISPATCH_MW(                                                                                 \
+      std::apply([](auto &&...a) { return LAUNCH_DGRAD(ElemIn, Tile64x64x32, ElemIn, a...); }, \
+                 args),                                                                        \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 2>(a...); },  \
+          args),                                                                               \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 4>(a...); },  \
+          args))
+
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
@@ -504,8 +618,7 @@ int production_dgrad(torch::Tensor grad_output,
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile32x32x32, Out, a...); },
                           args);
       case gemm::MMATile::Prod_Dgrad_64x64x32:
-        return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32, Out, a...); },
-                          args);
+        DGRAD_64x64_MW(In);
       case gemm::MMATile::Prod_Dgrad_64x64x32_F16Acc:
         return std::apply(
             [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32_F16Accum, Out, a...); }, args);
@@ -525,8 +638,7 @@ int production_dgrad(torch::Tensor grad_output,
     using Out = cutlass::bfloat16_t;
     switch (tile) {
       case gemm::MMATile::Prod_Dgrad_64x64x32:
-        return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32, Out, a...); },
-                          args);
+        DGRAD_64x64_MW(In);
       case gemm::MMATile::Prod_Dgrad_64x128x32:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32, Out, a...); },
                           args);
@@ -535,6 +647,7 @@ int production_dgrad(torch::Tensor grad_output,
     }
   }
 #endif
+#undef DGRAD_64x64_MW
   TORCH_CHECK(false, "Unsupported tile_id/dtype for production_dgrad: tile=", tile_id);
   return -1;
 }
@@ -660,8 +773,12 @@ int production_wgrad(torch::Tensor input,
 // Build reduced_mask: OR-reduce pair_mask values per tK-row block
 // =============================================================================
 
-__global__ void build_reduced_mask_kernel(
-    const uint32_t *pair_mask, const int *mask_argsort, uint32_t *reduced_mask, int N, int tK) {
+__global__ void build_reduced_mask_kernel(const uint32_t *pair_mask,
+                                          const int *mask_argsort,
+                                          uint32_t *reduced_mask,
+                                          int N,
+                                          int tK,
+                                          int mask_words) {
   int block_idx = blockIdx.x * blockDim.x + threadIdx.x;
   int num_blocks = (N + tK - 1) / tK;
   if (block_idx >= num_blocks) return;
@@ -670,19 +787,25 @@ __global__ void build_reduced_mask_kernel(
   int end = start + tK;
   if (end > N) end = N;
 
-  uint32_t acc = 0;
-  for (int i = start; i < end; ++i) {
-    int real_row = mask_argsort[i];
-    acc |= pair_mask[real_row];
+  // OR-reduce each mask word independently across the block
+  for (int w = 0; w < mask_words; ++w) {
+    uint32_t acc = 0;
+    for (int i = start; i < end; ++i) {
+      int real_row = mask_argsort[i];
+      acc |= pair_mask[real_row * mask_words + w];
+    }
+    reduced_mask[block_idx * mask_words + w] = acc;
   }
-  reduced_mask[block_idx] = acc;
 }
 
-torch::Tensor build_reduced_mask(torch::Tensor pair_mask, torch::Tensor mask_argsort, int tK) {
+torch::Tensor build_reduced_mask(torch::Tensor pair_mask,
+                                 torch::Tensor mask_argsort,
+                                 int tK,
+                                 int mask_words) {
   TORCH_CHECK(pair_mask.is_cuda());
-  int N = pair_mask.size(0);
+  int N = mask_argsort.size(0);
   int num_blocks = (N + tK - 1) / tK;
-  auto reduced = torch::zeros({num_blocks}, pair_mask.options());
+  auto reduced = torch::zeros({num_blocks * mask_words}, pair_mask.options());
 
   int threads = 256;
   int blocks = (num_blocks + threads - 1) / threads;
@@ -692,7 +815,8 @@ torch::Tensor build_reduced_mask(torch::Tensor pair_mask, torch::Tensor mask_arg
       mask_argsort.data_ptr<int>(),
       reinterpret_cast<uint32_t *>(reduced.data_ptr<int>()),
       N,
-      tK);
+      tK,
+      mask_words);
   return reduced;
 }
 
@@ -715,6 +839,7 @@ void register_production(py::module &m) {
            py::arg("mask_argsort"),
            py::arg("K"),
            py::arg("tile_id"),
+           py::arg("mask_words") = 1,
            py::arg("alpha") = 1.0f);
 
   prod.def("dgrad",
@@ -727,6 +852,7 @@ void register_production(py::module &m) {
            py::arg("mask_argsort"),
            py::arg("K"),
            py::arg("tile_id"),
+           py::arg("mask_words") = 1,
            py::arg("alpha") = 1.0f);
 
   prod.def("wgrad",
@@ -747,7 +873,8 @@ void register_production(py::module &m) {
            &build_reduced_mask,
            py::arg("pair_mask"),
            py::arg("mask_argsort"),
-           py::arg("tK") = 32);
+           py::arg("tK") = 32,
+           py::arg("mask_words") = 1);
 }
 }  // namespace bindings
 }  // namespace warpconvnet

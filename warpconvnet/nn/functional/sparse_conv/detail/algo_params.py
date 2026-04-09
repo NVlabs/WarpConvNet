@@ -265,9 +265,11 @@ def _get_adaptive_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
+    _ab_prod = _AB_PRODUCTION
+
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
-        params.extend(_AB_PRODUCTION)
+        params.extend(_ab_prod)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
@@ -278,7 +280,7 @@ def _get_adaptive_AB_params(
     # Include cutlass as fallback in case mask fails (e.g., unsupported config)
     if max_ch <= 128:
         params = []
-        params.extend(_AB_PRODUCTION)
+        params.extend(_ab_prod)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
@@ -288,7 +290,7 @@ def _get_adaptive_AB_params(
     # ch 129-256: mask dominates small/medium N, cutlass_grouped at large N
     if max_ch <= 256:
         params = []
-        params.extend(_AB_PRODUCTION)
+        params.extend(_ab_prod)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         if log_n == 0 or log_n > 17:
             params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
@@ -300,7 +302,7 @@ def _get_adaptive_AB_params(
     # ch > 256: cute_grouped wins at ch>=384, cutlass at ch=512 large N,
     # mask still competitive at ch=256-384 small N
     params = []
-    params.extend(_AB_PRODUCTION)
+    params.extend(_ab_prod)
     params.extend(_AB_MASK_IMPLICIT_GEMM)
     params.extend(_AB_CUTE_GROUPED)
     params.extend(_AB_CUTLASS_IMPLICIT)
@@ -322,9 +324,11 @@ def _get_trimmed_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
+    _ab_prod = _AB_PRODUCTION
+
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
-        params.extend(_AB_PRODUCTION)
+        params.extend(_ab_prod)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -336,7 +340,7 @@ def _get_trimmed_AB_params(
     # ch <= 128: mask dominant, cutlass as fallback
     if max_ch <= 128:
         params = []
-        params.extend(_AB_PRODUCTION)
+        params.extend(_ab_prod)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTE_SM90)
@@ -346,7 +350,7 @@ def _get_trimmed_AB_params(
     # ch 129-256: mask + cutlass + cutlass_grouped
     if max_ch <= 256:
         params = []
-        params.extend(_AB_PRODUCTION)
+        params.extend(_ab_prod)
         params.extend(_AB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTLASS_IMPLICIT)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -356,7 +360,7 @@ def _get_trimmed_AB_params(
 
     # ch > 256: all major backends
     params = []
-    params.extend(_AB_PRODUCTION)
+    params.extend(_ab_prod)
     params.extend(_AB_MASK_IMPLICIT_GEMM)
     params.extend(_AB_CUTLASS_IMPLICIT)
     params.extend(_AB_CUTLASS_GROUPED)
@@ -469,9 +473,11 @@ def _get_adaptive_AtB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
+    _atb_prod = _ATB_PRODUCTION
+
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -482,7 +488,7 @@ def _get_adaptive_AtB_params(
     # ch > 128: cute_grouped wins 82-100% at all N
     if max_ch > 128:
         params = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTE_SM90)
@@ -492,7 +498,7 @@ def _get_adaptive_AtB_params(
     # ch 65-128, small/medium N: cute_grouped dominant, mask competitive
     if max_ch > 64 and (0 < log_n <= 17):
         params = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
 
@@ -503,7 +509,7 @@ def _get_adaptive_AtB_params(
     # ch 65-128, large N: cutlass_grouped 58%, cute_grouped 23%
     if max_ch > 64:
         params = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
         params.extend(_AB_CUTE_GROUPED)
@@ -514,8 +520,7 @@ def _get_adaptive_AtB_params(
     # ch <= 64, small N: cute_grouped 57%, implicit 29%, mask competitive
     if 0 < log_n <= 14:
         params = []
-        params.extend(_ATB_PRODUCTION)
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
 
@@ -527,8 +532,7 @@ def _get_adaptive_AtB_params(
     # ch <= 64, medium N: cute_grouped 57%, explicit_grouped 43%, mask competitive
     if 0 < log_n <= 17:
         params = []
-        params.extend(_ATB_PRODUCTION)
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
 
@@ -539,8 +543,7 @@ def _get_adaptive_AtB_params(
 
     # ch <= 64, large N or unknown: cutlass_grouped 43%, explicit 43%
     params = []
-    params.extend(_ATB_PRODUCTION)
-    params.extend(_ATB_PRODUCTION)
+    params.extend(_atb_prod)
     params.extend(_ATB_MASK_IMPLICIT_GEMM)
     params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
     params.extend(_ATB_EXPLICIT)
@@ -562,9 +565,11 @@ def _get_trimmed_AtB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
+    _atb_prod = _ATB_PRODUCTION
+
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTLASS_GROUPED)
@@ -578,7 +583,7 @@ def _get_trimmed_AtB_params(
     # ch > 128: cute_grouped dominant + cutlass_grouped fallback
     if max_ch > 128:
         params = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         if log_n == 0 or log_n > 17:
@@ -590,7 +595,7 @@ def _get_trimmed_AtB_params(
     # ch 65-128: cute_grouped + cutlass_grouped + cutlass
     if max_ch > 64:
         params = []
-        params.extend(_ATB_PRODUCTION)
+        params.extend(_atb_prod)
         params.extend(_ATB_MASK_IMPLICIT_GEMM)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTLASS_GROUPED)

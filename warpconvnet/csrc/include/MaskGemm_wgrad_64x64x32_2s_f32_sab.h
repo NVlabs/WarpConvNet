@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Auto-generated — DO NOT EDIT
 // Config: MaskGemm_wgrad_64x64x32_2s_f32_sab
 //   op_type=wgrad, tile=(64x64x32), stages=2
@@ -142,7 +145,9 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_sab {
     // then A and B loaders read from cache instead of doing redundant __ldg.
     // Saves ~480 __ldg per tile (16x redundancy eliminated).
     const int *pt_k = pair_table + k_off * N_out;
-    uint32_t k_mask_bit = (K <= 32) ? (1u << k_off) : 0xffffffff;
+    int mask_words = (K + 31) / 32;
+    uint32_t k_mask_bit = 1u << (k_off % 32);
+    int k_mask_word = k_off / 32;
     int num_voxel_tiles = (shard_end - shard_start + tK - 1) / tK;
 
 // Pre-scan helper: populates smem cache and returns true if any voxel is active.
@@ -157,7 +162,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_sab {
       int _ps_rr = -1, _ps_ir = -1;                                                    \
       if (_ps_pg < _ps_pair_bound) {                                                   \
         _ps_rr = __ldg(&mask_argsort[_ps_pg]);                                         \
-        uint32_t _ps_rm = __ldg(&pair_mask[_ps_rr]);                                   \
+        uint32_t _ps_rm = __ldg(&pair_mask[_ps_rr * mask_words + k_mask_word]);        \
         if (_ps_rm & k_mask_bit) {                                                     \
           _ps_ir = __ldg(&pt_k[_ps_rr]);                                               \
           _ps_any = 1;                                                                 \
@@ -185,7 +190,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_sab {
       int rm_offset = shard_start / tK;
       int vt = 0;
       for (; vt < num_voxel_tiles; ++vt) {
-        if (__ldg(&reduced_mask[rm_offset + vt]) & k_mask_bit) break;
+        if (__ldg(&reduced_mask[(rm_offset + vt) * mask_words + k_mask_word]) & k_mask_bit) break;
       }
       if (vt >= num_voxel_tiles) goto wgrad_epilogue;
 
@@ -211,7 +216,8 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_sab {
         int pb_next = (v_next + tK < N_out) ? (v_next + tK) : N_out;
 
         // O(1) tile skip via reduced mask
-        if (!(__ldg(&reduced_mask[rm_offset + vt]) & k_mask_bit)) continue;
+        if (!(__ldg(&reduced_mask[(rm_offset + vt) * mask_words + k_mask_word]) & k_mask_bit))
+          continue;
 
         // Prescan to populate cache for active tile
         bool _dummy;

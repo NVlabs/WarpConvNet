@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Auto-generated — DO NOT EDIT
 // Config: MaskGemm_dgrad_64x64x32_1s_flat_sb_se
 //   op_type=dgrad, tile=(64x64x32), stages=1
@@ -23,8 +26,9 @@ namespace cute_gemm {
 
 // Dgrad kernel: dX[j,:] = sum_k dY[rev_pt[k,j],:] @ W[k,:,:]^T
 // C_in, C_out in CONV semantics. Contraction over C_out, output dim C_in.
-template <class TileConfig, typename ElementOutput_ = float>
+template <class TileConfig, typename ElementOutput_ = float, int MaskWords_ = 1>
 struct MaskGemm_dgrad_64x64x32_1s_flat_sb_se {
+  static constexpr int MaskWords = MaskWords_;
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
@@ -68,9 +72,9 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sb_se {
   struct SharedStorage {
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutB>> smem_b;
-    uint32_t warp_masks[NumWarps];
+    uint32_t warp_masks[NumWarps * MaskWords];
     int real_rows[tM];
-    uint32_t row_masks[tM];
+    uint32_t row_masks[tM * MaskWords];
   };
 
   static constexpr size_t EpilogueSmemSize = UseSmemEpilogue ? tM * (tN + 8) * 2 : 0;
@@ -108,51 +112,80 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sb_se {
 #define N_out N_out_mask
 
     // Warp-shuffle mask union + precompute row info
-    uint32_t active_offsets;
+    // MaskWords=1: single uint32 active_offsets (original fast path).
+    // MaskWords>1: array of uint32 words for K>32.
+    uint32_t active_offsets_arr[MaskWords];
     if (K == 1) {
-      // K=1 fast path: single offset always active, skip mask union
-      active_offsets = 1;
+      for (int _w = 0; _w < MaskWords; ++_w) active_offsets_arr[_w] = 0;
+      active_offsets_arr[0] = 1;
       CUTLASS_PRAGMA_UNROLL
       for (int m_local = threadIdx.x; m_local < tM; m_local += MaxThreadsPerBlock) {
         int sorted_row = m_start + m_local;
         if (sorted_row < N_out) {
           int rr = __ldg(&mask_argsort[sorted_row]);
           storage.real_rows[m_local] = rr;
-          storage.row_masks[m_local] = 1;
+          storage.row_masks[m_local * MaskWords] = 1;
+          for (int _w = 1; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         } else {
           storage.real_rows[m_local] = -1;
-          storage.row_masks[m_local] = 0;
+          for (int _w = 0; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         }
       }
       __syncthreads();
     } else {
       int warp_id = threadIdx.x / 32;
       int lane_id = threadIdx.x % 32;
-      uint32_t my_mask = 0;
+      uint32_t my_mask[MaskWords];
+      for (int _w = 0; _w < MaskWords; ++_w) my_mask[_w] = 0;
       CUTLASS_PRAGMA_UNROLL
       for (int m_local = threadIdx.x; m_local < tM; m_local += MaxThreadsPerBlock) {
         int sorted_row = m_start + m_local;
         if (sorted_row < N_out) {
           int rr = __ldg(&mask_argsort[sorted_row]);
-          uint32_t rm = __ldg(&pair_mask[rr]);
           storage.real_rows[m_local] = rr;
-          storage.row_masks[m_local] = rm;
-          my_mask |= rm;
+          for (int _w = 0; _w < MaskWords; ++_w) {
+            uint32_t rm = __ldg(&pair_mask[rr * MaskWords + _w]);
+            storage.row_masks[m_local * MaskWords + _w] = rm;
+            my_mask[_w] |= rm;
+          }
         } else {
           storage.real_rows[m_local] = -1;
-          storage.row_masks[m_local] = 0;
+          for (int _w = 0; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         }
       }
-      CUTLASS_PRAGMA_UNROLL
-      for (int s = 16; s >= 1; s >>= 1) {
-        my_mask |= __shfl_xor_sync(0xffffffff, my_mask, s);
+      for (int _w = 0; _w < MaskWords; ++_w) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int s = 16; s >= 1; s >>= 1) {
+          my_mask[_w] |= __shfl_xor_sync(0xffffffff, my_mask[_w], s);
+        }
+        if (lane_id == 0) storage.warp_masks[warp_id * MaskWords + _w] = my_mask[_w];
       }
-      if (lane_id == 0) storage.warp_masks[warp_id] = my_mask;
       __syncthreads();
-      active_offsets = 0;
-      CUTLASS_PRAGMA_UNROLL
-      for (int w = 0; w < NumWarps; ++w) active_offsets |= storage.warp_masks[w];
+      for (int _w = 0; _w < MaskWords; ++_w) {
+        active_offsets_arr[_w] = 0;
+        CUTLASS_PRAGMA_UNROLL
+        for (int _w2 = 0; _w2 < NumWarps; ++_w2)
+          active_offsets_arr[_w] |= storage.warp_masks[_w2 * MaskWords + _w];
+      }
     }
+    // Alias for backward compatibility with existing mainloop code
+    uint32_t &active_offsets = active_offsets_arr[0];
+
+    // Multi-word offset iterator: extracts offsets one at a time across words.
+    int _mw_iter_word = 0;
+    uint32_t _mw_iter_bits = active_offsets_arr[0];
+    auto _mw_has_next = [&]() {
+      while (!_mw_iter_bits && _mw_iter_word + 1 < MaskWords) {
+        ++_mw_iter_word;
+        _mw_iter_bits = active_offsets_arr[_mw_iter_word];
+      }
+      return _mw_iter_bits != 0;
+    };
+    auto _mw_next = [&]() {
+      int bit = __ffs(_mw_iter_bits) - 1;
+      _mw_iter_bits &= _mw_iter_bits - 1;
+      return _mw_iter_word * 32 + bit;
+    };
 
 #undef N_out
 
@@ -189,16 +222,12 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sb_se {
     AIteratorState a_state;
     _init_A_iterator(a_state);
 
-    // --- Dgrad offset loop: contract over C_out ---
+    // --- Dgrad offset loop: contract over C_out (multi-word mask) ---
     int num_k_tiles = (C_out + tK - 1) / tK;
-    uint32_t offsets_remaining = active_offsets;
     int _offset_idx = 0;
-    // Offset splitting: blockIdx.y selects which offsets this block processes.
-    // Each block handles offsets where (_offset_idx % SplitOffsets == blockIdx.y).
     int split_y = (SplitOffsets > 1) ? int(blockIdx.y) : 0;
-    while (offsets_remaining) {
-      int k = __ffs(offsets_remaining) - 1;
-      offsets_remaining &= offsets_remaining - 1;
+    while (_mw_has_next()) {
+      int k = _mw_next();
 
       if (SplitOffsets > 1 && (_offset_idx % SplitOffsets) != split_y) {
         ++_offset_idx;
@@ -343,11 +372,12 @@ private:
       if (m < tM) {
         // Use cached values (registers) instead of smem reads
         int real_row = (state.cached_real_row[r] != -2) ? state.cached_real_row[r] : real_rows[m];
-        uint32_t row_mask =
-            (state.cached_real_row[r] != -2) ? state.cached_row_mask[r] : row_masks[m];
         int in_row = -1;
-        if (real_row >= 0 && (K > 32 || (row_mask & (1u << offset_k)))) {
-          in_row = __ldg(&pt_base[real_row]);
+        {
+          uint32_t _rm = (MaskWords == 1 && state.cached_real_row[r] != -2)
+                             ? state.cached_row_mask[r]
+                             : row_masks[m * MaskWords + offset_k / 32];
+          if (real_row >= 0 && (_rm & (1u << (offset_k % 32)))) in_row = __ldg(&pt_base[real_row]);
         }
         if (in_row >= 0 && in_row < N_in) {
           state.gmem_byte_offsets[r] = in_row * C_in * elem_bytes;
@@ -371,8 +401,12 @@ private:
                                        int k_start,
                                        int C_in) const {
     _load_A_kblock<SmemTensor, 0>(ptr_A, state, smem_tile, k_start, C_in);
-    if (K_BLOCK_MAX_STATIC > 1)
+    if constexpr (K_BLOCK_MAX_STATIC > 1)
       _load_A_kblock<SmemTensor, 1>(ptr_A, state, smem_tile, k_start, C_in);
+    if constexpr (K_BLOCK_MAX_STATIC > 2)
+      _load_A_kblock<SmemTensor, 2>(ptr_A, state, smem_tile, k_start, C_in);
+    if constexpr (K_BLOCK_MAX_STATIC > 3)
+      _load_A_kblock<SmemTensor, 3>(ptr_A, state, smem_tile, k_start, C_in);
   }
 
   /// Per-kblock A load with pre-computed thread positions.
