@@ -49,16 +49,39 @@ def _build_mask_and_argsort(
     K: int,
     device: torch.device,
 ) -> Tuple[Tensor, Tensor]:
-    """Build pair_mask and mask_argsort from a pair_table [K * N]."""
-    pair_mask = torch.zeros(N, dtype=torch.int32, device=device)
-    if K <= 32 and hasattr(_C.gemm, "build_pair_mask_cuda"):
-        _C.gemm.build_pair_mask_cuda(pair_table, pair_mask, K)
-    elif K <= 32:
+    """Build pair_mask and mask_argsort from a pair_table [K * N].
+
+    For K <= 32: pair_mask is [N] int32 (single uint32 bitmask per voxel).
+    For K > 32: pair_mask is [N * mask_words] int32, interleaved as
+                pair_mask[voxel_i * mask_words + word_w].
+    mask_argsort is always [N] int32 (voxel permutation).
+    """
+    mask_words = (K + 31) // 32
+    if mask_words == 1:
+        pair_mask = torch.zeros(N, dtype=torch.int32, device=device)
+        if hasattr(_C.gemm, "build_pair_mask_cuda"):
+            _C.gemm.build_pair_mask_cuda(pair_table, pair_mask, K)
+        else:
+            pair_table_2d = pair_table.reshape(K, N)
+            valid = pair_table_2d >= 0
+            bit_positions = (1 << torch.arange(K, device=device, dtype=torch.int32)).unsqueeze(1)
+            pair_mask = (valid.int() * bit_positions).sum(dim=0).int()
+        mask_argsort = torch.argsort(pair_mask, stable=True).int()
+    else:
+        # Multi-word mask: [N * mask_words] interleaved
+        pair_mask = torch.zeros(N * mask_words, dtype=torch.int32, device=device)
         pair_table_2d = pair_table.reshape(K, N)
-        valid = pair_table_2d >= 0
-        bit_positions = (1 << torch.arange(K, device=device, dtype=torch.int32)).unsqueeze(1)
-        pair_mask = (valid.int() * bit_positions).sum(dim=0).int()
-    mask_argsort = torch.argsort(pair_mask, stable=True).int()
+        valid = pair_table_2d >= 0  # [K, N]
+        for w in range(mask_words):
+            k_start = w * 32
+            k_end = min((w + 1) * 32, K)
+            k_range = torch.arange(k_start, k_end, device=device, dtype=torch.int32)
+            bit_positions = (1 << (k_range - k_start)).unsqueeze(1)  # [k_count, 1]
+            word_mask = (valid[k_start:k_end].int() * bit_positions).sum(dim=0).int()  # [N]
+            pair_mask[w::mask_words] = word_mask
+        # Sort by first word for warp-coherent grouping
+        sort_key = pair_mask[::mask_words]  # word 0 of each voxel
+        mask_argsort = torch.argsort(sort_key, stable=True).int()
     return pair_mask, mask_argsort
 
 
@@ -71,7 +94,7 @@ def _kernel_map_to_mask_data(
 
     Returns:
         pair_table: [K * N_out] int32, flattened
-        pair_mask: [N_out] int32 (uint32 bitmask)
+        pair_mask: [N_out * mask_words] int32 (uint32 bitmask, interleaved)
         mask_argsort: [N_out] int32 permutation
     """
     K = len(kernel_map)
@@ -96,7 +119,7 @@ def _build_reverse_mask_data(
 
     Returns:
         reverse_pair_table: [K * N_in] int32
-        reverse_pair_mask: [N_in] int32 (uint32 bitmask)
+        reverse_pair_mask: [N_in * mask_words] int32 (uint32 bitmask, interleaved)
         reverse_mask_argsort: [N_in] int32 permutation
     """
     pair_table_2d = pair_table.reshape(K, N_out)

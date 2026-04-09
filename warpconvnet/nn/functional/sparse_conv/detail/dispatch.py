@@ -188,11 +188,7 @@ def _execute_forward(
         from .mask_gemm import _get_mask_data
 
         K = len(kernel_map)
-        # Mask kernels use uint32 bitmask — only works for K<=32
-        if K > 32:
-            return _explicit_gemm_forward_logic(
-                in_features, weight, kernel_map, num_out_coords, compute_dtype
-            )
+        mask_words = (K + 31) // 32
 
         tile_id = params.get("tile_id", 41)
         pair_table, pair_mask, mask_argsort = _get_mask_data(
@@ -212,6 +208,7 @@ def _execute_forward(
             _w = weight
 
         # Select tile based on channel alignment and output dtype
+        # mask_words is passed to C++ which template-switches on MaskWords
         vec_width = 16 // _in.element_size()
         cin_aligned = C_in % vec_width == 0
         cout_aligned = C_out % vec_width == 0
@@ -221,7 +218,7 @@ def _execute_forward(
             else:
                 tile_id = 82  # fp32 output, scalar B (any C)
         elif not cin_aligned and not cout_aligned:
-            tile_id = 70  # SAB_SE
+            tile_id = 70  # SAB_SE (scalar, handles any C and MW>1)
         elif not cin_aligned:
             tile_id = 71  # SA
         elif not cout_aligned:
@@ -238,6 +235,7 @@ def _execute_forward(
             mask_argsort,
             K,
             tile_id,
+            mask_words,
             1.0,
         )
         if status != 0:
@@ -419,11 +417,7 @@ def _execute_backward(
         from .mask_gemm import _get_mask_data, _get_reverse_mask_data
 
         K = weight.shape[0]
-        # Mask kernels use uint32 bitmask — only works for K<=32
-        if K > 32:
-            return _explicit_gemm_backward_logic(
-                grad_output, in_features, weight, kernel_map, compute_dtype, device
-            )
+        mask_words = (K + 31) // 32
 
         tile_id = params.get("tile_id", 60)
         split_k = params.get("split_k", 64)
@@ -457,12 +451,12 @@ def _execute_backward(
             )
             _wT = _wT_raw if _wT_raw is not None else _w.transpose(1, 2).contiguous()
 
-            # Select dgrad tile
+            # Select dgrad tile — mask_words passed to C++ for MW dispatch
             vec_width = 16 // _go.element_size()
             cin_aligned = C_in % vec_width == 0
             cout_aligned = C_out % vec_width == 0
             if not cin_aligned and not cout_aligned:
-                dgrad_tile = 70
+                dgrad_tile = 70  # SAB_SE (scalar, handles MW>1)
             elif not cout_aligned:
                 dgrad_tile = 71
             elif not cin_aligned:
@@ -490,6 +484,7 @@ def _execute_backward(
                 rev_as,
                 K,
                 dgrad_tile,
+                mask_words,
                 1.0,
             )
             if status != 0:
@@ -503,9 +498,10 @@ def _execute_backward(
             )
 
             # Build reduced_mask (cached on kernel_map)
+            # Wgrad kernel reads multi-word pair_mask and reduced_mask natively
             if not hasattr(kernel_map, "_reduced_mask") or kernel_map._reduced_mask is None:
                 kernel_map._reduced_mask = _C.production.build_reduced_mask(
-                    pair_mask, mask_argsort, 32
+                    pair_mask, mask_argsort, 32, mask_words
                 )
 
             # Select wgrad tile

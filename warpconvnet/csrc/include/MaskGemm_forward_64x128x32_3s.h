@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Auto-generated — DO NOT EDIT
 // Config: MaskGemm_forward_64x128x32_3s
 //   op_type=forward, tile=(64x128x32), stages=3
@@ -21,8 +24,9 @@
 namespace warpconvnet {
 namespace cute_gemm {
 
-template <class TileConfig, typename ElementOutput_ = float>
+template <class TileConfig, typename ElementOutput_ = float, int MaskWords_ = 1>
 struct MaskGemm_forward_64x128x32_3s {
+  static constexpr int MaskWords = MaskWords_;
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
@@ -43,6 +47,7 @@ struct MaskGemm_forward_64x128x32_3s {
   static constexpr int kMmaK = cute::size<2>(typename TiledMma::AtomShape_MNK{});
   static constexpr int K_BLOCK_MAX_STATIC = tK / kMmaK;
   static constexpr bool UseSmemEpilogue = true;
+  static constexpr bool UseScalarEpilogue = false;
 
   using SmemLayoutA = decltype(cute::tile_to_shape(
       SmemLayoutAtomA{},
@@ -62,9 +67,9 @@ struct MaskGemm_forward_64x128x32_3s {
   struct SharedStorage {
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutA>> smem_a;
     cute::array_aligned<ElementInput, cute::cosize_v<SmemLayoutB>> smem_b;
-    uint32_t warp_masks[NumWarps];
+    uint32_t warp_masks[NumWarps * MaskWords];
     int real_rows[tM];
-    uint32_t row_masks[tM];
+    uint32_t row_masks[tM * MaskWords];
   };
 
   static constexpr size_t EpilogueSmemSize = UseSmemEpilogue ? tM * (tN + 8) * 2 : 0;
@@ -87,6 +92,9 @@ struct MaskGemm_forward_64x128x32_3s {
                              char *smem_buf) const {
     using namespace cute;
 
+    // C_in/C_out = padded dimensions (tile sizing, bounds checks)
+    // C_in_stride/C_out_stride = real dimensions (gmem pointer arithmetic)
+    // When caller pads tensors, stride == padded. When unpadded, stride < padded.
     int grid_n = (C_out + tN - 1) / tN;
     int m_tile = int(blockIdx.x) / grid_n;
     int n_tile = int(blockIdx.x) % grid_n;
@@ -96,51 +104,80 @@ struct MaskGemm_forward_64x128x32_3s {
     SharedStorage &storage = *reinterpret_cast<SharedStorage *>(smem_buf);
 
     // Warp-shuffle mask union + precompute row info
-    uint32_t active_offsets;
+    // MaskWords=1: single uint32 active_offsets (original fast path).
+    // MaskWords>1: array of uint32 words for K>32.
+    uint32_t active_offsets_arr[MaskWords];
     if (K == 1) {
-      // K=1 fast path: single offset always active, skip mask union
-      active_offsets = 1;
+      for (int _w = 0; _w < MaskWords; ++_w) active_offsets_arr[_w] = 0;
+      active_offsets_arr[0] = 1;
       CUTLASS_PRAGMA_UNROLL
       for (int m_local = threadIdx.x; m_local < tM; m_local += MaxThreadsPerBlock) {
         int sorted_row = m_start + m_local;
         if (sorted_row < N_out) {
           int rr = __ldg(&mask_argsort[sorted_row]);
           storage.real_rows[m_local] = rr;
-          storage.row_masks[m_local] = 1;
+          storage.row_masks[m_local * MaskWords] = 1;
+          for (int _w = 1; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         } else {
           storage.real_rows[m_local] = -1;
-          storage.row_masks[m_local] = 0;
+          for (int _w = 0; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         }
       }
       __syncthreads();
     } else {
       int warp_id = threadIdx.x / 32;
       int lane_id = threadIdx.x % 32;
-      uint32_t my_mask = 0;
+      uint32_t my_mask[MaskWords];
+      for (int _w = 0; _w < MaskWords; ++_w) my_mask[_w] = 0;
       CUTLASS_PRAGMA_UNROLL
       for (int m_local = threadIdx.x; m_local < tM; m_local += MaxThreadsPerBlock) {
         int sorted_row = m_start + m_local;
         if (sorted_row < N_out) {
           int rr = __ldg(&mask_argsort[sorted_row]);
-          uint32_t rm = __ldg(&pair_mask[rr]);
           storage.real_rows[m_local] = rr;
-          storage.row_masks[m_local] = rm;
-          my_mask |= rm;
+          for (int _w = 0; _w < MaskWords; ++_w) {
+            uint32_t rm = __ldg(&pair_mask[rr * MaskWords + _w]);
+            storage.row_masks[m_local * MaskWords + _w] = rm;
+            my_mask[_w] |= rm;
+          }
         } else {
           storage.real_rows[m_local] = -1;
-          storage.row_masks[m_local] = 0;
+          for (int _w = 0; _w < MaskWords; ++_w) storage.row_masks[m_local * MaskWords + _w] = 0;
         }
       }
-      CUTLASS_PRAGMA_UNROLL
-      for (int s = 16; s >= 1; s >>= 1) {
-        my_mask |= __shfl_xor_sync(0xffffffff, my_mask, s);
+      for (int _w = 0; _w < MaskWords; ++_w) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int s = 16; s >= 1; s >>= 1) {
+          my_mask[_w] |= __shfl_xor_sync(0xffffffff, my_mask[_w], s);
+        }
+        if (lane_id == 0) storage.warp_masks[warp_id * MaskWords + _w] = my_mask[_w];
       }
-      if (lane_id == 0) storage.warp_masks[warp_id] = my_mask;
       __syncthreads();
-      active_offsets = 0;
-      CUTLASS_PRAGMA_UNROLL
-      for (int w = 0; w < NumWarps; ++w) active_offsets |= storage.warp_masks[w];
+      for (int _w = 0; _w < MaskWords; ++_w) {
+        active_offsets_arr[_w] = 0;
+        CUTLASS_PRAGMA_UNROLL
+        for (int _w2 = 0; _w2 < NumWarps; ++_w2)
+          active_offsets_arr[_w] |= storage.warp_masks[_w2 * MaskWords + _w];
+      }
     }
+    // Alias for backward compatibility with existing mainloop code
+    uint32_t &active_offsets = active_offsets_arr[0];
+
+    // Multi-word offset iterator: extracts offsets one at a time across words.
+    int _mw_iter_word = 0;
+    uint32_t _mw_iter_bits = active_offsets_arr[0];
+    auto _mw_has_next = [&]() {
+      while (!_mw_iter_bits && _mw_iter_word + 1 < MaskWords) {
+        ++_mw_iter_word;
+        _mw_iter_bits = active_offsets_arr[_mw_iter_word];
+      }
+      return _mw_iter_bits != 0;
+    };
+    auto _mw_next = [&]() {
+      int bit = __ffs(_mw_iter_bits) - 1;
+      _mw_iter_bits &= _mw_iter_bits - 1;
+      return _mw_iter_word * 32 + bit;
+    };
 
     // --- MMA setup with register double-buffering ---
     Tensor sA = make_tensor(make_smem_ptr(storage.smem_a.data()), SmemLayoutA{});
@@ -174,133 +211,146 @@ struct MaskGemm_forward_64x128x32_3s {
 
     AIteratorState a_state;
 
-    // --- Offset loop (iterate only active offsets via __ffs) ---
+    // --- Offset loop (iterate active offsets via __ffs, multi-word mask) ---
     int num_k_tiles = (C_in + tK - 1) / tK;
-    uint32_t offsets_remaining = active_offsets;
-    int _offset_idx = 0;  // for stage alternation across offsets
-    while (offsets_remaining) {
-      int k = __ffs(offsets_remaining) - 1;
-      offsets_remaining &= offsets_remaining - 1;
+    int _offset_idx = 0;
+    for (int _mw = 0; _mw < MaskWords; ++_mw) {
+      uint32_t _word = active_offsets_arr[_mw];
+      while (_word) {
+        int k = _mw * 32 + __ffs(_word) - 1;
+        _word &= _word - 1;
 
-      const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
+        const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
 
-      _update_A_indices(
-          a_state, pair_table, storage.real_rows, storage.row_masks, N_in, N_out, C_in, k, K);
+        _update_A_indices(
+            a_state, pair_table, storage.real_rows, storage.row_masks, N_in, N_out, C_in, k, K);
 
-      if (num_k_tiles == 1) {
-        // ---- Single k-tile: skip pipeline overhead ----
-        _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_in);
-        _load_B_tile(ptr_Bk, sB(_, _, 0), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
-        cute::cp_async_fence();
-        cute::cp_async_wait<0>();
-        __syncthreads();
-        MMA_DOUBLE_BUFFERED(0)
-        __syncthreads();
-      } else {
-        // ---- Multi k-tile: pipelined with interleaved A loads ----
-        {
-          int prolog_tiles = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
-          CUTLASS_PRAGMA_UNROLL
-          for (int s = 0; s < NumStages - 1; ++s) {
-            if (s < prolog_tiles) {
-              _load_A_with_offsets(ptr_A, a_state, sA(_, _, s), s * tK, C_in);
-              _load_B_tile(
-                  ptr_Bk, sB(_, _, s), gmem_thr_copy_B, n_start, s * tK, C_out, C_in, n_full_tile);
-            }
-            cute::cp_async_fence();
-          }
-        }
-        cute::cp_async_wait<NumStages - 2>();
-        __syncthreads();
-
-        int smem_pipe_read = 0;
-        int smem_pipe_write = NumStages - 1;
-        int prolog_tiles = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
-
-        CUTLASS_PRAGMA_NO_UNROLL
-        for (int ktile = prolog_tiles; ktile < num_k_tiles; ++ktile) {
-          int k_start_cin = ktile * tK;
-          copy(smem_tiled_copy_A, tCsA(_, _, 0, smem_pipe_read), tCrA_copy_0(_, _, 0));
-          copy(smem_tiled_copy_B, tCsB(_, _, 0, smem_pipe_read), tCrB_copy_0(_, _, 0));
-          _Pragma("unroll") for (int kb = 0; kb < K_BLOCK_MAX; ++kb) {
-            // Prefetch next k-block registers
-            if (kb + 1 < K_BLOCK_MAX) {
-              int nkb = kb + 1;
-              if (kb % 2 == 0) {
-                copy(smem_tiled_copy_A, tCsA(_, _, nkb, smem_pipe_read), tCrA_copy_1(_, _, nkb));
-                copy(smem_tiled_copy_B, tCsB(_, _, nkb, smem_pipe_read), tCrB_copy_1(_, _, nkb));
-              } else {
-                copy(smem_tiled_copy_A, tCsA(_, _, nkb, smem_pipe_read), tCrA_copy_0(_, _, nkb));
-                copy(smem_tiled_copy_B, tCsB(_, _, nkb, smem_pipe_read), tCrB_copy_0(_, _, nkb));
-              }
-            }
-            // Interleave A kblock + B loads with MMA.
-            switch (kb) {
-              case 0:
-                _load_A_kblock<decltype(sA(_, _, 0)), 0>(
-                    ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
+        if (num_k_tiles == 1) {
+          // ---- Single k-tile: skip pipeline overhead ----
+          _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_in);
+          _load_B_tile(ptr_Bk, sB(_, _, 0), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
+          cute::cp_async_fence();
+          cute::cp_async_wait<0>();
+          __syncthreads();
+          MMA_DOUBLE_BUFFERED(0)
+          __syncthreads();
+        } else {
+          // ---- Multi k-tile: pipelined with interleaved A loads ----
+          {
+            int prolog_tiles = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
+            CUTLASS_PRAGMA_UNROLL
+            for (int s = 0; s < NumStages - 1; ++s) {
+              if (s < prolog_tiles) {
+                _load_A_with_offsets(ptr_A, a_state, sA(_, _, s), s * tK, C_in);
                 _load_B_tile(ptr_Bk,
-                             sB(_, _, smem_pipe_write),
+                             sB(_, _, s),
                              gmem_thr_copy_B,
                              n_start,
-                             k_start_cin,
+                             s * tK,
                              C_out,
                              C_in,
                              n_full_tile);
-                break;
-              case 1:
-                if (K_BLOCK_MAX_STATIC > 1)
-                  _load_A_kblock<decltype(sA(_, _, 0)), 1>(
-                      ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
-
-                break;
-              case 2:
-                if (K_BLOCK_MAX_STATIC > 2)
-                  _load_A_kblock<decltype(sA(_, _, 0)), 2>(
-                      ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
-
-                break;
-              case 3:
-                if (K_BLOCK_MAX_STATIC > 3)
-                  _load_A_kblock<decltype(sA(_, _, 0)), 3>(
-                      ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
-
-                break;
-            }
-            if (kb % 2 == 0)
-              cute::gemm(tiled_mma, tCrA_0(_, _, kb), tCrB_0(_, _, kb), accum);
-            else
-              cute::gemm(tiled_mma, tCrA_1(_, _, kb), tCrB_1(_, _, kb), accum);
-            if (kb == K_BLOCK_MAX - 1) {
+              }
               cute::cp_async_fence();
             }
           }
           cute::cp_async_wait<NumStages - 2>();
           __syncthreads();
-          smem_pipe_write = smem_pipe_read;
-          ++smem_pipe_read;
-          if (smem_pipe_read >= NumStages) smem_pipe_read = 0;
-        }
 
-        {
-          int remaining = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
-          CUTLASS_PRAGMA_UNROLL
-          for (int ep = 0; ep < NumStages - 1; ++ep) {
-            if (ep < remaining) {
-              MMA_DOUBLE_BUFFERED(smem_pipe_read)
-              ++smem_pipe_read;
-              if (smem_pipe_read >= NumStages) smem_pipe_read = 0;
+          int smem_pipe_read = 0;
+          int smem_pipe_write = NumStages - 1;
+          int prolog_tiles = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
+
+          CUTLASS_PRAGMA_NO_UNROLL
+          for (int ktile = prolog_tiles; ktile < num_k_tiles; ++ktile) {
+            int k_start_cin = ktile * tK;
+            copy(smem_tiled_copy_A, tCsA(_, _, 0, smem_pipe_read), tCrA_copy_0(_, _, 0));
+            copy(smem_tiled_copy_B, tCsB(_, _, 0, smem_pipe_read), tCrB_copy_0(_, _, 0));
+            _Pragma("unroll") for (int kb = 0; kb < K_BLOCK_MAX; ++kb) {
+              // Prefetch next k-block registers
+              if (kb + 1 < K_BLOCK_MAX) {
+                int nkb = kb + 1;
+                if (kb % 2 == 0) {
+                  copy(smem_tiled_copy_A, tCsA(_, _, nkb, smem_pipe_read), tCrA_copy_1(_, _, nkb));
+                  copy(smem_tiled_copy_B, tCsB(_, _, nkb, smem_pipe_read), tCrB_copy_1(_, _, nkb));
+                } else {
+                  copy(smem_tiled_copy_A, tCsA(_, _, nkb, smem_pipe_read), tCrA_copy_0(_, _, nkb));
+                  copy(smem_tiled_copy_B, tCsB(_, _, nkb, smem_pipe_read), tCrB_copy_0(_, _, nkb));
+                }
+              }
+              // Interleave A kblock + B loads with MMA.
+              switch (kb) {
+                case 0:
+                  _load_A_kblock<decltype(sA(_, _, 0)), 0>(
+                      ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
+                  _load_B_tile(ptr_Bk,
+                               sB(_, _, smem_pipe_write),
+                               gmem_thr_copy_B,
+                               n_start,
+                               k_start_cin,
+                               C_out,
+                               C_in,
+                               n_full_tile);
+                  break;
+                case 1:
+                  if (K_BLOCK_MAX_STATIC > 1)
+                    _load_A_kblock<decltype(sA(_, _, 0)), 1>(
+                        ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
+
+                  break;
+                case 2:
+                  if (K_BLOCK_MAX_STATIC > 2)
+                    _load_A_kblock<decltype(sA(_, _, 0)), 2>(
+                        ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
+
+                  break;
+                case 3:
+                  if (K_BLOCK_MAX_STATIC > 3)
+                    _load_A_kblock<decltype(sA(_, _, 0)), 3>(
+                        ptr_A, a_state, sA(_, _, smem_pipe_write), k_start_cin, C_in);
+
+                  break;
+              }
+              if (kb % 2 == 0)
+                cute::gemm(tiled_mma, tCrA_0(_, _, kb), tCrB_0(_, _, kb), accum);
+              else
+                cute::gemm(tiled_mma, tCrA_1(_, _, kb), tCrB_1(_, _, kb), accum);
+              if (kb == K_BLOCK_MAX - 1) {
+                cute::cp_async_fence();
+              }
+            }
+            cute::cp_async_wait<NumStages - 2>();
+            __syncthreads();
+            smem_pipe_write = smem_pipe_read;
+            ++smem_pipe_read;
+            if (smem_pipe_read >= NumStages) smem_pipe_read = 0;
+          }
+
+          {
+            int remaining = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
+            CUTLASS_PRAGMA_UNROLL
+            for (int ep = 0; ep < NumStages - 1; ++ep) {
+              if (ep < remaining) {
+                MMA_DOUBLE_BUFFERED(smem_pipe_read)
+                ++smem_pipe_read;
+                if (smem_pipe_read >= NumStages) smem_pipe_read = 0;
+              }
             }
           }
+          __syncthreads();
         }
-        __syncthreads();
+        ++_offset_idx;
       }
-      ++_offset_idx;
     }
 
     // --- Epilogue ---
-    _epilogue_direct(
-        accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma, smem_buf);
+    if constexpr (UseScalarEpilogue) {
+      _epilogue_scalar(
+          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma);
+    } else {
+      _epilogue_direct(
+          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma, smem_buf);
+    }
   }
 
 private:
@@ -342,9 +392,9 @@ private:
 
       if (m_local < tM) {
         int real_row = real_rows[m_local];
-        uint32_t row_mask = row_masks[m_local];
         int in_row = -1;
-        if (real_row >= 0 && (K > 32 || (row_mask & (1u << offset_k)))) {
+        if (real_row >= 0 &&
+            (row_masks[m_local * MaskWords + offset_k / 32] & (1u << (offset_k % 32)))) {
           in_row = __ldg(&pt_base[real_row]);
         }
         if (in_row >= 0 && in_row < N_in) {
@@ -470,8 +520,8 @@ private:
                                bool n_full_tile) const {
     using namespace cute;
     bool k_full_tile = (k_start + tK <= C_in);
-    if (n_full_tile && k_full_tile) {
-      // Full tile: use CuTe TiledCopy (correct and fast)
+    if (n_full_tile && k_full_tile && sizeof(ElementInput) <= 2) {
+      // Full tile: use CuTe TiledCopy (fp16/bf16 only — fp32 uses cpasync fallback)
       Tensor gB_tile = make_tensor(make_gmem_ptr(ptr_Bk + n_start + k_start * C_out),
                                    make_shape(Int<tN>{}, Int<tK>{}),
                                    make_stride(Int<1>{}, C_out));
@@ -496,12 +546,16 @@ private:
         int k_global = k_start + k_local;
         // Use CuTe indexing for correct swizzled smem address
         uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_stage(n_local, k_local));
-        bool pred = (k_global < C_in) && (n_global + kVec <= C_out);
-        if (pred) {
+        if (k_global < C_in && n_global < C_out) {
+          // Partial cp.async: load only valid bytes, zero-fill the rest.
+          // Handles non-kVec-aligned C_out (e.g., C=7 loads 14 bytes, zeros 2).
+          int valid_n = min(kVec, C_out - n_global);
+          int src_bytes = valid_n * (int)sizeof(ElementInput);
           const void *src = &ptr_Bk[k_global * C_out + n_global];
-          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                        "l"(src),
-                       "n"(16));
+                       "n"(16),
+                       "r"(src_bytes));
         } else {
           asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                        "l"(ptr_Bk),
@@ -553,19 +607,24 @@ private:
       int n_global = n_start + n_local;
       int k_global = k_start + k_local;
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
-      bool pred;
       const void *src;
+      int src_bytes;
       if constexpr (!IsTransposed) {
-        pred = (k_global < K_dim) && (n_global + kVec <= N);
-        src = &ptr_B[k_global * N + n_global];  // N-contiguous
+        // N-contiguous: vector along N, partial at N boundary
+        int valid_n = (k_global < K_dim && n_global < N) ? min(kVec, N - n_global) : 0;
+        src_bytes = valid_n * (int)sizeof(ElementInput);
+        src = &ptr_B[k_global * N + n_global];
       } else {
-        pred = (n_global < N) && (k_global + kVec <= K_dim);
-        src = &ptr_B[n_global * K_dim + k_global];  // K-contiguous
+        // K-contiguous: vector along K, partial at K boundary
+        int valid_k = (n_global < N && k_global < K_dim) ? min(kVec, K_dim - k_global) : 0;
+        src_bytes = valid_k * (int)sizeof(ElementInput);
+        src = &ptr_B[n_global * K_dim + k_global];
       }
-      if (pred) {
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+      if (src_bytes > 0) {
+        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                      "l"(src),
-                     "n"(16));
+                     "n"(16),
+                     "r"(src_bytes));
       } else {
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                      "l"(ptr_B),
@@ -599,12 +658,14 @@ private:
         int n_global = n_start + n_local;
         int k_global = k_start + k_local;
         uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
-        bool pred = (k_global < K_dim) && (n_global + kVec <= N);
-        const void *src = &ptr_B[k_global * N + n_global];
-        if (pred) {
-          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+        int valid_n = (k_global < K_dim && n_global < N) ? min(kVec, N - n_global) : 0;
+        int src_bytes = valid_n * (int)sizeof(ElementInput);
+        if (src_bytes > 0) {
+          const void *src = &ptr_B[k_global * N + n_global];
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                        "l"(src),
-                       "n"(16));
+                       "n"(16),
+                       "r"(src_bytes));
         } else {
           asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                        "l"(ptr_B),
@@ -631,12 +692,15 @@ private:
         int k_global = k_start + k_local;
         if (n_local < tN) {
           uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
-          bool pred = (n_global < N) && (k_global + kVec <= K_dim);
-          if (pred) {
+          int valid_k = (n_global < N && k_global < K_dim) ? min(kVec, K_dim - k_global) : 0;
+          int src_bytes = valid_k * (int)sizeof(ElementInput);
+          if (src_bytes > 0) {
             const void *src = &ptr_B[n_global * K_dim + k_global];
-            asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
-                         "l"(src),
-                         "n"(16));
+            asm volatile(
+                "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                "l"(src),
+                "n"(16),
+                "r"(src_bytes));
           } else {
             asm volatile(
                 "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
@@ -801,6 +865,34 @@ private:
                                                  : static_cast<ElementOutput>(alpha * val);
           ptr_D[out_row * C_out + n_global] = result;
         }
+      }
+    }
+  }
+
+  template <class Accumulator, class TiledMma_>
+  __device__ void _epilogue_scalar(Accumulator &accum,
+                                   ElementOutput *ptr_D,
+                                   const int *mask_argsort,
+                                   int m_start,
+                                   int n_start,
+                                   int N_out,
+                                   int C_out,
+                                   float alpha,
+                                   TiledMma_ &tiled_mma) const {
+    using namespace cute;
+    auto thr_mma = tiled_mma.get_slice(threadIdx.x);
+    Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
+
+    // Scalar epilogue: write one element at a time (no alignment requirement)
+    CUTE_UNROLL
+    for (int i = 0; i < size(accum); ++i) {
+      auto coord = tCrC(i);
+      int sorted_row = m_start + get<0>(coord);
+      int n_global = n_start + get<1>(coord);
+      if (sorted_row < N_out && n_global < C_out) {
+        int out_row = mask_argsort[sorted_row];
+        float val = (alpha == 1.0f) ? float(accum(i)) : alpha * float(accum(i));
+        ptr_D[out_row * C_out + n_global] = static_cast<ElementOutput>(val);
       }
     }
   }

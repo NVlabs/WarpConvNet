@@ -32,21 +32,23 @@ struct Tile64x64x32_F16Accum {};
 struct Tile128x64x32_F16Accum {};
 struct Tile64x128x32_F16Accum {};
 
-// --- FP16 accum + k=8 MMA atom (m16n8k8) ---
+// --- FP16 accum + k=8 MMA atom (4 k-blocks, m16n8k8) ---
 struct Tile64x64x32_F16K8 {};
 struct Tile64x128x32_F16K8 {};
 
-// --- F32 accum + k=8 MMA atom (for wgrad numerics) ---
+// --- F32 accum + k=8 MMA atom (4 interleaving points, for wgrad numerics) ---
 struct Tile64x64x32_F32K8 {};
 
-// --- k=8 MMA with full-width LDSM (for dgrad K-contiguous B) ---
+// --- k=8 MMA with full-width LDSM (for dgrad K-contiguous B operand) ---
+// Uses SM75_U32x4_LDSM_N (16-byte ldmatrix) compatible with standard smem swizzle,
+// but k=8 MMA atom for 4 interleaving points. CuTe handles the k mismatch.
 struct Tile64x64x32_DgradK8 {};
 struct Tile64x128x32_DgradK8 {};
 
-// --- Small tiles for 2-warp configs (lower register pressure) ---
+// --- Small tiles for 64-thread (2-warp) configs (lower register pressure) ---
 struct Tile32x32x32 {};
 struct Tile32x32x32_F16Accum {};
-struct Tile32x16x32_F16Accum {};
+struct Tile32x16x32_F16Accum {};  // tN=16: 2x blocks for better wave scheduling
 
 // --- SM90 (Hopper) WGMMA tiles ---
 #if defined(WARPCONVNET_SM90_ENABLED)
@@ -81,19 +83,19 @@ enum class MMATile : int {
   Tile256x64x32 = 8,
   Tile64x256x32 = 9,
   // Production mask kernels (warp shuffle + precomp rows + double-buffered MMA)
-  // Forward
+  // Forward (MaskWords=1, K<=32)
   Prod_Fwd_32x32x32_F16Acc = 40,   // C<=48, fp16 only
   Prod_Fwd_64x64x32 = 41,          // C=64 or C<=48 bf16
   Prod_Fwd_64x128x32_F16Acc = 42,  // C>=128, C_in>=C_out, fp16
   Prod_Fwd_64x128x32_3s = 43,      // C>=128, C_in>=C_out, bf16
   Prod_Fwd_128x64x32 = 44,         // C>=128, C_in<C_out
-  // Dgrad
+  // Dgrad (MaskWords=1, K<=32)
   Prod_Dgrad_32x32x32 = 50,          // C<=48
   Prod_Dgrad_64x64x32 = 51,          // C=64
   Prod_Dgrad_64x128x32 = 52,         // C>=128
   Prod_Dgrad_64x64x32_F16Acc = 53,   // C=64, fp16
   Prod_Dgrad_64x128x32_F16Acc = 54,  // C>=128, fp16
-  // Wgrad
+  // Wgrad (mask_words computed at runtime — works for any K)
   Prod_Wgrad_64x64x32_f32 = 60,  // All configs
   // Scalar variants for unaligned C (no padding needed)
   Prod_Scalar_SAB_SE = 70,     // Both C_in, C_out unaligned (fwd/dgrad)

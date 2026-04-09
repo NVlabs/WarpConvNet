@@ -162,6 +162,22 @@ repos:
             "--exclude=logs/*,data/*",
           ]
 
+  # SPDX license header check
+  - repo: local
+    hooks:
+      - id: check-spdx-header
+        name: check SPDX license header
+        language: script
+        entry: scripts/check_spdx_header.sh
+        files: \.(py|c|cc|cpp|cxx|hpp|hxx|h|cu|cuh)$
+        exclude: |
+          (?x)^(
+            .*3rdparty/.*|
+            .*build/.*|
+            .*\.egg-info/.*|
+            setup\.py
+          )$
+
   # - repo: local
   #   hooks:
   #     - id: forbid-internal-files
