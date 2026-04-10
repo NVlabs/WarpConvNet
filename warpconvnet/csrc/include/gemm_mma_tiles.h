@@ -96,7 +96,9 @@ enum class MMATile : int {
   Prod_Dgrad_64x64x32_F16Acc = 53,   // C=64, fp16
   Prod_Dgrad_64x128x32_F16Acc = 54,  // C>=128, fp16
   // Wgrad (mask_words computed at runtime — works for any K)
-  Prod_Wgrad_64x64x32_f32 = 60,  // All configs
+  Prod_Wgrad_64x64x32_f32 = 60,          // Direct store, split_k=1
+  Prod_Wgrad_64x64x32_f32_atomic = 61,   // Atomic accumulate, C<=64
+  Prod_Wgrad_64x128x32_f32_atomic = 62,  // Atomic accumulate, C>=128
   // Scalar variants for unaligned C (no padding needed)
   Prod_Scalar_SAB_SE = 70,     // Both C_in, C_out unaligned (fwd/dgrad)
   Prod_Scalar_SA = 71,         // C_in unaligned, C_out aligned (fwd/dgrad)
