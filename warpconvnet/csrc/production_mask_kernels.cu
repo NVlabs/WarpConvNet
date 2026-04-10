@@ -39,6 +39,9 @@
 // Wgrad kernels
 #include "include/MaskGemm_wgrad_64x64x32_2s_f32.h"
 #include "include/MaskGemm_wgrad_64x64x32_2s_f32_sab.h"
+// Wgrad atomic kernels (split-K with atomicAdd accumulation)
+#include "include/MaskGemm_wgrad_64x128x32_2s_f32_atomic.h"
+#include "include/MaskGemm_wgrad_64x64x32_2s_f32_atomic.h"
 
 namespace warpconvnet {
 namespace cute_gemm {
@@ -1017,9 +1020,104 @@ INST_DGRAD_MW(cutlass::bfloat16_t, 4)
     return 0;                                                                        \
   }
 
-// Wgrad: 64x64x32 2-stage f32 output (aligned C)
+// Wgrad: 64x64x32 2-stage f32 output (direct store, aligned C)
 INSTANTIATE_PROD_WGRAD(MaskGemm_wgrad_64x64x32_2s_f32, cutlass::half_t, Tile64x64x32, float)
 INSTANTIATE_PROD_WGRAD(MaskGemm_wgrad_64x64x32_2s_f32, cutlass::bfloat16_t, Tile64x64x32, float)
+
+// =============================================================================
+// Wgrad atomic variant launch functions (split-K with atomicAdd)
+// =============================================================================
+
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_atomic_64x64(const void *,
+                              const void *,
+                              void *,
+                              const int *,
+                              const uint32_t *,
+                              const int *,
+                              const uint32_t *,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              float,
+                              cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_atomic_64x128(const void *,
+                               const void *,
+                               void *,
+                               const int *,
+                               const uint32_t *,
+                               const int *,
+                               const uint32_t *,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               float,
+                               cudaStream_t);
+
+#define INST_WGRAD_ATOMIC(SUFFIX, KernelClass, ElemIn, TileTag)                    \
+  template <>                                                                      \
+  int launch_wgrad_atomic_##SUFFIX<ElemIn, float>(const void *a,                   \
+                                                  const void *b,                   \
+                                                  void *d,                         \
+                                                  const int *pt,                   \
+                                                  const uint32_t *pm,              \
+                                                  const int *ms,                   \
+                                                  const uint32_t *rm,              \
+                                                  int N_in,                        \
+                                                  int N_out,                       \
+                                                  int C_in,                        \
+                                                  int C_out,                       \
+                                                  int K,                           \
+                                                  int split_k,                     \
+                                                  float alpha,                     \
+                                                  cudaStream_t stream) {           \
+    using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                          \
+    using Kernel = KernelClass<Config, float>;                                     \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
+    int m_tiles = (C_in + TileM - 1) / TileM;                                      \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
+    dim3 grid(m_tiles *n_tiles, K, split_k);                                       \
+    size_t smem = Kernel::SharedStorageSize;                                       \
+    if (smem > 48 * 1024) {                                                        \
+      auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
+                                      smem);                                       \
+      if (err != cudaSuccess) return -1;                                           \
+    }                                                                              \
+    production_wgrad_kernel_entry<Kernel>                                          \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
+                                                             (const ElemIn *)b,    \
+                                                             (float *)d,           \
+                                                             pt,                   \
+                                                             pm,                   \
+                                                             ms,                   \
+                                                             rm,                   \
+                                                             N_in,                 \
+                                                             N_out,                \
+                                                             C_in,                 \
+                                                             C_out,                \
+                                                             K,                    \
+                                                             alpha);               \
+    return 0;                                                                      \
+  }
+
+INST_WGRAD_ATOMIC(64x64, MaskGemm_wgrad_64x64x32_2s_f32_atomic, cutlass::half_t, Tile64x64x32)
+INST_WGRAD_ATOMIC(64x64, MaskGemm_wgrad_64x64x32_2s_f32_atomic, cutlass::bfloat16_t, Tile64x64x32)
+INST_WGRAD_ATOMIC(64x128, MaskGemm_wgrad_64x128x32_2s_f32_atomic, cutlass::half_t, Tile64x128x32)
+INST_WGRAD_ATOMIC(64x128,
+                  MaskGemm_wgrad_64x128x32_2s_f32_atomic,
+                  cutlass::bfloat16_t,
+                  Tile64x128x32)
+#undef INST_WGRAD_ATOMIC
 
 // =============================================================================
 // Wgrad scalar variant (unaligned C — scalar A and B loads)

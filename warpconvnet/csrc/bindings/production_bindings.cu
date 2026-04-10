@@ -252,6 +252,40 @@ int launch_production_dgrad_f32out(const void *,
                                    float,
                                    cudaStream_t);
 
+// Atomic wgrad launch functions
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_atomic_64x64(const void *,
+                              const void *,
+                              void *,
+                              const int *,
+                              const uint32_t *,
+                              const int *,
+                              const uint32_t *,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              float,
+                              cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_atomic_64x128(const void *,
+                               const void *,
+                               void *,
+                               const int *,
+                               const uint32_t *,
+                               const int *,
+                               const uint32_t *,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               float,
+                               cudaStream_t);
+
 // Scalar wgrad launch function
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_wgrad_sab(const void *,
@@ -728,43 +762,67 @@ int production_wgrad(torch::Tensor input,
 #endif
   }
 
-  // Vectorized wgrad (aligned C)
-  if (si == torch::kFloat16)
-    return cute_gemm::launch_production_wgrad<cutlass::half_t, gemm::Tile64x64x32, float>(
-        input.data_ptr(),
-        grad_output.data_ptr(),
-        grad_weight.data_ptr(),
-        pt_ptr,
-        pm_ptr,
-        ms_ptr,
-        rm_ptr,
-        N_in,
-        N_out,
-        C_in,
-        C_out,
-        K,
-        split_k,
-        alpha,
-        stream);
+  // Vectorized wgrad dispatch — direct, atomic 64x64, or atomic 64x128
+#define WGRAD_DISPATCH(ElemIn, TileTag)                                                    \
+  cute_gemm::launch_production_wgrad<ElemIn, gemm::TileTag, float>(input.data_ptr(),       \
+                                                                   grad_output.data_ptr(), \
+                                                                   grad_weight.data_ptr(), \
+                                                                   pt_ptr,                 \
+                                                                   pm_ptr,                 \
+                                                                   ms_ptr,                 \
+                                                                   rm_ptr,                 \
+                                                                   N_in,                   \
+                                                                   N_out,                  \
+                                                                   C_in,                   \
+                                                                   C_out,                  \
+                                                                   K,                      \
+                                                                   split_k,                \
+                                                                   alpha,                  \
+                                                                   stream)
+
+#define WGRAD_ATOMIC(ElemIn, suffix)                                             \
+  cute_gemm::launch_wgrad_atomic_##suffix<ElemIn, float>(input.data_ptr(),       \
+                                                         grad_output.data_ptr(), \
+                                                         grad_weight.data_ptr(), \
+                                                         pt_ptr,                 \
+                                                         pm_ptr,                 \
+                                                         ms_ptr,                 \
+                                                         rm_ptr,                 \
+                                                         N_in,                   \
+                                                         N_out,                  \
+                                                         C_in,                   \
+                                                         C_out,                  \
+                                                         K,                      \
+                                                         split_k,                \
+                                                         alpha,                  \
+                                                         stream)
+
+  if (si == torch::kFloat16) {
+    using In = cutlass::half_t;
+    switch (tile) {
+      case gemm::MMATile::Prod_Wgrad_64x64x32_f32_atomic:
+        return WGRAD_ATOMIC(In, 64x64);
+      case gemm::MMATile::Prod_Wgrad_64x128x32_f32_atomic:
+        return WGRAD_ATOMIC(In, 64x128);
+      default:
+        return WGRAD_DISPATCH(In, Tile64x64x32);
+    }
+  }
 #ifndef DISABLE_BFLOAT16
-  if (si == torch::kBFloat16)
-    return cute_gemm::launch_production_wgrad<cutlass::bfloat16_t, gemm::Tile64x64x32, float>(
-        input.data_ptr(),
-        grad_output.data_ptr(),
-        grad_weight.data_ptr(),
-        pt_ptr,
-        pm_ptr,
-        ms_ptr,
-        rm_ptr,
-        N_in,
-        N_out,
-        C_in,
-        C_out,
-        K,
-        split_k,
-        alpha,
-        stream);
+  if (si == torch::kBFloat16) {
+    using In = cutlass::bfloat16_t;
+    switch (tile) {
+      case gemm::MMATile::Prod_Wgrad_64x64x32_f32_atomic:
+        return WGRAD_ATOMIC(In, 64x64);
+      case gemm::MMATile::Prod_Wgrad_64x128x32_f32_atomic:
+        return WGRAD_ATOMIC(In, 64x128);
+      default:
+        return WGRAD_DISPATCH(In, Tile64x64x32);
+    }
+  }
 #endif
+#undef WGRAD_DISPATCH
+#undef WGRAD_ATOMIC
   TORCH_CHECK(false, "Unsupported dtype for production_wgrad");
   return -1;
 }

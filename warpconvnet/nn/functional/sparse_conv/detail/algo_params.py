@@ -221,8 +221,12 @@ _AB_PRODUCTION = (
 
 _ATB_PRODUCTION = (
     [
-        ("production", {"tile_id": 60, "split_k": 64}),  # Aligned, high split_k
-        ("production", {"tile_id": 60, "split_k": 16}),  # Aligned, low split_k
+        ("production", {"tile_id": 60, "split_k": 64}),  # Direct store, high split_k
+        ("production", {"tile_id": 60, "split_k": 16}),  # Direct store, low split_k
+        ("production", {"tile_id": 61, "split_k": 128}),  # Atomic 64x64, high split_k
+        ("production", {"tile_id": 61, "split_k": 32}),  # Atomic 64x64, low split_k
+        ("production", {"tile_id": 62, "split_k": 64}),  # Atomic 64x128, high split_k
+        ("production", {"tile_id": 62, "split_k": 16}),  # Atomic 64x128, low split_k
     ]
     if _HAS_PRODUCTION
     else []
