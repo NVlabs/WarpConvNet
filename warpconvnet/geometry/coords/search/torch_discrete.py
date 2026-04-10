@@ -390,6 +390,7 @@ def _kernel_map_from_size(
         )
 
 
+@torch.compiler.disable
 @torch.no_grad()
 def generate_kernel_map(
     batch_indexed_in_coords: Int[Tensor, "N D_1"],

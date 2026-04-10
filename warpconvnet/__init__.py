@@ -24,3 +24,7 @@ if not _SKIP_EXTENSION:
         ) from exc
 else:
     _C = None  # type: ignore[assignment]
+
+# Register pytree nodes, allow_in_graph markers, and compiler.disable
+# wrappers so that torch.compile(model) works out of the box.
+from . import _compile  # noqa: F401

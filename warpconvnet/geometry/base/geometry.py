@@ -26,7 +26,7 @@ def amp_aware_dtype(func):
     def wrapper(self, *args, **kwargs):
         tensor = func(self, *args, **kwargs)
         if torch.is_autocast_enabled():
-            amp_dtype = torch.get_autocast_gpu_dtype()
+            amp_dtype = torch.get_autocast_dtype("cuda")
             if amp_dtype is not None:
                 return tensor.to(dtype=amp_dtype)
         return tensor
@@ -58,9 +58,7 @@ class Geometry:
 
     batched_coordinates: Coords
     batched_features: Features
-    _extra_attributes: Dict[str, Any] = field(
-        default_factory=dict, init=True
-    )  # Store extra args
+    _extra_attributes: Dict[str, Any] = field(default_factory=dict, init=True)  # Store extra args
 
     def __init__(
         self,
@@ -86,9 +84,7 @@ class Geometry:
         # First check _extra_attributes in kwargs. This happens when we use dataclasses.replace
         if "_extra_attributes" in kwargs:
             attr = kwargs.pop("_extra_attributes")
-            assert isinstance(
-                attr, dict
-            ), f"_extra_attributes must be a dictionary, got {attr}"
+            assert isinstance(attr, dict), f"_extra_attributes must be a dictionary, got {attr}"
             # Update kwargs
             for k, v in attr.items():
                 kwargs[k] = v
@@ -171,9 +167,7 @@ class Geometry:
         elif self.batched_features.is_cat:
             return self.batched_features.to_pad()
         else:
-            raise ValueError(
-                f"Unsupported features type: {type(self.batched_features)}"
-            )
+            raise ValueError(f"Unsupported features type: {type(self.batched_features)}")
 
     def to_pad(self, pad_multiple: Optional[int] = None) -> "Geometry":
         """Convert features to padded format.
@@ -184,10 +178,7 @@ class Geometry:
         Returns:
             Geometry: A new Geometry instance with padded features.
         """
-        if (
-            self.batched_features.is_pad
-            and self.batched_features.pad_multiple == pad_multiple
-        ):
+        if self.batched_features.is_pad and self.batched_features.pad_multiple == pad_multiple:
             return self
         return self.replace(batched_features=self.batched_features.to_pad(pad_multiple))
 
@@ -252,12 +243,8 @@ class Geometry:
     def binary_op(self, value: object, op: str) -> "Geometry":
         if isinstance(value, Geometry):
             assert self.equal_shape(value), f"Shapes do not match. {self} != {value}"
-            return self._apply_feature_transform(
-                lambda x: getattr(x, op)(value.feature_tensor)
-            )
-        elif isinstance(value, (int, float)) or (
-            torch.is_tensor(value) and value.numel() == 1
-        ):
+            return self._apply_feature_transform(lambda x: getattr(x, op)(value.feature_tensor))
+        elif isinstance(value, (int, float)) or (torch.is_tensor(value) and value.numel() == 1):
             return self._apply_feature_transform(lambda x: getattr(x, op)(value))
         elif isinstance(value, torch.Tensor):
             assert self.equal_shape(value)
@@ -302,9 +289,7 @@ class Geometry:
         """Detailed representation of the object."""
         out_str = f"{self.__class__.__name__}(offsets={self.offsets.tolist()}, feature_shape={self.feature_tensor.shape}, coords_shape={self.batched_coordinates.shape}, device={self.device}, dtype={self.feature_tensor.dtype}"
         if self._extra_attributes:
-            out_dict = {
-                k: v for k, v in self._extra_attributes.items() if v is not None
-            }
+            out_dict = {k: v for k, v in self._extra_attributes.items() if v is not None}
             # if out_dict has values, add it to the string
             if out_dict:
                 out_str += ", "
@@ -349,18 +334,12 @@ class Geometry:
             _extra_attributes = kwargs.pop("_extra_attributes")
             kwargs = {**_extra_attributes, **kwargs}
 
-        assert (
-            "batched_features" not in kwargs
-        ), "Use features instead of batched_features"
+        assert "batched_features" not in kwargs, "Use features instead of batched_features"
 
         new_coords = (
-            batched_coordinates
-            if batched_coordinates is not None
-            else self.batched_coordinates
+            batched_coordinates if batched_coordinates is not None else self.batched_coordinates
         )
-        new_features = (
-            batched_features if batched_features is not None else self.batched_features
-        )
+        new_features = batched_features if batched_features is not None else self.batched_features
         if isinstance(new_features, torch.Tensor):
             new_features = to_batched_features(new_features, new_coords.offsets)
 
