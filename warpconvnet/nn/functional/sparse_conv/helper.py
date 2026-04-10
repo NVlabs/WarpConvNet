@@ -144,6 +144,7 @@ def _apply_generative_policy(
     )
 
 
+@torch.compiler.disable
 def spatially_sparse_conv(
     input_sparse_tensor: Geometry,
     weight: Float[Tensor, "K C_in C_out"],
@@ -320,6 +321,7 @@ def spatially_sparse_conv(
     )
 
 
+@torch.compiler.disable
 def generate_output_coords_and_kernel_map(
     input_sparse_tensor: Voxels,  # Ensure this is Voxels
     kernel_size: Tuple[int, ...],
