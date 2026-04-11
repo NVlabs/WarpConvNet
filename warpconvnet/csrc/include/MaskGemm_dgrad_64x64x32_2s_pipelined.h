@@ -19,30 +19,34 @@
 namespace warpconvnet {
 namespace cute_gemm {
 
+// Dgrad kernel: dX[j,:] = sum_k dY[rev_pt[k,j],:] @ W[k,:,:]^T
+// C_in, C_out in CONV semantics. Contraction over C_out, output dim C_in.
 template <class TileConfig, typename ElementOutput_ = float, int MaskWords_ = 1>
-struct MaskGemm_forward_64x64x32_1s_flat_direpi_sb {
+struct MaskGemm_dgrad_64x64x32_2s_pipelined {
   static constexpr int MaskWords = MaskWords_;
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
   using ElementOutput = ElementOutput_;
   using SmemLayoutAtomA = typename TileConfig::SmemLayoutAtomA;
-  using SmemLayoutAtomB = typename TileConfig::SmemLayoutAtomB;
   using SmemCopyAtomA = typename TileConfig::SmemCopyAtomA;
-  using SmemCopyAtomB = typename TileConfig::SmemCopyAtomB;
+  // Dgrad B: weight read with transposed strides -> K(C_out) contiguous.
+  using SmemLayoutAtomB = typename TileConfig::SmemLayoutAtomA;
+  using SmemCopyAtomB = typename TileConfig::SmemCopyAtomA;
 
   static constexpr int MaxThreadsPerBlock = cute::size(TiledMma{});
-  static constexpr int tM = cute::size<0>(TileShape{});
-  static constexpr int tN = cute::size<1>(TileShape{});
-  static constexpr int tK = cute::size<2>(TileShape{});
+  static constexpr int tM = cute::size<0>(TileShape{});  // N_in rows
+  static constexpr int tN = cute::size<1>(TileShape{});  // C_in channels (output)
   static constexpr int MinBlocksPerMultiprocessor = 1;
-  static constexpr int NumStages = 1;
+  static constexpr int tK = cute::size<2>(TileShape{});  // C_out contraction
+  static constexpr int NumStages = 2;
   static constexpr int NumWarps = MaxThreadsPerBlock / 32;
   static constexpr int kVec = 16 / sizeof(ElementInput);
   static constexpr int kMmaK = cute::size<2>(typename TiledMma::AtomShape_MNK{});
   static constexpr int K_BLOCK_MAX_STATIC = tK / kMmaK;
-  static constexpr bool UseSmemEpilogue = false;
+  static constexpr bool UseSmemEpilogue = true;
   static constexpr bool UseScalarEpilogue = false;
+  static constexpr int SplitOffsets = 1;
 
   using SmemLayoutA = decltype(cute::tile_to_shape(
       SmemLayoutAtomA{},
@@ -51,12 +55,13 @@ struct MaskGemm_forward_64x64x32_1s_flat_direpi_sb {
       SmemLayoutAtomB{},
       cute::make_shape(cute::Int<tN>{}, cute::Int<tK>{}, cute::Int<NumStages>{})));
 
-  static constexpr int CopyBNThreads = tN / kVec;
-  static constexpr int CopyBKThreads = MaxThreadsPerBlock / CopyBNThreads;
+  // GmemTiledCopyB — same as forward (N-outer, N-vec values).
+  // The dgrad B load bypasses this and uses manual cpasync + CuTe-addressed smem.
+  // This declaration only exists so the mainloop template parameter compiles.
   using GmemTiledCopyB = decltype(cute::make_tiled_copy(
       cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS<cute::uint128_t>, ElementInput>{},
-      cute::Layout<cute::Shape<cute::Int<CopyBNThreads>, cute::Int<CopyBKThreads>>,
-                   cute::Stride<cute::_1, cute::Int<CopyBNThreads>>>{},
+      cute::Layout<cute::Shape<cute::Int<tN / kVec>, cute::Int<MaxThreadsPerBlock / (tN / kVec)>>,
+                   cute::Stride<cute::_1, cute::Int<tN / kVec>>>{},
       cute::Layout<cute::Shape<cute::Int<kVec>, cute::_1>>{}));
 
   struct SharedStorage {
@@ -72,31 +77,34 @@ struct MaskGemm_forward_64x64x32_1s_flat_direpi_sb {
                                                   ? sizeof(SharedStorage)
                                                   : EpilogueSmemSize;
 
-  __device__ void operator()(const ElementInput *ptr_A,
-                             const ElementInput *ptr_B,
-                             ElementOutput *ptr_D,
-                             const int *pair_table,
-                             const uint32_t *pair_mask,
-                             const int *mask_argsort,
+  __device__ void operator()(const ElementInput *ptr_A,  // grad_output [N_out, C_out]
+                             const ElementInput *ptr_B,  // weight [K, C_in, C_out] — NOT transposed
+                             ElementOutput *ptr_D,       // grad_input [N_in, C_in]
+                             const int *pair_table,      // reverse_pair_table [K * N_in]
+                             const uint32_t *pair_mask,  // reverse_pair_mask [N_in]
+                             const int *mask_argsort,    // reverse_mask_argsort [N_in]
                              int N_in,
                              int N_out,
-                             int C_in,
-                             int C_out,
+                             int C_in,   // output dim (grad_input channels)
+                             int C_out,  // contraction dim (grad_output channels)
                              int K,
                              float alpha,
                              char *smem_buf) const {
     using namespace cute;
 
-    // C_in/C_out = padded dimensions (tile sizing, bounds checks)
-    // C_in_stride/C_out_stride = real dimensions (gmem pointer arithmetic)
-    // When caller pads tensors, stride == padded. When unpadded, stride < padded.
-    int grid_n = (C_out + tN - 1) / tN;
+    // Grid: ceil(N_in/tM) * ceil(C_in/tN) blocks
+    int grid_n = (C_in + tN - 1) / tN;
     int m_tile = int(blockIdx.x) / grid_n;
     int n_tile = int(blockIdx.x) % grid_n;
     int m_start = m_tile * tM;
     int n_start = n_tile * tN;
 
     SharedStorage &storage = *reinterpret_cast<SharedStorage *>(smem_buf);
+
+    // Mask union: N_out here = N_in (the dgrad output rows, mask array size)
+    // The mask_union code uses N_out as the bound — rename for clarity.
+    int N_out_mask = N_in;  // mask arrays are sized N_in
+#define N_out N_out_mask
 
     // Warp-shuffle mask union + precompute row info
     // MaskWords=1: single uint32 active_offsets (original fast path).
@@ -174,7 +182,9 @@ struct MaskGemm_forward_64x64x32_1s_flat_direpi_sb {
       return _mw_iter_word * 32 + bit;
     };
 
-    // --- MMA setup ---
+#undef N_out
+
+    // MMA setup
     Tensor sA = make_tensor(make_smem_ptr(storage.smem_a.data()), SmemLayoutA{});
     Tensor sB = make_tensor(make_smem_ptr(storage.smem_b.data()), SmemLayoutB{});
     TiledMma tiled_mma;
@@ -202,72 +212,101 @@ struct MaskGemm_forward_64x64x32_1s_flat_direpi_sb {
     auto K_BLOCK_MAX = size<2>(tCrA_0);
     GmemTiledCopyB gmem_tiled_copy_B;
     auto gmem_thr_copy_B = gmem_tiled_copy_B.get_slice(threadIdx.x);
-    bool n_full_tile = (n_start + tN <= C_out);
+    bool n_full_tile = (n_start + tN <= C_in);
 
     AIteratorState a_state;
     _init_A_iterator(a_state);
 
-    // --- Offset loop (iterate active offsets via __ffs, multi-word mask) ---
-    int num_k_tiles = (C_in + tK - 1) / tK;
-    int _offset_idx = 0;
-    for (int _mw = 0; _mw < MaskWords; ++_mw) {
-      uint32_t _word = active_offsets_arr[_mw];
-      while (_word) {
-        int k = _mw * 32 + __ffs(_word) - 1;
-        _word &= _word - 1;
+    // --- Pipelined dgrad offset loop: 2-stage across offsets ---
+    int num_k_tiles = (C_out + tK - 1) / tK;
+    if (!_mw_has_next()) goto epilogue;
 
+    if (num_k_tiles == 1) {
+      int smem_stage = 0;
+
+      // Prolog: load first offset
+      int k_cur = _mw_next();
+      _update_A_indices(
+          a_state, pair_table, storage.real_rows, storage.row_masks, N_out, N_in, C_out, k_cur, K);
+      _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_out);
+      _load_B_tile(ptr_B + k_cur * C_in * C_out,
+                   sB(_, _, 0),
+                   gmem_thr_copy_B,
+                   n_start,
+                   0,
+                   C_in,
+                   C_out,
+                   n_full_tile);
+      cute::cp_async_fence();
+      cute::cp_async_wait<0>();
+      __syncthreads();
+
+      while (true) {
+        if (_mw_has_next()) {
+          int k_next = _mw_next();
+          int write_stage = 1 - smem_stage;
+
+          // Pipelined: load NEXT offset (async) then MMA CURRENT (overlapped)
+          _update_A_indices(a_state,
+                            pair_table,
+                            storage.real_rows,
+                            storage.row_masks,
+                            N_out,
+                            N_in,
+                            C_out,
+                            k_next,
+                            K);
+          _load_A_with_offsets(ptr_A, a_state, sA(_, _, write_stage), 0, C_out);
+          _load_B_tile(ptr_B + k_next * C_in * C_out,
+                       sB(_, _, write_stage),
+                       gmem_thr_copy_B,
+                       n_start,
+                       0,
+                       C_in,
+                       C_out,
+                       n_full_tile);
+          cute::cp_async_fence();
+
+          MMA_DOUBLE_BUFFERED(smem_stage)
+
+          cute::cp_async_wait<0>();
+          __syncthreads();
+          smem_stage = write_stage;
+        } else {
+          MMA_DOUBLE_BUFFERED(smem_stage)
+          break;
+        }
+      }
+    } else {
+      // Multi k-tile: flat loop (no cross-offset pipelining)
+      while (_mw_has_next()) {
+        int k = _mw_next();
         const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
-
         _update_A_indices(
-            a_state, pair_table, storage.real_rows, storage.row_masks, N_in, N_out, C_in, k, K);
-
-        // ---- Pipelined flat with offset-alternating stages ----
-        // Stage alternates per offset (not per k-tile) so consecutive offsets
-        // use different smem buffers. This eliminates 1 __syncthreads per offset
-        // for single-k-tile cases (common at small C).
-        if (num_k_tiles == 1) {
-          // Single k-tile: alternate stage per offset, skip post-MMA sync
-          int smem_stage = _offset_idx & 1;
-          _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_in);
+            a_state, pair_table, storage.real_rows, storage.row_masks, N_out, N_in, C_out, k, K);
+        for (int kt = 0; kt < num_k_tiles; ++kt) {
+          int k_start = kt * tK;
+          _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), k_start, C_out);
           _load_B_tile(
-              ptr_Bk, sB(_, _, smem_stage), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
+              ptr_Bk, sB(_, _, 0), gmem_thr_copy_B, n_start, k_start, C_in, C_out, n_full_tile);
           cute::cp_async_fence();
           cute::cp_async_wait<0>();
           __syncthreads();
-          MMA_DOUBLE_BUFFERED(smem_stage)
-          // No __syncthreads here — next offset uses the OTHER stage
-        } else {
-          // Multi k-tile: stage alternates per k-tile within offset
-          for (int kt = 0; kt < num_k_tiles; ++kt) {
-            int k_start_cin = kt * tK;
-            int smem_stage = kt & 1;
-            _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), k_start_cin, C_in);
-            _load_B_tile(ptr_Bk,
-                         sB(_, _, smem_stage),
-                         gmem_thr_copy_B,
-                         n_start,
-                         k_start_cin,
-                         C_out,
-                         C_in,
-                         n_full_tile);
-            cute::cp_async_fence();
-            cute::cp_async_wait<0>();
-            __syncthreads();
-            MMA_DOUBLE_BUFFERED(smem_stage)
-            __syncthreads();
-          }
+          MMA_DOUBLE_BUFFERED(0)
+          __syncthreads();
         }
-        ++_offset_idx;
       }
     }
+  epilogue:
 
-    // --- Epilogue ---
+    // Epilogue: scatter to grad_input [N_in, C_in]
     if constexpr (UseScalarEpilogue) {
-      _epilogue_scalar(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma);
+      _epilogue_scalar(accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma);
+    } else if constexpr (SplitOffsets > 1) {
+      _epilogue_atomic(accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma);
     } else {
       _epilogue_direct(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma, smem_buf);
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma, smem_buf);
     }
   }
 
@@ -431,85 +470,86 @@ private:
     }
   }
 
-  /// Warp-raked B load with pre-computed stride increments.
-  template <class SmemTensor>
-  __device__ void _load_B_warp_raked(const ElementInput *ptr_Bk,
-                                     SmemTensor smem_stage,
-                                     int n_start,
-                                     int k_start,
-                                     int C_out,
-                                     int C_in) const {
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
-    constexpr int kWarpDilN = tN / (MaxThreadsPerBlock / 32);
-    constexpr int kWarpDilK = tK / kVec;
+  static constexpr bool BIsTransposed = true;
 
-    int n_base = warp_id * kWarpDilN + (lane_id / kWarpDilK);
-    int k_base = (lane_id % kWarpDilK) * kVec;
-
-    constexpr int n_stride = 32 / kWarpDilK;
-    constexpr int num_iters = tN / (n_stride * (MaxThreadsPerBlock / 32));
-
-    int n_global = n_start + n_base;
-    int k_global = k_start + k_base;
-    int inc_strided_bytes = n_stride * sizeof(ElementInput);
-
-    const char *gptr = reinterpret_cast<const char *>(&ptr_Bk[k_global * C_out + n_global]);
-
-    CUTLASS_PRAGMA_UNROLL
-    for (int s = 0; s < num_iters; ++s) {
-      int n_cur = n_global + s * n_stride;
-      uint32_t sa = cute::cast_smem_ptr_to_uint(&smem_stage(n_cur - n_start, k_base));
-      bool ok =
-          (n_cur + kVec <= n_start + tN) && (n_cur + kVec <= C_out) && (k_global + kVec <= C_in);
-
-      if (ok) {
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(sa),
-                     "l"(gptr + s * inc_strided_bytes),
-                     "n"(16));
-      } else {
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(sa),
-                     "l"(gptr),
-                     "n"(16),
-                     "r"(0));
-      }
-    }
-  }
-
-  static constexpr bool BIsTransposed = false;
-
+  // _load_B_tile: K-contiguous B load for dgrad.
+  // Optimized: precompute smem base address once, use compile-time offsets
+  // for each wave to minimize instruction count.
   template <class SmemTensor, class GmemThrCopyB>
   __device__ void _load_B_tile(const ElementInput *ptr_Bk,
                                SmemTensor smem_stage,
                                GmemThrCopyB & /*unused*/,
                                int n_start,
                                int k_start,
-                               int C_out,
-                               int C_in,
-                               bool /*n_full_tile*/) const {
-    // Scalar B load: N(C_out) contiguous. Element-by-element reads.
-    constexpr int n_vecs = tN / kVec;
-    constexpr int total_vecs = tK * n_vecs;
+                               int N_dim,
+                               int K_dim,
+                               bool n_full_tile) const {
+    static_assert(tK % kVec == 0);
+    constexpr int k_vecs = tK / kVec;
+    constexpr int k_threads = k_vecs;
+    constexpr int n_per_wave = MaxThreadsPerBlock / k_threads;
+    constexpr int num_waves = (tN + n_per_wave - 1) / n_per_wave;
 
-    CUTLASS_PRAGMA_UNROLL
-    for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
-      int k_local = idx / n_vecs;
-      int n_local = (idx % n_vecs) * kVec;
-      int n_global = n_start + n_local;
-      int k_global = k_start + k_local;
+    // Precompute this thread's K-position and N-position within wave
+    int k_tid = threadIdx.x % k_threads;
+    int n_tid = threadIdx.x / k_threads;
+    int k_local = k_tid * kVec;
+    int k_global = k_start + k_local;
+    // Partial K: compute valid bytes for cp.async (handles non-kVec-aligned K_dim)
+    int k_valid_n = (k_global < K_dim) ? min(kVec, K_dim - k_global) : 0;
+    int k_src_bytes = k_valid_n * (int)sizeof(ElementInput);
+    bool k_full = (k_valid_n == kVec);
 
-      int4 frag = make_int4(0, 0, 0, 0);
-      if (k_global < C_in) {
-        const ElementInput *row_ptr = &ptr_Bk[k_global * C_out];
-        ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
-        CUTLASS_PRAGMA_UNROLL
-        for (int v = 0; v < kVec; ++v) {
-          int n = n_global + v;
-          if (n < C_out) dst[v] = row_ptr[n];
+    // Precompute gmem base for this thread
+    const ElementInput *gmem_row_base = ptr_Bk + k_global;  // + n * K_dim per row
+
+    if (n_full_tile && k_full) {
+      // Fast path: no bounds checking, all waves valid
+      CUTLASS_PRAGMA_UNROLL
+      for (int wave = 0; wave < num_waves; ++wave) {
+        int n_local = wave * n_per_wave + n_tid;
+        uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_stage(n_local, k_local));
+        const void *src = gmem_row_base + (int64_t)(n_start + n_local) * K_dim;
+        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+                     "l"(src),
+                     "n"(16));
+      }
+    } else {
+      // Partial tile: per-element bounds checking with partial cp.async
+      CUTLASS_PRAGMA_UNROLL
+      for (int wave = 0; wave < num_waves; ++wave) {
+        int n_local = wave * n_per_wave + n_tid;
+        if (n_local < tN) {
+          int n_global = n_start + n_local;
+          uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_stage(n_local, k_local));
+          if (n_global < N_dim && k_valid_n > 0) {
+            const void *src = gmem_row_base + (int64_t)n_global * K_dim;
+            asm volatile(
+                "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                "l"(src),
+                "n"(16),
+                "r"(k_src_bytes));
+          } else {
+            asm volatile(
+                "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                "l"(ptr_Bk),
+                "n"(16),
+                "r"(0));
+          }
         }
       }
-      *reinterpret_cast<int4 *>(&smem_stage(n_local, k_local)) = frag;
     }
+  }
+
+  // Legacy transposed API (backward compat)
+  template <class SmemTensor>
+  __device__ void _load_B_tile_transposed(const ElementInput *ptr_Bk,
+                                          SmemTensor smem_stage,
+                                          int n_start,
+                                          int k_start,
+                                          int N_dim,
+                                          int K_dim) const {
+    _load_dense_B_generic<SmemTensor, true>(ptr_Bk, smem_stage, n_start, k_start, N_dim, K_dim);
   }
 
   /// Unified dense B load via cp.async, parameterized by layout.
@@ -703,8 +743,8 @@ private:
                                    const int *mask_argsort,
                                    int m_start,
                                    int n_start,
-                                   int N_out,
-                                   int C_out,
+                                   int N_in,
+                                   int C_in,
                                    float alpha,
                                    TiledMma_ &tiled_mma,
                                    char *smem_buf) const {
@@ -738,20 +778,20 @@ private:
         int row = iter + row_in_iter;
         if (row < tM) {
           int sorted_row = m_start + row;
-          if (sorted_row < N_out && col_start + n_start + VEC <= C_out) {
+          if (sorted_row < N_in && col_start + n_start + VEC <= C_in) {
             int out_row = mask_argsort[sorted_row];
             uint64_t packed;
             memcpy(&packed, &epi_smem[row * EPL_STRIDE + col_start], sizeof(uint64_t));
             char *dst = reinterpret_cast<char *>(ptr_D) +
-                        ((size_t)out_row * C_out + n_start + col_start) * 2;
+                        ((size_t)out_row * C_in + n_start + col_start) * 2;
             *reinterpret_cast<uint64_t *>(dst) = packed;
-          } else if (sorted_row < N_out) {
+          } else if (sorted_row < N_in) {
             int out_row = mask_argsort[sorted_row];
             for (int v = 0; v < VEC; ++v) {
               int n_global = n_start + col_start + v;
-              if (n_global < C_out) {
+              if (n_global < C_in) {
                 __half h = epi_smem[row * EPL_STRIDE + col_start + v];
-                memcpy(&ptr_D[out_row * C_out + n_global], &h, 2);
+                memcpy(&ptr_D[out_row * C_in + n_global], &h, 2);
               }
             }
           }
@@ -767,7 +807,7 @@ private:
           auto coord = tCrC(base);
           int sorted_row = m_start + get<0>(coord);
           int n_global = n_start + get<1>(coord);
-          if (sorted_row < N_out && n_global + 1 < C_out) {
+          if (sorted_row < N_in && n_global + 1 < C_in) {
             int out_row = mask_argsort[sorted_row];
             float v0 = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
             float v1 = (alpha == 1.0f) ? float(accum(base + 1)) : alpha * float(accum(base + 1));
@@ -777,12 +817,12 @@ private:
             memcpy(&s1, &h1, 2);
             uint32_t packed = (uint32_t)s0 | ((uint32_t)s1 << 16);
             char *base_ptr = reinterpret_cast<char *>(ptr_D);
-            *reinterpret_cast<uint32_t *>(base_ptr + ((size_t)out_row * C_out + n_global) * 2) =
+            *reinterpret_cast<uint32_t *>(base_ptr + ((size_t)out_row * C_in + n_global) * 2) =
                 packed;
-          } else if (sorted_row < N_out && n_global < C_out) {
+          } else if (sorted_row < N_in && n_global < C_in) {
             int out_row = mask_argsort[sorted_row];
             float val = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
-            ptr_D[out_row * C_out + n_global] = static_cast<ElementOutput>(val);
+            ptr_D[out_row * C_in + n_global] = static_cast<ElementOutput>(val);
           }
         }
       }
@@ -793,12 +833,46 @@ private:
         auto coord = tCrC(i);
         int sorted_row = m_start + get<0>(coord);
         int n_global = n_start + get<1>(coord);
-        if (sorted_row < N_out && n_global < C_out) {
+        if (sorted_row < N_in && n_global < C_in) {
           int out_row = mask_argsort[sorted_row];
           float val = float(accum(i));
           ElementOutput result = (alpha == 1.0f) ? static_cast<ElementOutput>(val)
                                                  : static_cast<ElementOutput>(alpha * val);
-          ptr_D[out_row * C_out + n_global] = result;
+          ptr_D[out_row * C_in + n_global] = result;
+        }
+      }
+    }
+  }
+
+  template <class Accumulator, class TiledMma_>
+  __device__ void _epilogue_atomic(Accumulator &accum,
+                                   ElementOutput *ptr_D,
+                                   const int *mask_argsort,
+                                   int m_start,
+                                   int n_start,
+                                   int N_in,
+                                   int C_in,
+                                   float alpha,
+                                   TiledMma_ &tiled_mma) const {
+    using namespace cute;
+    auto thr_mma = tiled_mma.get_slice(threadIdx.x);
+    Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
+
+    // Atomic epilogue: each element uses atomicAdd to accumulate across Y-blocks.
+    // For fp16 output, use atomicAdd(__half*, __half) which is supported on SM70+.
+    CUTE_UNROLL
+    for (int i = 0; i < size(accum); ++i) {
+      auto coord = tCrC(i);
+      int sorted_row = m_start + get<0>(coord);
+      int n_global = n_start + get<1>(coord);
+      if (sorted_row < N_in && n_global < C_in) {
+        int out_row = mask_argsort[sorted_row];
+        float val = (alpha == 1.0f) ? float(accum(i)) : alpha * float(accum(i));
+        if constexpr (sizeof(ElementOutput) == 2) {
+          atomicAdd(reinterpret_cast<__half *>(ptr_D + out_row * C_in + n_global),
+                    __float2half(val));
+        } else {
+          atomicAdd(ptr_D + out_row * C_in + n_global, static_cast<ElementOutput>(val));
         }
       }
     }
@@ -810,8 +884,8 @@ private:
                                    const int *mask_argsort,
                                    int m_start,
                                    int n_start,
-                                   int N_out,
-                                   int C_out,
+                                   int N_in,
+                                   int C_in,
                                    float alpha,
                                    TiledMma_ &tiled_mma) const {
     using namespace cute;
@@ -824,10 +898,10 @@ private:
       auto coord = tCrC(i);
       int sorted_row = m_start + get<0>(coord);
       int n_global = n_start + get<1>(coord);
-      if (sorted_row < N_out && n_global < C_out) {
+      if (sorted_row < N_in && n_global < C_in) {
         int out_row = mask_argsort[sorted_row];
         float val = (alpha == 1.0f) ? float(accum(i)) : alpha * float(accum(i));
-        ptr_D[out_row * C_out + n_global] = static_cast<ElementOutput>(val);
+        ptr_D[out_row * C_in + n_global] = static_cast<ElementOutput>(val);
       }
     }
   }

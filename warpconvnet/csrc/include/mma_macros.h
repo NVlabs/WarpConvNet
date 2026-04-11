@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // Common MMA macros for generated kernels
 // Created: 2026-04-02 17:00:00
 // Edited: 2026-04-02 19:30:00

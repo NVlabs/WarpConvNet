@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Auto-generated — DO NOT EDIT
-// Config: MaskGemm_forward_64x64x32_2s_pipelined
-//   op_type=forward, tile=(64x64x32), stages=2
-//   epilogue=direct, warp_shuffle=True, precomp_rows=True
-
 #pragma once
 
 #include <cuda_bf16.h>
@@ -179,7 +174,7 @@ struct MaskGemm_forward_64x64x32_2s_pipelined {
       return _mw_iter_word * 32 + bit;
     };
 
-    // --- MMA setup with register double-buffering ---
+    // --- MMA setup ---
     Tensor sA = make_tensor(make_smem_ptr(storage.smem_a.data()), SmemLayoutA{});
     Tensor sB = make_tensor(make_smem_ptr(storage.smem_b.data()), SmemLayoutB{});
     TiledMma tiled_mma;
@@ -244,9 +239,7 @@ struct MaskGemm_forward_64x64x32_2s_pipelined {
           int k_next = _mw_next();
           int write_stage = 1 - smem_stage;
 
-          // MMA on current stage (ldmatrix is sync, gemm is async on tensor cores)
-          MMA_DOUBLE_BUFFERED(smem_stage)
-          // While gemm is in-flight: issue cp.async for next offset
+          // Pipelined: load NEXT offset (async) then MMA CURRENT (overlapped)
           _update_A_indices(a_state,
                             pair_table,
                             storage.real_rows,
@@ -266,6 +259,9 @@ struct MaskGemm_forward_64x64x32_2s_pipelined {
                        C_in,
                        n_full_tile);
           cute::cp_async_fence();
+
+          MMA_DOUBLE_BUFFERED(smem_stage)
+
           cute::cp_async_wait<0>();
           __syncthreads();
           smem_stage = write_stage;
@@ -784,7 +780,7 @@ private:
     Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
 
     if constexpr (sizeof(ElementOutput) == 2 && UseSmemEpilogue) {
-      // Shared memory staging epilogue
+      // Shared memory staging epilogue (CUTLASS pattern)
       constexpr int EPL_PAD = 8;
       constexpr int EPL_STRIDE = tN + EPL_PAD;
       __half *epi_smem = reinterpret_cast<__half *>(smem_buf);

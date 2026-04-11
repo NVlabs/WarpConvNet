@@ -413,8 +413,10 @@ def _execute_backward(
                 f"cute_grouped_sm90 bwd error: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
             )
         return result
-    elif algo == "production":
+    elif algo in ("production", "production_fwd_as_dgrad"):
         from .mask_gemm import _get_mask_data, _get_reverse_mask_data
+
+        use_fwd_for_dgrad = algo == "production_fwd_as_dgrad"
 
         K = weight.shape[0]
         mask_words = (K + 31) // 32
@@ -445,51 +447,98 @@ def _execute_backward(
         grad_weight = None
 
         if needs_input_grad[0]:
-            # Dgrad via production dgrad kernel with reverse pair data
             rev_pt, rev_pm, rev_as = _get_reverse_mask_data(
                 kernel_map, N_in, num_out_coords, grad_output.device
             )
             _wT = _wT_raw if _wT_raw is not None else _w.transpose(1, 2).contiguous()
 
-            # Select dgrad tile — mask_words passed to C++ for MW dispatch
-            vec_width = 16 // _go.element_size()
-            cin_aligned = C_in % vec_width == 0
-            cout_aligned = C_out % vec_width == 0
-            if not cin_aligned and not cout_aligned:
-                dgrad_tile = 70  # SAB_SE (scalar, handles MW>1)
-            elif not cout_aligned:
-                dgrad_tile = 71
-            elif not cin_aligned:
-                dgrad_tile = 72
-            elif use_f32_output:
-                dgrad_tile = 81  # fp32 output tile
-            else:
-                C = max(C_in, C_out)
-                is_fp16 = compute_dtype == torch.float16
-                if C <= 48:
-                    dgrad_tile = 50
-                elif C <= 96:
-                    dgrad_tile = 53 if is_fp16 else 51
-                else:
-                    dgrad_tile = 54 if is_fp16 else 52
+            if use_fwd_for_dgrad:
+                # Dgrad via forward kernel with explicit weight transpose.
+                # Forward: D[N_out, C_out] = sum_k B[k, C_in, C_out] @ A[pt[k,i], C_in]
+                # Dgrad:   D[N_in, C_in]  = sum_k B_T[k, C_out, C_in] @ A[rev_pt[k,j], C_out]
+                # => call fwd with A=grad_output, B=weight_T, swapped C dims
+                dgrad_tile = params.get("tile_id", 41)
+                vec_width = 16 // _go.element_size()
+                # For fwd-as-dgrad: "C_in" to fwd is C_out, "C_out" to fwd is C_in
+                fwd_cin_aligned = C_out % vec_width == 0
+                fwd_cout_aligned = C_in % vec_width == 0
+                if use_f32_output:
+                    if fwd_cin_aligned and fwd_cout_aligned:
+                        dgrad_tile = 80
+                    else:
+                        dgrad_tile = 82
+                elif not fwd_cin_aligned and not fwd_cout_aligned:
+                    dgrad_tile = 70
+                elif not fwd_cin_aligned:
+                    dgrad_tile = 71
+                elif not fwd_cout_aligned:
+                    dgrad_tile = 72
 
-            dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
-            grad_in = torch.zeros((N_in, C_in), dtype=dgrad_out_dtype, device=grad_output.device)
-            status = _C.production.dgrad(
-                _go,
-                _wT,
-                grad_in,
-                rev_pt,
-                rev_pm,
-                rev_as,
-                K,
-                dgrad_tile,
-                mask_words,
-                1.0,
-            )
-            if status != 0:
-                raise RuntimeError(f"production dgrad failed: status={status}")
-            grad_in = grad_in.to(dtype=orig_dtype)
+                dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
+                grad_in = torch.zeros(
+                    (N_in, C_in), dtype=dgrad_out_dtype, device=grad_output.device
+                )
+                # _wT is [K, C_out, C_in] — matches fwd B layout [K, "C_in", "C_out"]
+                # where fwd sees "C_in"=C_out, "C_out"=C_in
+                status = _C.production.fwd(
+                    _go,  # A: [N_out, C_out] — "features" to fwd
+                    _wT,  # B: [K, C_out, C_in] — "weight" to fwd
+                    grad_in,  # D: [N_in, C_in] — "output" to fwd
+                    rev_pt,
+                    rev_pm,
+                    rev_as,
+                    K,
+                    dgrad_tile,
+                    mask_words,
+                    1.0,
+                )
+                if status != 0:
+                    raise RuntimeError(
+                        f"production_fwd_as_dgrad failed: status={status}, tile={dgrad_tile}"
+                    )
+                grad_in = grad_in.to(dtype=orig_dtype)
+            else:
+                # Dgrad via dedicated production dgrad kernel
+                vec_width = 16 // _go.element_size()
+                cin_aligned = C_in % vec_width == 0
+                cout_aligned = C_out % vec_width == 0
+                if not cin_aligned and not cout_aligned:
+                    dgrad_tile = 70
+                elif not cout_aligned:
+                    dgrad_tile = 71
+                elif not cin_aligned:
+                    dgrad_tile = 72
+                elif use_f32_output:
+                    dgrad_tile = 81
+                else:
+                    C = max(C_in, C_out)
+                    is_fp16 = compute_dtype == torch.float16
+                    if C <= 48:
+                        dgrad_tile = 50
+                    elif C <= 96:
+                        dgrad_tile = 53 if is_fp16 else 51
+                    else:
+                        dgrad_tile = 54 if is_fp16 else 52
+
+                dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
+                grad_in = torch.zeros(
+                    (N_in, C_in), dtype=dgrad_out_dtype, device=grad_output.device
+                )
+                status = _C.production.dgrad(
+                    _go,
+                    _wT,
+                    grad_in,
+                    rev_pt,
+                    rev_pm,
+                    rev_as,
+                    K,
+                    dgrad_tile,
+                    mask_words,
+                    1.0,
+                )
+                if status != 0:
+                    raise RuntimeError(f"production dgrad failed: status={status}")
+                grad_in = grad_in.to(dtype=orig_dtype)
 
         if needs_input_grad[1]:
             # Wgrad via production wgrad kernel with reduced_mask

@@ -390,6 +390,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 kv_bwd,
                 num_in_coords=N_in_bwd,
             )
+        # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose)
+        from .algo_params import _AB_PRODUCTION_FWD_AS_DGRAD
+
+        dgrad_adaptive = list(dgrad_adaptive) + list(_AB_PRODUCTION_FWD_AS_DGRAD)
         if wgrad_filter == "trimmed":
             wgrad_adaptive = _get_trimmed_AtB_params(
                 C_in_bwd,

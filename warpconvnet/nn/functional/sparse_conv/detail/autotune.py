@@ -579,11 +579,11 @@ def _run_backward_benchmarks(
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
-        elif algo_mode == "production":
+        elif algo_mode in ("production", "production_fwd_as_dgrad"):
             from .dispatch import _execute_backward
 
             _ = _execute_backward(
-                "production",
+                algo_mode,
                 params_config,
                 grad_output,
                 in_features,

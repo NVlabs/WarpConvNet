@@ -89,16 +89,21 @@ enum class MMATile : int {
   Prod_Fwd_64x128x32_F16Acc = 42,  // C>=128, C_in>=C_out, fp16
   Prod_Fwd_64x128x32_3s = 43,      // C>=128, C_in>=C_out, bf16
   Prod_Fwd_128x64x32 = 44,         // C>=128, C_in<C_out
-  // Dgrad (MaskWords=1, K<=32)
+  // Dgrad
   Prod_Dgrad_32x32x32 = 50,          // C<=48
   Prod_Dgrad_64x64x32 = 51,          // C=64
   Prod_Dgrad_64x128x32 = 52,         // C>=128
   Prod_Dgrad_64x64x32_F16Acc = 53,   // C=64, fp16
   Prod_Dgrad_64x128x32_F16Acc = 54,  // C>=128, fp16
+  // Dgrad pipelined (load-before-MMA)
+  Prod_Dgrad_64x64x32_Pipe = 55,   // 64x64 pipelined
+  Prod_Dgrad_64x128x32_Pipe = 56,  // 64x128 pipelined
+  Prod_Dgrad_128x64x32_Pipe = 57,  // 128x64 pipelined
   // Wgrad (mask_words computed at runtime — works for any K)
-  Prod_Wgrad_64x64x32_f32 = 60,          // Direct store, split_k=1
-  Prod_Wgrad_64x64x32_f32_atomic = 61,   // Atomic accumulate, C<=64
-  Prod_Wgrad_64x128x32_f32_atomic = 62,  // Atomic accumulate, C>=128
+  Prod_Wgrad_64x64x32_f32 = 60,            // Direct store, split_k=1
+  Prod_Wgrad_64x64x32_f32_atomic = 61,     // Atomic accumulate, C<=64
+  Prod_Wgrad_64x128x32_f32_atomic = 62,    // Atomic accumulate, C>=128
+  Prod_Wgrad_64x64x32_3s_f32_atomic = 63,  // 3-stage atomic, autotune variant
   // Scalar variants for unaligned C (no padding needed)
   Prod_Scalar_SAB_SE = 70,     // Both C_in, C_out unaligned (fwd/dgrad)
   Prod_Scalar_SA = 71,         // C_in unaligned, C_out aligned (fwd/dgrad)
