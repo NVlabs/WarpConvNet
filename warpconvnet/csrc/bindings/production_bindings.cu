@@ -178,6 +178,50 @@ int launch_production_dgrad_mw(const void *,
                                float,
                                cudaStream_t);
 
+// Pipelined dgrad launch functions
+template <typename ElemIn, typename ElemOut>
+int launch_dgrad_pipelined_64x64(const void *,
+                                 const void *,
+                                 void *,
+                                 const int *,
+                                 const uint32_t *,
+                                 const int *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 float,
+                                 cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_dgrad_pipelined_64x128(const void *,
+                                  const void *,
+                                  void *,
+                                  const int *,
+                                  const uint32_t *,
+                                  const int *,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  float,
+                                  cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_dgrad_pipelined_128x64(const void *,
+                                  const void *,
+                                  void *,
+                                  const int *,
+                                  const uint32_t *,
+                                  const int *,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  float,
+                                  cudaStream_t);
+
 // Scalar MW>1 launch functions (K>32 with unaligned channels)
 template <typename ElemIn, typename ElemOut, int MW>
 int launch_scalar_fwd_sab_se_mw(const void *,
@@ -285,6 +329,22 @@ int launch_wgrad_atomic_64x128(const void *,
                                int,
                                float,
                                cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_atomic_3s(const void *,
+                           const void *,
+                           void *,
+                           const int *,
+                           const uint32_t *,
+                           const int *,
+                           const uint32_t *,
+                           int,
+                           int,
+                           int,
+                           int,
+                           int,
+                           int,
+                           float,
+                           cudaStream_t);
 
 // Scalar wgrad launch function
 template <typename ElemIn, typename ElemOut>
@@ -662,6 +722,18 @@ int production_dgrad(torch::Tensor grad_output,
       case gemm::MMATile::Prod_Dgrad_64x128x32_F16Acc:
         return std::apply(
             [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32_F16Accum, Out, a...); }, args);
+      case gemm::MMATile::Prod_Dgrad_64x64x32_Pipe:
+        return std::apply(
+            [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x64<In, Out>(a...); },
+            args);
+      case gemm::MMATile::Prod_Dgrad_64x128x32_Pipe:
+        return std::apply(
+            [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x128<In, Out>(a...); },
+            args);
+      case gemm::MMATile::Prod_Dgrad_128x64x32_Pipe:
+        return std::apply(
+            [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
+            args);
       default:
         break;
     }
@@ -676,6 +748,18 @@ int production_dgrad(torch::Tensor grad_output,
       case gemm::MMATile::Prod_Dgrad_64x128x32:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32, Out, a...); },
                           args);
+      case gemm::MMATile::Prod_Dgrad_64x64x32_Pipe:
+        return std::apply(
+            [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x64<In, Out>(a...); },
+            args);
+      case gemm::MMATile::Prod_Dgrad_64x128x32_Pipe:
+        return std::apply(
+            [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x128<In, Out>(a...); },
+            args);
+      case gemm::MMATile::Prod_Dgrad_128x64x32_Pipe:
+        return std::apply(
+            [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
+            args);
       default:
         break;
     }
@@ -804,6 +888,8 @@ int production_wgrad(torch::Tensor input,
         return WGRAD_ATOMIC(In, 64x64);
       case gemm::MMATile::Prod_Wgrad_64x128x32_f32_atomic:
         return WGRAD_ATOMIC(In, 64x128);
+      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_atomic:
+        return WGRAD_ATOMIC(In, 3s);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);
     }
@@ -816,6 +902,8 @@ int production_wgrad(torch::Tensor input,
         return WGRAD_ATOMIC(In, 64x64);
       case gemm::MMATile::Prod_Wgrad_64x128x32_f32_atomic:
         return WGRAD_ATOMIC(In, 64x128);
+      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_atomic:
+        return WGRAD_ATOMIC(In, 3s);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);
     }

@@ -23,9 +23,9 @@ namespace cute_gemm {
 // Grid: (C_in_tiles * C_out_tiles, K, split_k)
 // Contraction: over N_out (voxel dimension) in tK-sized chunks
 // Accumulator: f32
-// Epilogue: direct
+// Epilogue: atomic
 template <class TileConfig, typename ElementOutput_ = float>
-struct MaskGemm_wgrad_64x64x32_2s_f32 {
+struct MaskGemm_wgrad_64x64x32_3s_f32_atomic {
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
@@ -43,7 +43,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
   static constexpr int tM = cute::size<0>(TileShape{});  // C_in tile
   static constexpr int tN = cute::size<1>(TileShape{});  // C_out tile
   static constexpr int tK = cute::size<2>(TileShape{});  // N_out tile (voxel contraction)
-  static constexpr int NumStages = 2;
+  static constexpr int NumStages = 3;
   static constexpr int NumWarps = MaxThreadsPerBlock / 32;
   static constexpr int kVec = 16 / sizeof(ElementInput);
   static constexpr int kMmaK = cute::size<2>(typename TiledMma::AtomShape_MNK{});
@@ -248,7 +248,12 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
         int n_global = n_start + get<1>(coord);
         if (m_global < C_in && n_global < C_out) {
           float val = float(accum(i));
-          out_ptr[m_global * C_out + n_global] = static_cast<ElementOutput>(val);
+          if constexpr (sizeof(ElementOutput) == 4) {
+            atomicAdd(reinterpret_cast<float *>(&out_ptr[m_global * C_out + n_global]), val);
+          } else {
+            atomicAdd(reinterpret_cast<__half *>(&out_ptr[m_global * C_out + n_global]),
+                      __float2half(val));
+          }
         }
       }
     }

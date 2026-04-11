@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Auto-generated — DO NOT EDIT
-// Config: MaskGemm_dgrad_64x64x32_1s_flat
-//   op_type=dgrad, tile=(64x64x32), stages=1
-//   epilogue=direct, warp_shuffle=True, precomp_rows=True
-
 #pragma once
 
 #include <cuda_bf16.h>
@@ -726,7 +721,7 @@ private:
     Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
 
     if constexpr (sizeof(ElementOutput) == 2 && UseSmemEpilogue) {
-      // Shared memory staging epilogue
+      // Shared memory staging epilogue (CUTLASS pattern)
       constexpr int EPL_PAD = 8;
       constexpr int EPL_STRIDE = tN + EPL_PAD;
       __half *epi_smem = reinterpret_cast<__half *>(smem_buf);

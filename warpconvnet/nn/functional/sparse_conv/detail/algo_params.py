@@ -219,6 +219,19 @@ _AB_PRODUCTION = (
     else []
 )
 
+# Dgrad via forward kernel (explicit weight transpose, reuses fwd tiles)
+_AB_PRODUCTION_FWD_AS_DGRAD = (
+    [
+        ("production_fwd_as_dgrad", {"tile_id": 40}),
+        ("production_fwd_as_dgrad", {"tile_id": 41}),
+        ("production_fwd_as_dgrad", {"tile_id": 42}),
+        ("production_fwd_as_dgrad", {"tile_id": 43}),
+        ("production_fwd_as_dgrad", {"tile_id": 44}),
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
+
 _ATB_PRODUCTION = (
     [
         ("production", {"tile_id": 60, "split_k": 64}),  # Direct store, high split_k
@@ -227,6 +240,8 @@ _ATB_PRODUCTION = (
         ("production", {"tile_id": 61, "split_k": 32}),  # Atomic 64x64, low split_k
         ("production", {"tile_id": 62, "split_k": 64}),  # Atomic 64x128, high split_k
         ("production", {"tile_id": 62, "split_k": 16}),  # Atomic 64x128, low split_k
+        ("production", {"tile_id": 63, "split_k": 128}),  # 3-stage atomic, high split_k
+        ("production", {"tile_id": 63, "split_k": 32}),  # 3-stage atomic, low split_k
     ]
     if _HAS_PRODUCTION
     else []
