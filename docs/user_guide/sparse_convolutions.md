@@ -182,6 +182,32 @@ export WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE=auto
 export WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE=auto
 ```
 
+### Group Convolution
+
+Group convolution partitions input and output channels into `G` groups, each processed independently. This reduces parameters and compute by a factor of `G` while maintaining spatial connectivity.
+
+```python
+from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+
+# Standard convolution: weight [K, C_in, C_out]
+conv = SparseConv3d(64, 128, kernel_size=3)
+
+# Group convolution (G=4): weight [K, G, C_in/G, C_out/G] = [27, 4, 16, 32]
+conv_g4 = SparseConv3d(64, 128, kernel_size=3, groups=4)
+
+# Depthwise-separable via groups=C_in (each channel independent)
+conv_dw = SparseConv3d(64, 64, kernel_size=3, groups=64)  # weight [27, 64, 1, 1]
+```
+
+**Requirements:**
+
+- `in_channels` and `out_channels` must be divisible by `groups`
+- Per-group channels must be >= 8 (minimum for fp16 vectorized loads)
+- Uses production kernel backend (auto-selected when algo is `auto` or `production`)
+- Mask data (pair_table, pair_mask) is spatial and shared across all groups
+
+**How it works:** For each group `g`, the dispatch slices the input features `[:, g*C_in_g:(g+1)*C_in_g]` and weight `[K, g]`, runs the production kernel with per-group contiguous data, and concatenates outputs. The kernel map computation is done once and reused across groups since group convolution only affects channels, not spatial connectivity.
+
 ## Environment Variables
 
 ### Algorithm Selection

@@ -677,3 +677,124 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
     assert out1.feature_tensor.shape == out2.feature_tensor.shape
     assert out1.feature_tensor.shape == out3.feature_tensor.shape
     assert out1.feature_tensor.shape == out4.feature_tensor.shape
+
+
+# =============================================================================
+# Group convolution tests
+# =============================================================================
+
+
+from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+
+
+@pytest.mark.parametrize(
+    "C_in,C_out,groups",
+    [
+        (64, 128, 4),
+        (64, 64, 8),
+        (128, 128, 16),
+    ],
+)
+def test_group_conv_forward(C_in, C_out, groups):
+    """Test group convolution forward produces correct output shape."""
+    coords = torch.unique(torch.randint(0, 20, (2000, 3), dtype=torch.int32), dim=0)
+    feats = torch.randn(coords.shape[0], C_in)
+    voxels = Voxels([coords], [feats]).to("cuda")
+
+    layer = SparseConv3d(C_in, C_out, 3, bias=False, groups=groups).cuda()
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out = layer(voxels)
+
+    assert out.features.shape == (coords.shape[0], C_out)
+    assert out.features.dtype == torch.float16
+
+
+@pytest.mark.parametrize(
+    "C_in,C_out,groups",
+    [
+        (64, 128, 4),  # C_in_g=16, C_out_g=32
+        (64, 64, 4),  # C_in_g=16, C_out_g=16
+        (128, 256, 8),  # C_in_g=16, C_out_g=32
+    ],
+)
+def test_group_conv_backward(C_in, C_out, groups):
+    """Test group convolution backward produces correctly shaped gradients."""
+    coords = torch.unique(torch.randint(0, 20, (2000, 3), dtype=torch.int32), dim=0)
+    feats = torch.randn(coords.shape[0], C_in, device="cuda", requires_grad=True)
+    voxels = Voxels(
+        batched_coordinates=coords.cuda(),
+        batched_features=feats,
+        offsets=torch.tensor([0, coords.shape[0]], dtype=torch.int32, device="cuda"),
+        device="cuda",
+    )
+
+    layer = SparseConv3d(C_in, C_out, 3, bias=False, groups=groups).cuda()
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out = layer(voxels)
+    out.features.float().sum().backward()
+
+    assert feats.grad is not None
+    assert feats.grad.shape == (coords.shape[0], C_in)
+    C_in_g = C_in // groups
+    C_out_g = C_out // groups
+    assert layer.weight.grad.shape == (27, groups, C_in_g, C_out_g)
+    assert torch.isfinite(feats.grad).all()
+    assert torch.isfinite(layer.weight.grad).all()
+
+
+def test_group_conv_correctness():
+    """Test group conv matches per-group explicit_gemm reference."""
+    C_in, C_out, groups = 32, 64, 4
+    C_in_g, C_out_g = C_in // groups, C_out // groups
+    torch.manual_seed(0)
+    coords = torch.unique(torch.randint(0, 15, (800, 3), dtype=torch.int32), dim=0)
+    N = coords.shape[0]
+    feats = torch.randn(N, C_in, device="cuda")
+    weight = torch.randn(27, groups, C_in_g, C_out_g, device="cuda")
+    voxels = Voxels([coords], [feats]).to("cuda")
+
+    # Production group conv under AMP
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out_prod = spatially_sparse_conv(
+            voxels,
+            weight,
+            kernel_size=(3, 3, 3),
+            groups=groups,
+            fwd_algo="production",
+        )
+
+    # Reference: per-group explicit_gemm in fp32
+    ref_outputs = []
+    for g in range(groups):
+        feats_g = feats[:, g * C_in_g : (g + 1) * C_in_g]
+        w_g = weight[:, g]
+        v_g = Voxels([coords], [feats_g]).to("cuda")
+        out_g = spatially_sparse_conv(v_g, w_g, kernel_size=(3, 3, 3), fwd_algo="explicit_gemm")
+        ref_outputs.append(out_g.feature_tensor)
+    out_ref = torch.cat(ref_outputs, dim=1).float()
+
+    rdiff = (out_prod.feature_tensor.float() - out_ref).abs().mean() / (
+        out_ref.abs().mean() + 1e-8
+    )
+    assert rdiff < 0.01, f"Group conv rdiff={rdiff:.5f} (expected < 0.01)"
+
+
+def test_group_conv_weight_shape():
+    """Test that group conv creates weight with correct shape."""
+    layer = SparseConv3d(64, 128, 3, groups=4)
+    assert layer.weight.shape == (27, 4, 16, 32)
+
+    layer_dw = SparseConv3d(64, 64, 3, groups=64)
+    assert layer_dw.weight.shape == (27, 64, 1, 1)
+
+    layer_g1 = SparseConv3d(64, 128, 3, groups=1)
+    assert layer_g1.weight.shape == (27, 64, 128)
+
+
+def test_group_conv_invalid_groups():
+    """Test that invalid group parameters raise errors."""
+    with pytest.raises(ValueError, match="divisible by groups"):
+        SparseConv3d(64, 128, 3, groups=3)  # 64 not divisible by 3
+
+    with pytest.raises(ValueError, match="divisible by groups"):
+        SparseConv3d(64, 100, 3, groups=3)  # 100 not divisible by 3
