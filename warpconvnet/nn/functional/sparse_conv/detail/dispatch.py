@@ -86,6 +86,15 @@ def _execute_forward(
             f"Group convolution (groups={groups}) only supported with algo='production', "
             f"got '{algo}'"
         )
+    if groups > 1:
+        C_in_g = weight.shape[2]
+        C_out_g = weight.shape[3]
+        if C_in_g < 8 or C_out_g < 8:
+            raise ValueError(
+                f"Group convolution requires per-group channels >= 8 "
+                f"(got C_in/G={C_in_g}, C_out/G={C_out_g}). "
+                f"Reduce groups or increase channels."
+            )
     if algo == "explicit_gemm":
         return _explicit_gemm_forward_logic(
             in_features, weight, kernel_map, num_out_coords, compute_dtype
@@ -200,8 +209,16 @@ def _execute_forward(
         pair_table, pair_mask, mask_argsort = _get_mask_data(
             kernel_map, num_out_coords, in_features.device
         )
-        C_in = in_features.shape[1]
-        C_out = weight.shape[2]
+
+        # Per-group channel dimensions
+        if groups > 1:
+            # weight: [K, G, C_in_g, C_out_g]
+            C_in_g = weight.shape[2]
+            C_out_g = weight.shape[3]
+        else:
+            # weight: [K, C_in, C_out]
+            C_in_g = weight.shape[1]
+            C_out_g = weight.shape[2]
 
         # Cast to fp16 if needed (production kernels require fp16/bf16)
         orig_dtype = in_features.dtype
@@ -213,39 +230,62 @@ def _execute_forward(
             _in = in_features
             _w = weight
 
-        # Select tile based on channel alignment and output dtype
-        # mask_words is passed to C++ which template-switches on MaskWords
+        # Select tile based on per-group channel alignment and output dtype
         vec_width = 16 // _in.element_size()
-        cin_aligned = C_in % vec_width == 0
-        cout_aligned = C_out % vec_width == 0
+        cin_aligned = C_in_g % vec_width == 0
+        cout_aligned = C_out_g % vec_width == 0
         if use_f32_output:
             if cin_aligned and cout_aligned:
-                tile_id = 80  # fp32 output, vectorized B
+                tile_id = 80
             else:
-                tile_id = 82  # fp32 output, scalar B (any C)
+                tile_id = 82
         elif not cin_aligned and not cout_aligned:
-            tile_id = 70  # SAB_SE (scalar, handles any C and MW>1)
+            tile_id = 70
         elif not cin_aligned:
-            tile_id = 71  # SA
+            tile_id = 71
         elif not cout_aligned:
-            tile_id = 72  # SB_SE
+            tile_id = 72
 
         out_dtype = torch.float32 if use_f32_output else _in.dtype
-        output = torch.zeros((num_out_coords, C_out), dtype=out_dtype, device=in_features.device)
-        status = _C.production.fwd(
-            _in,
-            _w,
-            output,
-            pair_table,
-            pair_mask,
-            mask_argsort,
-            K,
-            tile_id,
-            mask_words,
-            1.0,
-        )
-        if status != 0:
-            raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
+
+        if groups == 1:
+            output = torch.zeros(
+                (num_out_coords, C_out_g), dtype=out_dtype, device=in_features.device
+            )
+            status = _C.production.fwd(
+                _in, _w, output, pair_table, pair_mask, mask_argsort, K, tile_id, mask_words, 1.0
+            )
+            if status != 0:
+                raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
+        else:
+            # Group conv: loop over groups with per-group contiguous slices
+            # Mask data (pair_table, pair_mask, mask_argsort) shared across groups
+            group_outputs = []
+            for g in range(groups):
+                in_g = _in[:, g * C_in_g : (g + 1) * C_in_g].contiguous()
+                w_g = _w[:, g]  # [K, C_in_g, C_out_g], contiguous since dim 1 is G
+                out_g = torch.zeros(
+                    (num_out_coords, C_out_g), dtype=out_dtype, device=in_features.device
+                )
+                status = _C.production.fwd(
+                    in_g,
+                    w_g,
+                    out_g,
+                    pair_table,
+                    pair_mask,
+                    mask_argsort,
+                    K,
+                    tile_id,
+                    mask_words,
+                    1.0,
+                )
+                if status != 0:
+                    raise RuntimeError(
+                        f"production fwd group {g} failed: status={status}, tile={tile_id}"
+                    )
+                group_outputs.append(out_g)
+            output = torch.cat(group_outputs, dim=1)
+
         return output.to(dtype=orig_dtype)
     else:
         raise ValueError(f"Unsupported forward algorithm: {algo}")
@@ -431,8 +471,18 @@ def _execute_backward(
         tile_id = params.get("tile_id", 60)
         split_k = params.get("split_k", 64)
         N_in = in_features.shape[0]
-        C_in = in_features.shape[1]
-        C_out = weight.shape[2]
+
+        # Per-group channel dimensions
+        if groups > 1:
+            C_in_g = weight.shape[2]
+            C_out_g = weight.shape[3]
+            C_in = groups * C_in_g
+            C_out = groups * C_out_g
+        else:
+            C_in = in_features.shape[1]
+            C_out = weight.shape[2]
+            C_in_g = C_in
+            C_out_g = C_out
 
         # Cast to fp16 if needed (production kernels require fp16/bf16)
         orig_dtype = grad_output.dtype
@@ -457,23 +507,24 @@ def _execute_backward(
             rev_pt, rev_pm, rev_as = _get_reverse_mask_data(
                 kernel_map, N_in, num_out_coords, grad_output.device
             )
-            _wT = _wT_raw if _wT_raw is not None else _w.transpose(1, 2).contiguous()
+
+            # Compute weight transpose (per-group for groups > 1)
+            if groups == 1:
+                _wT = _wT_raw if _wT_raw is not None else _w.transpose(1, 2).contiguous()
+            else:
+                # _w: [K, G, C_in_g, C_out_g] → transpose last two → [K, G, C_out_g, C_in_g]
+                _wT = _w.transpose(2, 3).contiguous()
+
+            # Select dgrad tile based on per-group channel dims
+            vec_width = 16 // _go.element_size()
+            dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
 
             if use_fwd_for_dgrad:
-                # Dgrad via forward kernel with explicit weight transpose.
-                # Forward: D[N_out, C_out] = sum_k B[k, C_in, C_out] @ A[pt[k,i], C_in]
-                # Dgrad:   D[N_in, C_in]  = sum_k B_T[k, C_out, C_in] @ A[rev_pt[k,j], C_out]
-                # => call fwd with A=grad_output, B=weight_T, swapped C dims
                 dgrad_tile = params.get("tile_id", 41)
-                vec_width = 16 // _go.element_size()
-                # For fwd-as-dgrad: "C_in" to fwd is C_out, "C_out" to fwd is C_in
-                fwd_cin_aligned = C_out % vec_width == 0
-                fwd_cout_aligned = C_in % vec_width == 0
+                fwd_cin_aligned = C_out_g % vec_width == 0
+                fwd_cout_aligned = C_in_g % vec_width == 0
                 if use_f32_output:
-                    if fwd_cin_aligned and fwd_cout_aligned:
-                        dgrad_tile = 80
-                    else:
-                        dgrad_tile = 82
+                    dgrad_tile = 80 if (fwd_cin_aligned and fwd_cout_aligned) else 82
                 elif not fwd_cin_aligned and not fwd_cout_aligned:
                     dgrad_tile = 70
                 elif not fwd_cin_aligned:
@@ -481,34 +532,23 @@ def _execute_backward(
                 elif not fwd_cout_aligned:
                     dgrad_tile = 72
 
-                dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
-                grad_in = torch.zeros(
-                    (N_in, C_in), dtype=dgrad_out_dtype, device=grad_output.device
-                )
-                # _wT is [K, C_out, C_in] — matches fwd B layout [K, "C_in", "C_out"]
-                # where fwd sees "C_in"=C_out, "C_out"=C_in
-                status = _C.production.fwd(
-                    _go,  # A: [N_out, C_out] — "features" to fwd
-                    _wT,  # B: [K, C_out, C_in] — "weight" to fwd
-                    grad_in,  # D: [N_in, C_in] — "output" to fwd
-                    rev_pt,
-                    rev_pm,
-                    rev_as,
-                    K,
-                    dgrad_tile,
-                    mask_words,
-                    1.0,
-                )
-                if status != 0:
-                    raise RuntimeError(
-                        f"production_fwd_as_dgrad failed: status={status}, tile={dgrad_tile}"
+                def _run_dgrad_fwd(go_slice, wt_slice, out_slice):
+                    return _C.production.fwd(
+                        go_slice,
+                        wt_slice,
+                        out_slice,
+                        rev_pt,
+                        rev_pm,
+                        rev_as,
+                        K,
+                        dgrad_tile,
+                        mask_words,
+                        1.0,
                     )
-                grad_in = grad_in.to(dtype=orig_dtype)
+
             else:
-                # Dgrad via dedicated production dgrad kernel
-                vec_width = 16 // _go.element_size()
-                cin_aligned = C_in % vec_width == 0
-                cout_aligned = C_out % vec_width == 0
+                cin_aligned = C_in_g % vec_width == 0
+                cout_aligned = C_out_g % vec_width == 0
                 if not cin_aligned and not cout_aligned:
                     dgrad_tile = 70
                 elif not cout_aligned:
@@ -518,7 +558,7 @@ def _execute_backward(
                 elif use_f32_output:
                     dgrad_tile = 81
                 else:
-                    C = max(C_in, C_out)
+                    C = max(C_in_g, C_out_g)
                     is_fp16 = compute_dtype == torch.float16
                     if C <= 48:
                         dgrad_tile = 50
@@ -527,25 +567,42 @@ def _execute_backward(
                     else:
                         dgrad_tile = 54 if is_fp16 else 52
 
-                dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
+                def _run_dgrad_fwd(go_slice, wt_slice, out_slice):
+                    return _C.production.dgrad(
+                        go_slice,
+                        wt_slice,
+                        out_slice,
+                        rev_pt,
+                        rev_pm,
+                        rev_as,
+                        K,
+                        dgrad_tile,
+                        mask_words,
+                        1.0,
+                    )
+
+            if groups == 1:
                 grad_in = torch.zeros(
-                    (N_in, C_in), dtype=dgrad_out_dtype, device=grad_output.device
+                    (N_in, C_in_g), dtype=dgrad_out_dtype, device=grad_output.device
                 )
-                status = _C.production.dgrad(
-                    _go,
-                    _wT,
-                    grad_in,
-                    rev_pt,
-                    rev_pm,
-                    rev_as,
-                    K,
-                    dgrad_tile,
-                    mask_words,
-                    1.0,
-                )
+                status = _run_dgrad_fwd(_go, _wT, grad_in)
                 if status != 0:
                     raise RuntimeError(f"production dgrad failed: status={status}")
-                grad_in = grad_in.to(dtype=orig_dtype)
+            else:
+                group_grads = []
+                for g in range(groups):
+                    go_g = _go[:, g * C_out_g : (g + 1) * C_out_g].contiguous()
+                    wt_g = _wT[:, g]  # [K, C_out_g, C_in_g]
+                    gi_g = torch.zeros(
+                        (N_in, C_in_g), dtype=dgrad_out_dtype, device=grad_output.device
+                    )
+                    status = _run_dgrad_fwd(go_g, wt_g, gi_g)
+                    if status != 0:
+                        raise RuntimeError(f"production dgrad group {g} failed: status={status}")
+                    group_grads.append(gi_g)
+                grad_in = torch.cat(group_grads, dim=1)
+
+            grad_in = grad_in.to(dtype=orig_dtype)
 
         if needs_input_grad[1]:
             # Wgrad via production wgrad kernel with reduced_mask
@@ -554,38 +611,64 @@ def _execute_backward(
             )
 
             # Build reduced_mask (cached on kernel_map)
-            # Wgrad kernel reads multi-word pair_mask and reduced_mask natively
             if not hasattr(kernel_map, "_reduced_mask") or kernel_map._reduced_mask is None:
                 kernel_map._reduced_mask = _C.production.build_reduced_mask(
                     pair_mask, mask_argsort, 32, mask_words
                 )
 
-            # Select wgrad tile
+            # Select wgrad tile based on per-group channel dims
             vec_width = 16 // _in.element_size()
-            if C_in % vec_width != 0 or C_out % vec_width != 0:
+            if C_in_g % vec_width != 0 or C_out_g % vec_width != 0:
                 wgrad_tile = 73
             else:
                 wgrad_tile = tile_id
 
-            grad_weight = torch.zeros(
-                (K, C_in, C_out), dtype=torch.float32, device=grad_output.device
-            )
-            status = _C.production.wgrad(
-                _in,
-                _go,
-                grad_weight,
-                pair_table,
-                pair_mask,
-                mask_argsort,
-                kernel_map._reduced_mask,
-                K,
-                wgrad_tile,
-                split_k,
-                1.0,
-            )
-            if status != 0:
-                raise RuntimeError(f"production wgrad failed: status={status}")
-            grad_weight = grad_weight.to(dtype=weight.dtype)
+            if groups == 1:
+                grad_weight = torch.zeros(
+                    (K, C_in_g, C_out_g), dtype=torch.float32, device=grad_output.device
+                )
+                status = _C.production.wgrad(
+                    _in,
+                    _go,
+                    grad_weight,
+                    pair_table,
+                    pair_mask,
+                    mask_argsort,
+                    kernel_map._reduced_mask,
+                    K,
+                    wgrad_tile,
+                    split_k,
+                    1.0,
+                )
+                if status != 0:
+                    raise RuntimeError(f"production wgrad failed: status={status}")
+                grad_weight = grad_weight.to(dtype=weight.dtype)
+            else:
+                # Group conv wgrad: [K, G, C_in_g, C_out_g]
+                group_grads = []
+                for g in range(groups):
+                    in_g = _in[:, g * C_in_g : (g + 1) * C_in_g].contiguous()
+                    go_g = _go[:, g * C_out_g : (g + 1) * C_out_g].contiguous()
+                    gw_g = torch.zeros(
+                        (K, C_in_g, C_out_g), dtype=torch.float32, device=grad_output.device
+                    )
+                    status = _C.production.wgrad(
+                        in_g,
+                        go_g,
+                        gw_g,
+                        pair_table,
+                        pair_mask,
+                        mask_argsort,
+                        kernel_map._reduced_mask,
+                        K,
+                        wgrad_tile,
+                        split_k,
+                        1.0,
+                    )
+                    if status != 0:
+                        raise RuntimeError(f"production wgrad group {g} failed: status={status}")
+                    group_grads.append(gw_g.unsqueeze(1))  # [K, 1, C_in_g, C_out_g]
+                grad_weight = torch.cat(group_grads, dim=1).to(dtype=weight.dtype)
 
         return grad_in, grad_weight
     else:
