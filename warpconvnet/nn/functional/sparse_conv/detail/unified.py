@@ -114,7 +114,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         # Step 2: Generate configuration for caching
         C_in = in_features.shape[1]
-        C_out = weight.shape[2]
+        C_out = weight.shape[-1] * groups if groups > 1 else weight.shape[2]
         kv = weight.shape[0]
         if algorithm_filter == "trimmed":
             adaptive_fwd_params = _get_trimmed_AB_params(
@@ -228,8 +228,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         logger.debug(
             f"[dispatch] FWD algo={chosen_fwd_algo} params={chosen_fwd_params} "
             f"N_in={in_features.shape[0]} N_out={num_out_coords} "
-            f"C_in={in_features.shape[1]} C_out={weight.shape[2]} "
-            f"kv={weight.shape[0]} dtype={in_features.dtype}"
+            f"C_in={in_features.shape[1]} C_out={C_out} "
+            f"kv={kv} dtype={in_features.dtype}"
         )
         try:
             output_feature_tensor = _execute_forward(
@@ -241,6 +241,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 num_out_coords,
                 compute_dtype,
                 fwd_block_size,
+                groups=groups,
             )
         except (RuntimeError, Exception) as e:
             if chosen_fwd_algo == "explicit_gemm":
@@ -249,7 +250,6 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 f"Forward algorithm '{chosen_fwd_algo}' failed at execution: {e}. "
                 f"Falling back to explicit_gemm."
             )
-            # Invalidate the cached result for this config
             _BENCHMARK_AB_RESULTS.pop(config, None)
             output_feature_tensor = _execute_forward(
                 "explicit_gemm",
@@ -260,6 +260,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 num_out_coords,
                 compute_dtype,
                 fwd_block_size,
+                groups=groups,
             )
 
         # Save backward state when any input requires gradients.
@@ -275,7 +276,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 "num_in_coords": in_features.shape[0],
                 "num_out_coords": num_out_coords,
                 "in_channels": in_features.shape[1],
-                "out_channels": weight.shape[2],
+                "out_channels": C_out,
                 "kernel_volume": weight.shape[0],
                 "implicit_matmul_fwd_block_size": chosen_fwd_params.get(
                     "fwd_block_size", fwd_block_size
@@ -323,8 +324,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
             return _pad_tuple(None, None, 12)
 
+        groups = getattr(ctx, "groups", 1)
         N_in, C_in = in_features.shape
-        K, _, C_out = weight.shape
+        K = weight.shape[0]
+        C_out = weight.shape[-1] * groups if groups > 1 else weight.shape[2]
         if (
             num_out_coords == 0
             or K == 0
@@ -485,7 +488,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
             logger.debug(
                 f"[dispatch] DGRAD algo={dgrad_algo} params={dgrad_params} "
                 f"N_in={in_features.shape[0]} C_in={in_features.shape[1]} "
-                f"C_out={weight.shape[2]} kv={weight.shape[0]}"
+                f"C_out={C_out} kv={weight.shape[0]}"
             )
             try:
                 grad_in_features, _ = _execute_backward(
@@ -500,6 +503,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     device,
                     needs_input_grad=(True, False),
                     weight_T=_weight_T,
+                    groups=groups,
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"DGRAD '{dgrad_algo}' failed: {e}. Falling back.")
@@ -516,6 +520,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     device,
                     needs_input_grad=(True, False),
                     weight_T=_weight_T,
+                    groups=groups,
                 )
 
         if ctx.needs_input_grad[1]:
@@ -529,7 +534,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
             logger.debug(
                 f"[dispatch] WGRAD algo={wgrad_algo} params={wgrad_params} "
                 f"N_in={in_features.shape[0]} C_in={in_features.shape[1]} "
-                f"C_out={weight.shape[2]} kv={weight.shape[0]}"
+                f"C_out={C_out} kv={weight.shape[0]}"
             )
             try:
                 _, grad_weight = _execute_backward(
@@ -543,6 +548,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     compute_dtype,
                     device,
                     needs_input_grad=(False, True),
+                    groups=groups,
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"WGRAD '{wgrad_algo}' failed: {e}. Falling back.")
@@ -558,6 +564,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     compute_dtype,
                     device,
                     needs_input_grad=(False, True),
+                    groups=groups,
                 )
 
         # Free pre-cast tensors eagerly
