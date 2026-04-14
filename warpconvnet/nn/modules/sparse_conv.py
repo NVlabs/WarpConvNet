@@ -80,6 +80,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         bias: bool = True,
         transposed: bool = False,
         generative: bool = False,
+        groups: int = 1,
         kernel_matmul_batch_size: int = 2,
         num_spatial_dims: Optional[int] = 3,
         fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
@@ -95,6 +96,13 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.num_spatial_dims = num_spatial_dims
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.groups = groups
+        if in_channels % groups != 0:
+            raise ValueError(f"in_channels ({in_channels}) must be divisible by groups ({groups})")
+        if out_channels % groups != 0:
+            raise ValueError(
+                f"out_channels ({out_channels}) must be divisible by groups ({groups})"
+            )
 
         _kernel_size = ntuple(kernel_size, ndim=self.num_spatial_dims)
         _stride = ntuple(stride, ndim=self.num_spatial_dims)
@@ -133,7 +141,17 @@ class SpatiallySparseConv(BaseSpatialModule):
 
         self.bias: Optional[nn.Parameter] = None
 
-        self.weight = nn.Parameter(torch.randn(np.prod(_kernel_size), in_channels, out_channels))
+        if groups == 1:
+            self.weight = nn.Parameter(
+                torch.randn(np.prod(_kernel_size), in_channels, out_channels)
+            )
+        else:
+            # Group conv weight: [K, G, C_in/G, C_out/G]
+            self.weight = nn.Parameter(
+                torch.randn(
+                    np.prod(_kernel_size), groups, in_channels // groups, out_channels // groups
+                )
+            )
         if bias:
             self.bias = nn.Parameter(torch.randn(out_channels))
         else:
@@ -147,6 +165,8 @@ class SpatiallySparseConv(BaseSpatialModule):
             out_str += f", stride={self.stride}"
         if self.dilation != 1:
             out_str += f", dilation={self.dilation}"
+        if self.groups != 1:
+            out_str += f", groups={self.groups}"
         if self.transposed:
             out_str += f", transposed={self.transposed}"
         if self.generative:
@@ -202,6 +222,7 @@ class SpatiallySparseConv(BaseSpatialModule):
             stride=self.stride,
             kernel_dilation=self.dilation,
             bias=self.bias,
+            groups=self.groups,
             kernel_matmul_batch_size=self.kernel_matmul_batch_size,
             output_spatially_sparse_tensor=output_spatially_sparse_tensor,
             transposed=self.transposed,
@@ -258,6 +279,7 @@ class SparseConv2d(SpatiallySparseConv):
         bias=True,
         transposed=False,
         generative: bool = False,
+        groups: int = 1,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
         dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
@@ -275,6 +297,7 @@ class SparseConv2d(SpatiallySparseConv):
             bias=bias,
             transposed=transposed,
             generative=generative,
+            groups=groups,
             num_spatial_dims=2,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
@@ -327,6 +350,7 @@ class SparseConv3d(SpatiallySparseConv):
         bias=True,
         transposed=False,
         generative: bool = False,
+        groups: int = 1,
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         fwd_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
         dgrad_algo: Optional[Union[SPARSE_CONV_AB_ALGO_MODE, str]] = None,
@@ -344,6 +368,7 @@ class SparseConv3d(SpatiallySparseConv):
             bias=bias,
             transposed=transposed,
             generative=generative,
+            groups=groups,
             num_spatial_dims=3,
             stride_mode=stride_mode,
             fwd_algo=fwd_algo,
