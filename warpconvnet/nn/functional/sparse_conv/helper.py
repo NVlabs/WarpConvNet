@@ -152,6 +152,7 @@ def spatially_sparse_conv(
     stride: Union[int, List[int], Tuple[int, ...]] = 1,
     kernel_dilation: Union[int, List[int], Tuple[int, ...]] = 1,
     bias: Optional[Float[Tensor, "C_out"]] = None,  # noqa: F821
+    groups: int = 1,
     kernel_matmul_batch_size: int = 2,
     generative: bool = False,
     output_spatially_sparse_tensor: Optional[Geometry] = None,
@@ -303,6 +304,7 @@ def spatially_sparse_conv(
         implicit_matmul_fwd_block_size,
         implicit_matmul_bwd_block_size,
         in_tensor_stride,
+        groups,
     )
 
     if bias is not None:

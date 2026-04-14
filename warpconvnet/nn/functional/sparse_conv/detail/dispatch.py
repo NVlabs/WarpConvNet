@@ -78,8 +78,14 @@ def _execute_forward(
     num_out_coords: int,
     compute_dtype: Optional[torch.dtype],
     fwd_block_size: Optional[int],
+    groups: int = 1,
 ) -> Tensor:
     """Dispatch forward pass to the selected algorithm."""
+    if groups > 1 and algo != "production":
+        raise ValueError(
+            f"Group convolution (groups={groups}) only supported with algo='production', "
+            f"got '{algo}'"
+        )
     if algo == "explicit_gemm":
         return _explicit_gemm_forward_logic(
             in_features, weight, kernel_map, num_out_coords, compute_dtype
@@ -257,6 +263,7 @@ def _execute_backward(
     device: torch.device,
     needs_input_grad: Tuple[bool, ...],
     weight_T: Optional[Tensor] = None,
+    groups: int = 1,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Dispatch backward pass to the selected algorithm.
 
