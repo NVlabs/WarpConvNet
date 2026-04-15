@@ -79,6 +79,7 @@ def _execute_forward(
     compute_dtype: Optional[torch.dtype],
     fwd_block_size: Optional[int],
     groups: int = 1,
+    use_fp16_accum: bool = False,
 ) -> Tensor:
     """Dispatch forward pass to the selected algorithm."""
     if groups > 1 and algo != "production":
@@ -304,6 +305,7 @@ def _execute_backward(
     needs_input_grad: Tuple[bool, ...],
     weight_T: Optional[Tensor] = None,
     groups: int = 1,
+    use_fp16_accum: bool = False,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Dispatch backward pass to the selected algorithm.
 

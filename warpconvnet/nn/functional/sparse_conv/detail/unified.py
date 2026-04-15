@@ -86,6 +86,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         voxel_size: Optional[Tuple[int, ...]] = None,
         groups: int = 1,
+        use_fp16_accum: bool = False,
     ) -> Float[Tensor, "M C_out"]:
         global _BENCHMARK_AB_RESULTS  # noqa: F824
         output_feature_tensor = None
@@ -242,6 +243,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 compute_dtype,
                 fwd_block_size,
                 groups=groups,
+                use_fp16_accum=use_fp16_accum,
             )
         except (RuntimeError, Exception) as e:
             if chosen_fwd_algo == "explicit_gemm":
@@ -261,6 +263,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 compute_dtype,
                 fwd_block_size,
                 groups=groups,
+                use_fp16_accum=use_fp16_accum,
             )
 
         # Save backward state when any input requires gradients.
@@ -272,6 +275,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
             ctx.save_for_backward(in_features, weight)
             ctx.kernel_map = kernel_map
             ctx.groups = groups
+            ctx.use_fp16_accum = use_fp16_accum
             ctx.config_params_for_bwd = {
                 "num_in_coords": in_features.shape[0],
                 "num_out_coords": num_out_coords,
@@ -305,12 +309,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
         None,
+        None,
     ]:
         kernel_map = getattr(ctx, "kernel_map", None)
         config_params = getattr(ctx, "config_params_for_bwd", None)
         if kernel_map is None or config_params is None or len(ctx.saved_tensors) == 0:
             # Forward ran without grad (e.g., frozen backbone with torch.no_grad())
-            return _pad_tuple(None, None, 12)
+            return _pad_tuple(None, None, 13)
 
         in_features, weight = ctx.saved_tensors
         num_out_coords = config_params["num_out_coords"]
@@ -322,9 +327,10 @@ class UnifiedSpatiallySparseConvFunction(Function):
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return _pad_tuple(None, None, 12)
+            return _pad_tuple(None, None, 13)
 
         groups = getattr(ctx, "groups", 1)
+        use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
         N_in, C_in = in_features.shape
         K = weight.shape[0]
         C_out = weight.shape[-1] * groups if groups > 1 else weight.shape[2]
@@ -338,7 +344,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            return _pad_tuple(grad_in_final, grad_weight_final, 12)
+            return _pad_tuple(grad_in_final, grad_weight_final, 13)
 
         # --- Split dgrad/wgrad auto-tuning ---
         # Each direction is auto-tuned independently so the best algorithm
@@ -576,7 +582,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ctx.kernel_map = None
         ctx.config_params_for_bwd = None
 
-        return _pad_tuple(grad_in_features, grad_weight, 12)
+        return _pad_tuple(grad_in_features, grad_weight, 13)
 
 
 # Algorithm execution dispatch moved to dispatch.py
