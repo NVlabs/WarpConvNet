@@ -77,20 +77,29 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sab_se {
                                                   ? sizeof(SharedStorage)
                                                   : EpilogueSmemSize;
 
-  __device__ void operator()(const ElementInput *ptr_A,  // grad_output [N_out, C_out]
-                             const ElementInput *ptr_B,  // weight [K, C_in, C_out] — NOT transposed
-                             ElementOutput *ptr_D,       // grad_input [N_in, C_in]
-                             const int *pair_table,      // reverse_pair_table [K * N_in]
-                             const uint32_t *pair_mask,  // reverse_pair_mask [N_in]
-                             const int *mask_argsort,    // reverse_mask_argsort [N_in]
-                             int N_in,
-                             int N_out,
-                             int C_in,   // output dim (grad_input channels)
-                             int C_out,  // contraction dim (grad_output channels)
-                             int K,
-                             float alpha,
-                             char *smem_buf) const {
+  __device__ void operator()(
+      const ElementInput *ptr_A_base,  // grad_output [N_out, C_out_total]
+      const ElementInput *ptr_B_base,  // weight [K, G, C_in, C_out] — NOT transposed
+      ElementOutput *ptr_D_base,       // grad_input [N_in, C_in_total]
+      const int *pair_table,           // reverse_pair_table [K * N_in]
+      const uint32_t *pair_mask,       // reverse_pair_mask [N_in]
+      const int *mask_argsort,         // reverse_mask_argsort [N_in]
+      int N_in,
+      int N_out,
+      int C_in,   // per-group output dim (grad_input channels)
+      int C_out,  // per-group contraction dim (grad_output channels)
+      int K,
+      float alpha,
+      int stride_A,             // full row stride of grad_output (C_out_total)
+      int stride_D,             // full row stride of grad_input (C_in_total)
+      int /*identity_offset*/,  // unused in dgrad (shared launch wrapper with fwd)
+      char *smem_buf) const {
     using namespace cute;
+    // Group conv: blockIdx.z selects group, offset A/B/D pointers
+    int group_id = int(blockIdx.z);
+    const ElementInput *ptr_A = ptr_A_base + group_id * C_out;
+    const ElementInput *ptr_B = ptr_B_base + group_id * C_in * C_out;
+    ElementOutput *ptr_D = ptr_D_base + group_id * C_in;
 
     // Grid: ceil(N_in/tM) * ceil(C_in/tN) blocks
     int grid_n = (C_in + tN - 1) / tN;
@@ -231,8 +240,16 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sab_se {
 
       const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
 
-      _update_A_indices(
-          a_state, pair_table, storage.real_rows, storage.row_masks, N_out, N_in, C_out, k, K);
+      _update_A_indices(a_state,
+                        pair_table,
+                        storage.real_rows,
+                        storage.row_masks,
+                        N_out,
+                        N_in,
+                        C_out,
+                        k,
+                        K,
+                        stride_A);
 
       // ---- Flat mainloop ----
       if (num_k_tiles == 1) {
@@ -269,12 +286,14 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sab_se {
 
     // Epilogue: scatter to grad_input [N_in, C_in]
     if constexpr (UseScalarEpilogue) {
-      _epilogue_scalar(accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma);
+      _epilogue_scalar(
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, stride_D, alpha, tiled_mma);
     } else if constexpr (SplitOffsets > 1) {
-      _epilogue_atomic(accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma);
+      _epilogue_atomic(
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, stride_D, alpha, tiled_mma);
     } else {
       _epilogue_direct(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma, smem_buf);
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, stride_D, alpha, tiled_mma, smem_buf);
     }
   }
 
@@ -320,7 +339,8 @@ private:
                                     int N_out,
                                     int C_in,
                                     int offset_k,
-                                    int K) const {
+                                    int K,
+                                    int stride_A = 0) const {
     const int *pt_base = pair_table + offset_k * N_out;
     CUTLASS_PRAGMA_UNROLL
     for (int s = 0; s < kItersPerThread; ++s) {
@@ -351,7 +371,9 @@ private:
                                        const AIteratorState &state,
                                        SmemTensor smem_tile,
                                        int k_start,
-                                       int C_in) const {
+                                       int C_in,
+                                       int stride_A = 0) const {
+    if (stride_A == 0) stride_A = C_in;
     int k_global = k_start + state.k_col;
 
     CUTLASS_PRAGMA_UNROLL
@@ -360,7 +382,7 @@ private:
       if (m < tM) {
         int4 frag = make_int4(0, 0, 0, 0);
         if (state.valid[s]) {
-          const ElementInput *row_ptr = ptr_A + state.in_rows[s] * C_in;
+          const ElementInput *row_ptr = ptr_A + state.in_rows[s] * stride_A;
           ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
           CUTLASS_PRAGMA_UNROLL
           for (int v = 0; v < kVec; ++v) {
@@ -381,14 +403,16 @@ private:
                                  const AIteratorState &state,
                                  SmemTensor smem_tile,
                                  int k_start,
-                                 int C_in) const {
+                                 int C_in,
+                                 int stride_A = 0) const {
+    if (stride_A == 0) stride_A = C_in;
     if (KB < kItersPerThread) {
       int k_global = k_start + state.k_col;
       int m = state.row[KB];
       if (m < tM) {
         int4 frag = make_int4(0, 0, 0, 0);
         if (state.valid[KB]) {
-          const ElementInput *row_ptr = ptr_A + state.in_rows[KB] * C_in;
+          const ElementInput *row_ptr = ptr_A + state.in_rows[KB] * stride_A;
           ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
           CUTLASS_PRAGMA_UNROLL
           for (int v = 0; v < kVec; ++v) {

@@ -47,12 +47,16 @@
 #include "include/MaskGemm_wgrad_64x128x32_2s_f32_atomic.h"
 #include "include/MaskGemm_wgrad_64x64x32_2s_f32_atomic.h"
 #include "include/MaskGemm_wgrad_64x64x32_3s_f32_atomic.h"
+#include "include/kernel_dispatch.h"
 
 namespace warpconvnet {
 namespace cute_gemm {
 
 // =============================================================================
-// Launch wrapper: forward / dgrad
+// Legacy launch wrappers — delegate to warpgemm kernel entry with default
+// stride_A=C_in, stride_D=C_out, identity_offset=-1.
+// The INSTANTIATE_PROD_FWD/DGRAD macros and scalar/MW functions use these.
+// For group conv + identity_offset, use warpgemm::run_mask_gemm directly.
 // =============================================================================
 
 template <typename Kernel>
@@ -86,12 +90,11 @@ __global__ __launch_bounds__(
            C_out,
            K,
            alpha,
+           /*stride_A=*/C_in,
+           /*stride_D=*/C_out,
+           /*identity_offset=*/-1,
            smem);
 }
-
-// =============================================================================
-// Launch wrapper: wgrad (extra reduced_mask parameter)
-// =============================================================================
 
 template <typename Kernel>
 __global__ __launch_bounds__(
@@ -128,6 +131,8 @@ __global__ __launch_bounds__(
            C_out,
            K,
            alpha,
+           /*stride_A=*/C_in,
+           /*stride_B=*/C_out,
            smem);
 }
 

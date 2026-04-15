@@ -72,9 +72,9 @@ struct MaskGemm_forward_128x64x32_2s_fused {
                                                   ? sizeof(SharedStorage)
                                                   : EpilogueSmemSize;
 
-  __device__ void operator()(const ElementInput *ptr_A,
-                             const ElementInput *ptr_B,
-                             ElementOutput *ptr_D,
+  __device__ void operator()(const ElementInput *ptr_A_base,
+                             const ElementInput *ptr_B_base,
+                             ElementOutput *ptr_D_base,
                              const int *pair_table,
                              const uint32_t *pair_mask,
                              const int *mask_argsort,
@@ -84,12 +84,17 @@ struct MaskGemm_forward_128x64x32_2s_fused {
                              int C_out,
                              int K,
                              float alpha,
+                             int stride_A,
+                             int stride_D,
+                             int identity_offset,
                              char *smem_buf) const {
     using namespace cute;
+    // Group conv: blockIdx.z selects group, offset A/B/D pointers
+    int group_id = int(blockIdx.z);
+    const ElementInput *ptr_A = ptr_A_base + group_id * C_in;
+    const ElementInput *ptr_B = ptr_B_base + group_id * C_in * C_out;
+    ElementOutput *ptr_D = ptr_D_base + group_id * C_out;
 
-    // C_in/C_out = padded dimensions (tile sizing, bounds checks)
-    // C_in_stride/C_out_stride = real dimensions (gmem pointer arithmetic)
-    // When caller pads tensors, stride == padded. When unpadded, stride < padded.
     int grid_n = (C_out + tN - 1) / tN;
     int m_tile = int(blockIdx.x) / grid_n;
     int n_tile = int(blockIdx.x) % grid_n;
@@ -217,8 +222,16 @@ struct MaskGemm_forward_128x64x32_2s_fused {
       // Prolog: load first offset
       int k_cur = _mw_next();
       const ElementInput *ptr_Bk_cur = ptr_B + k_cur * C_in * C_out;
-      _update_A_indices(
-          a_state, pair_table, storage.real_rows, storage.row_masks, N_in, N_out, C_in, k_cur, K);
+      _update_A_indices(a_state,
+                        pair_table,
+                        storage.real_rows,
+                        storage.row_masks,
+                        N_in,
+                        N_out,
+                        C_in,
+                        k_cur,
+                        K,
+                        stride_A);
       _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_in);
       _load_B_tile(ptr_Bk_cur, sB(_, _, 0), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
       cute::cp_async_fence();
@@ -256,7 +269,8 @@ struct MaskGemm_forward_128x64x32_2s_fused {
                             N_out,
                             C_in,
                             k_next,
-                            K);
+                            K,
+                            stride_A);
           const ElementInput *ptr_Bk_next = ptr_B + k_next * C_in * C_out;
 
           // Fused MMA + interleaved cp.async for next offset
@@ -356,10 +370,18 @@ struct MaskGemm_forward_128x64x32_2s_fused {
     // --- Epilogue ---
     if constexpr (UseScalarEpilogue) {
       _epilogue_scalar(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma);
+          accum, ptr_D, mask_argsort, m_start, n_start, N_out, stride_D, alpha, tiled_mma);
     } else {
-      _epilogue_direct(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma, smem_buf);
+      _epilogue_direct(accum,
+                       ptr_D,
+                       mask_argsort,
+                       m_start,
+                       n_start,
+                       N_out,
+                       stride_D,
+                       alpha,
+                       tiled_mma,
+                       smem_buf);
     }
   }
 
@@ -442,7 +464,9 @@ private:
                                     int N_out,
                                     int C_in,
                                     int offset_k,
-                                    int K) const {
+                                    int K,
+                                    int stride_A = 0) const {
+    if (stride_A == 0) stride_A = C_in;
     const int *pt_base = pair_table + offset_k * N_out;
     int elem_bytes = sizeof(ElementInput);
 
@@ -460,7 +484,7 @@ private:
           if (real_row >= 0 && (_rm & (1u << (offset_k % 32)))) in_row = __ldg(&pt_base[real_row]);
         }
         if (in_row >= 0 && in_row < N_in) {
-          state.gmem_byte_offsets[r] = in_row * C_in * elem_bytes;
+          state.gmem_byte_offsets[r] = in_row * stride_A * elem_bytes;
           state.valid[r] = true;
         } else {
           state.gmem_byte_offsets[r] = 0;
@@ -820,6 +844,75 @@ private:
                      "l"(ptr_B),
                      "n"(16),
                      "r"(0));
+      }
+    }
+  }
+
+  // Identity A loader: for submanifold center offset (real_rows[m] IS the input row).
+  // No pair_table lookup needed — simpler and faster than gathered A.
+  // Same smem layout as gathered A: smem_tile(m_row, k_col) with kVec-sized cp.async.
+  template <class SmemTensor>
+  __device__ void _load_A_identity(const ElementInput *ptr_A,
+                                   const int *real_rows,
+                                   SmemTensor smem_tile,
+                                   int k_start,
+                                   int N_in,
+                                   int C_in,
+                                   int stride_A) const {
+    // Thread mapping: same as gathered_a_precomputed but row = real_rows[m]
+    // Each cp.async loads kVec elements along K at one M-row.
+    // total_vecs = tK (K-rows) × (tM / kVec) (M-vectors)
+    // Actually, A smem is (tM, tK) with K contiguous per kVec load.
+    // We iterate: K-outer (step 1), M-vec-inner (step kVec)
+    constexpr int k_iters = tK;        // one K-row per iteration
+    constexpr int m_vecs = tM / kVec;  // kVec M-elements per vector
+    constexpr int total_vecs = k_iters * m_vecs;
+    CUTLASS_PRAGMA_UNROLL
+    for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
+      int k_local = idx / m_vecs;
+      int mv = idx % m_vecs;
+      int m_local = mv * kVec;
+      int k_global = k_start + k_local;
+      int in_row = real_rows[mv];  // identity: one real_row per kVec M-rows
+      // Actually each cp.async loads kVec consecutive M-elements at one K-row.
+      // A layout in gmem: A[row, C_in], contiguous along C_in (K-direction in GEMM).
+      // cp.async loads kVec elements = 16 bytes from A[in_row, k_global..k_global+kVec-1]
+      // But this only works if K is contiguous... For A, the "K" in the GEMM is C_in,
+      // which IS contiguous in gmem. And smem stores (m_row, k_col).
+      // Wait — the gathered A loader iterates M-outer, K-vec-inner with:
+      //   m_local = pair_local (which M-row in the tile)
+      //   k_local = byte offset along C_in
+      // The smem tile is (tM, tK) but loaded as:
+      //   for each thread's (pair_local, k_vec): load kVec at A[in_row, k_start + k_vec*kVec]
+      // So the identity loader should use the same pattern: each thread handles one
+      // (m_row, k_vec) pair and loads kVec C_in elements.
+    }
+    // Simplified: reuse the exact same iteration as gathered_a but with in_row = real_rows[m]
+    {
+      constexpr int kItersPerThread =
+          (tK / kVec * tM + MaxThreadsPerBlock - 1) / MaxThreadsPerBlock;
+      CUTLASS_PRAGMA_UNROLL
+      for (int iter = 0; iter < kItersPerThread; ++iter) {
+        int idx = threadIdx.x + iter * MaxThreadsPerBlock;
+        if (idx >= tK / kVec * tM) break;
+        int pair_local = idx / (tK / kVec);
+        int kv = idx % (tK / kVec);
+        int k_local = kv * kVec;
+        int k_global = k_start + k_local;
+        int in_row = real_rows[pair_local];
+        uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(pair_local, k_local));
+        bool valid = (in_row >= 0) && (in_row < N_in) && (k_global + kVec <= C_in);
+        if (valid) {
+          const void *src = &ptr_A[in_row * stride_A + k_global];
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+                       "l"(src),
+                       "n"(16));
+        } else {
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                       "l"(ptr_A),
+                       "n"(16),
+                       "r"(0));
+        }
       }
     }
   }
