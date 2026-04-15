@@ -68,30 +68,43 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_atomic {
   static constexpr size_t SharedStorageSize = sizeof(SharedStorage);
 
   __device__ void operator()(
-      const ElementInput *ptr_A,     // input [N_in, C_in]
-      const ElementInput *ptr_B,     // grad_output [N_out, C_out]
-      ElementOutput *ptr_D,          // grad_weight [K, C_in, C_out] or workspace
-      const int *pair_table,         // [K * N_out]
-      const uint32_t *pair_mask,     // [N_out]
-      const int *mask_argsort,       // [N_out]
-      const uint32_t *reduced_mask,  // [ceil(N_out/tK)] OR-reduced pair_masks
+      const ElementInput *ptr_A_base,  // input [N_in, C_in_total]
+      const ElementInput *ptr_B_base,  // grad_output [N_out, C_out_total]
+      ElementOutput *ptr_D_base,       // grad_weight [K, G, C_in, C_out] or workspace
+      const int *pair_table,           // [K * N_out]
+      const uint32_t *pair_mask,       // [N_out]
+      const int *mask_argsort,         // [N_out]
+      const uint32_t *reduced_mask,    // [ceil(N_out/tK)] OR-reduced pair_masks
       int N_in,
       int N_out,
-      int C_in,
-      int C_out,
+      int C_in,   // per-group C_in
+      int C_out,  // per-group C_out
       int K,
       float alpha,
+      int stride_A,  // full row stride of input (C_in_total)
+      int stride_B,  // full row stride of grad_output (C_out_total)
       char *smem_buf) const {
     using namespace cute;
 
-    // Grid: (C_in_tiles * C_out_tiles, K, split_k)
+    // Grid: (C_in_tiles * C_out_tiles, groups * K, split_k)
+    // blockIdx.y encodes (group_id * K + k_off)
     int grid_n = (C_out + tN - 1) / tN;
     int mn_idx = int(blockIdx.x);
     int m_tile = mn_idx / grid_n;
     int n_tile = mn_idx % grid_n;
-    int k_off = int(blockIdx.y);
+    int gk = int(blockIdx.y);
+    int k_off = gk % K;
+    int group_id = gk / K;
     int split_idx = int(blockIdx.z);
     int split_k = int(gridDim.z);
+
+    // Per-group pointer offsets
+    int groups = int(gridDim.y) / K;
+    const ElementInput *ptr_A = ptr_A_base + group_id * C_in;
+    const ElementInput *ptr_B = ptr_B_base + group_id * C_out;
+    // D layout: [K, G, C_in, C_out] or [split_k, K, G, C_in, C_out] for workspace
+    // Don't offset ptr_D here — compute full address in epilogue using (k_off, group_id)
+    ElementOutput *ptr_D = ptr_D_base;
 
     int m_start = m_tile * tM;
     int n_start = n_tile * tN;
@@ -198,8 +211,8 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_atomic {
       }
 
       // Prolog: load first active tile using cached info
-      _load_A_cached(ptr_A, storage, sA(_, _, 0), m_start, N_in, C_in);
-      _load_B_cached(ptr_B, storage, sB(_, _, 0), n_start, C_out);
+      _load_A_cached(ptr_A, storage, sA(_, _, 0), m_start, N_in, C_in, stride_A);
+      _load_B_cached(ptr_B, storage, sB(_, _, 0), n_start, C_out, stride_B);
       cute::cp_async_fence();
       cute::cp_async_wait<0>();
       __syncthreads();
@@ -218,8 +231,8 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_atomic {
         int write_stage = (smem_stage + 1) % NumStages;
 
         // Pipelined: launch async loads FIRST, then MMA on current stage
-        _load_A_cached(ptr_A, storage, sA(_, _, write_stage), m_start, N_in, C_in);
-        _load_B_cached(ptr_B, storage, sB(_, _, write_stage), n_start, C_out);
+        _load_A_cached(ptr_A, storage, sA(_, _, write_stage), m_start, N_in, C_in, stride_A);
+        _load_B_cached(ptr_B, storage, sB(_, _, write_stage), n_start, C_out, stride_B);
         cute::cp_async_fence();
 
         MMA_DOUBLE_BUFFERED(smem_stage)
@@ -239,7 +252,8 @@ struct MaskGemm_wgrad_64x64x32_2s_f32_atomic {
       auto thr_mma_epi = tiled_mma.get_slice(threadIdx.x);
       Tensor tCrC = thr_mma_epi.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
 
-      ElementOutput *out_ptr = ptr_D + k_off * C_in * C_out;
+      // D layout: [K, G, C_in, C_out] — stride along K = groups * C_in * C_out
+      ElementOutput *out_ptr = ptr_D + ((size_t)k_off * groups + group_id) * C_in * C_out;
 
       CUTE_UNROLL
       for (int i = 0; i < size(accum); ++i) {
@@ -268,7 +282,8 @@ private:
                                  SmemTensor smem_tile,
                                  int m_start,
                                  int N_in,
-                                 int C_in) const {
+                                 int C_in,
+                                 int stride_A) const {
     constexpr int m_vecs = tM / kVec;
     constexpr int total_work = tK * m_vecs;
     CUTLASS_PRAGMA_UNROLL
@@ -281,7 +296,7 @@ private:
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(m_local, pair_local));
       bool valid = (in_row >= 0) && (in_row < N_in) && (m_global + kVec <= C_in);
       if (valid) {
-        const void *src = &ptr_A[in_row * C_in + m_global];
+        const void *src = &ptr_A[in_row * stride_A + m_global];
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                      "l"(src),
                      "n"(16));
@@ -300,7 +315,8 @@ private:
                                  const SharedStorage &storage,
                                  SmemTensor smem_tile,
                                  int n_start,
-                                 int C_out) const {
+                                 int C_out,
+                                 int stride_B) const {
     constexpr int n_vecs = tN / kVec;
     constexpr int total_vecs = tK * n_vecs;
     CUTLASS_PRAGMA_UNROLL
@@ -313,7 +329,7 @@ private:
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, pair_local));
       bool valid = (real_row >= 0) && (n_global + kVec <= C_out);
       if (valid) {
-        const void *src = &ptr_B[real_row * C_out + n_global];
+        const void *src = &ptr_B[real_row * stride_B + n_global];
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                      "l"(src),
                      "n"(16));

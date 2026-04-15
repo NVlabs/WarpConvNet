@@ -77,20 +77,29 @@ struct MaskGemm_dgrad_64x128x32_2s_pipelined {
                                                   ? sizeof(SharedStorage)
                                                   : EpilogueSmemSize;
 
-  __device__ void operator()(const ElementInput *ptr_A,  // grad_output [N_out, C_out]
-                             const ElementInput *ptr_B,  // weight [K, C_in, C_out] — NOT transposed
-                             ElementOutput *ptr_D,       // grad_input [N_in, C_in]
-                             const int *pair_table,      // reverse_pair_table [K * N_in]
-                             const uint32_t *pair_mask,  // reverse_pair_mask [N_in]
-                             const int *mask_argsort,    // reverse_mask_argsort [N_in]
-                             int N_in,
-                             int N_out,
-                             int C_in,   // output dim (grad_input channels)
-                             int C_out,  // contraction dim (grad_output channels)
-                             int K,
-                             float alpha,
-                             char *smem_buf) const {
+  __device__ void operator()(
+      const ElementInput *ptr_A_base,  // grad_output [N_out, C_out_total]
+      const ElementInput *ptr_B_base,  // weight [K, G, C_in, C_out] — NOT transposed
+      ElementOutput *ptr_D_base,       // grad_input [N_in, C_in_total]
+      const int *pair_table,           // reverse_pair_table [K * N_in]
+      const uint32_t *pair_mask,       // reverse_pair_mask [N_in]
+      const int *mask_argsort,         // reverse_mask_argsort [N_in]
+      int N_in,
+      int N_out,
+      int C_in,   // per-group output dim (grad_input channels)
+      int C_out,  // per-group contraction dim (grad_output channels)
+      int K,
+      float alpha,
+      int stride_A,             // full row stride of grad_output (C_out_total)
+      int stride_D,             // full row stride of grad_input (C_in_total)
+      int /*identity_offset*/,  // unused in dgrad (shared launch wrapper with fwd)
+      char *smem_buf) const {
     using namespace cute;
+    // Group conv: blockIdx.z selects group, offset A/B/D pointers
+    int group_id = int(blockIdx.z);
+    const ElementInput *ptr_A = ptr_A_base + group_id * C_out;
+    const ElementInput *ptr_B = ptr_B_base + group_id * C_in * C_out;
+    ElementOutput *ptr_D = ptr_D_base + group_id * C_in;
 
     // Grid: ceil(N_in/tM) * ceil(C_in/tN) blocks
     int grid_n = (C_in + tN - 1) / tN;
@@ -226,8 +235,16 @@ struct MaskGemm_dgrad_64x128x32_2s_pipelined {
 
       // Prolog: load first offset
       int k_cur = _mw_next();
-      _update_A_indices(
-          a_state, pair_table, storage.real_rows, storage.row_masks, N_out, N_in, C_out, k_cur, K);
+      _update_A_indices(a_state,
+                        pair_table,
+                        storage.real_rows,
+                        storage.row_masks,
+                        N_out,
+                        N_in,
+                        C_out,
+                        k_cur,
+                        K,
+                        stride_A);
       _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_out);
       _load_B_tile(ptr_B + k_cur * C_in * C_out,
                    sB(_, _, 0),
@@ -255,7 +272,8 @@ struct MaskGemm_dgrad_64x128x32_2s_pipelined {
                             N_in,
                             C_out,
                             k_next,
-                            K);
+                            K,
+                            stride_A);
           _load_A_with_offsets(ptr_A, a_state, sA(_, _, write_stage), 0, C_out);
           _load_B_tile(ptr_B + k_next * C_in * C_out,
                        sB(_, _, write_stage),
@@ -282,8 +300,16 @@ struct MaskGemm_dgrad_64x128x32_2s_pipelined {
       while (_mw_has_next()) {
         int k = _mw_next();
         const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
-        _update_A_indices(
-            a_state, pair_table, storage.real_rows, storage.row_masks, N_out, N_in, C_out, k, K);
+        _update_A_indices(a_state,
+                          pair_table,
+                          storage.real_rows,
+                          storage.row_masks,
+                          N_out,
+                          N_in,
+                          C_out,
+                          k,
+                          K,
+                          stride_A);
         for (int kt = 0; kt < num_k_tiles; ++kt) {
           int k_start = kt * tK;
           _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), k_start, C_out);
@@ -301,12 +327,14 @@ struct MaskGemm_dgrad_64x128x32_2s_pipelined {
 
     // Epilogue: scatter to grad_input [N_in, C_in]
     if constexpr (UseScalarEpilogue) {
-      _epilogue_scalar(accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma);
+      _epilogue_scalar(
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, stride_D, alpha, tiled_mma);
     } else if constexpr (SplitOffsets > 1) {
-      _epilogue_atomic(accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma);
+      _epilogue_atomic(
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, stride_D, alpha, tiled_mma);
     } else {
       _epilogue_direct(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_in, C_in, alpha, tiled_mma, smem_buf);
+          accum, ptr_D, mask_argsort, m_start, n_start, N_in, stride_D, alpha, tiled_mma, smem_buf);
     }
   }
 
@@ -389,7 +417,9 @@ private:
                                     int N_out,
                                     int C_in,
                                     int offset_k,
-                                    int K) const {
+                                    int K,
+                                    int stride_A = 0) const {
+    if (stride_A == 0) stride_A = C_in;
     const int *pt_base = pair_table + offset_k * N_out;
     int elem_bytes = sizeof(ElementInput);
 
@@ -407,7 +437,7 @@ private:
           if (real_row >= 0 && (_rm & (1u << (offset_k % 32)))) in_row = __ldg(&pt_base[real_row]);
         }
         if (in_row >= 0 && in_row < N_in) {
-          state.gmem_byte_offsets[r] = in_row * C_in * elem_bytes;
+          state.gmem_byte_offsets[r] = in_row * stride_A * elem_bytes;
           state.valid[r] = true;
         } else {
           state.gmem_byte_offsets[r] = 0;
