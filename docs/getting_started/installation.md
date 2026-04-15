@@ -45,6 +45,13 @@ To run the ScanNet example and other model-training scripts, install with the
 pip install ".[models]"
 ```
 
+## Compilation from source
+
+For detailed compilation instructions — including GPU architecture targeting,
+the `SETUPTOOLS_SCM_PRETEND_VERSION` workaround for detached HEAD / shallow
+clones, and `build_ext` for development iteration — see the
+[Compilation Guide](compilation.md).
+
 ## Troubleshooting
 
 ### cuBLAS fp16 correctness issue

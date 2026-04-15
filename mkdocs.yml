@@ -43,6 +43,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - Installation: getting_started/installation.md
+      - Compilation: getting_started/compilation.md
       - Quick Start: getting_started/quickstart.md
   - Examples:
       - ModelNet: examples/modelnet.md

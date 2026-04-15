@@ -401,6 +401,7 @@ int production_fwd(torch::Tensor input,
                    int K,
                    int tile_id,
                    int mask_words,
+                   int identity_offset,
                    float alpha) {
   TORCH_CHECK(input.is_cuda() && weight.is_cuda() && output.is_cuda());
   TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
@@ -610,6 +611,7 @@ int production_dgrad(torch::Tensor grad_output,
                      int K,
                      int tile_id,
                      int mask_words,
+                     int identity_offset,
                      float alpha) {
   TORCH_CHECK(grad_output.is_cuda() && weight_T.is_cuda() && grad_input.is_cuda());
   TORCH_CHECK(
@@ -1005,6 +1007,7 @@ void register_production(py::module &m) {
            py::arg("K"),
            py::arg("tile_id"),
            py::arg("mask_words") = 1,
+           py::arg("identity_offset") = -1,
            py::arg("alpha") = 1.0f);
 
   prod.def("dgrad",
@@ -1018,6 +1021,7 @@ void register_production(py::module &m) {
            py::arg("K"),
            py::arg("tile_id"),
            py::arg("mask_words") = 1,
+           py::arg("identity_offset") = -1,
            py::arg("alpha") = 1.0f);
 
   prod.def("wgrad",

@@ -218,13 +218,19 @@ git clone https://github.com/NVlabs/WarpConvNet.git
 cd WarpConvNet
 git submodule update --init 3rdparty/cutlass
 pip install -e . --no-build-isolation
-
-# If this fails, please create an issue on https://github.com/NVlabs/WarpConvNet/issues and try:
-# Option 1
-python setup.py build_ext --inplace
-# Option 2
-pip install -e . --no-deps --no-build-isolation --force-reinstall
 ```
+
+If version detection fails (detached HEAD, shallow clone, rebase), bypass
+setuptools-scm:
+
+```bash
+SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e . --no-build-isolation
+
+# Or compile the C++ extension only (faster iteration):
+SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python setup.py build_ext --inplace
+```
+
+See the [Compilation Guide](https://nvlabs.github.io/WarpConvNet/getting_started/compilation/) for GPU architecture targeting, troubleshooting, and details.
 
 ### Optional: Pre-Populate the Benchmark Cache
 
