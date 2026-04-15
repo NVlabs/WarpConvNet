@@ -20,5 +20,6 @@ PYBIND11_MODULE(_C, m) {
   warpconvnet::bindings::register_utils(m);
   warpconvnet::bindings::register_sampling(m);
   warpconvnet::bindings::register_coords(m);
+  warpconvnet::bindings::register_cuhash(m);
   warpconvnet::bindings::register_production(m);
 }

@@ -478,8 +478,12 @@ int launch_production_fwd_mw(const void *a,
 
 INST_FWD_MW(cutlass::half_t, 2)
 INST_FWD_MW(cutlass::half_t, 4)
+INST_FWD_MW(cutlass::half_t, 8)
+INST_FWD_MW(cutlass::half_t, 12)
 INST_FWD_MW(cutlass::bfloat16_t, 2)
 INST_FWD_MW(cutlass::bfloat16_t, 4)
+INST_FWD_MW(cutlass::bfloat16_t, 8)
+INST_FWD_MW(cutlass::bfloat16_t, 12)
 #undef INST_FWD_MW
 
 // =============================================================================
@@ -1066,8 +1070,12 @@ int launch_production_dgrad_mw(const void *a,
 
 INST_DGRAD_MW(cutlass::half_t, 2)
 INST_DGRAD_MW(cutlass::half_t, 4)
+INST_DGRAD_MW(cutlass::half_t, 8)
+INST_DGRAD_MW(cutlass::half_t, 12)
 INST_DGRAD_MW(cutlass::bfloat16_t, 2)
 INST_DGRAD_MW(cutlass::bfloat16_t, 4)
+INST_DGRAD_MW(cutlass::bfloat16_t, 8)
+INST_DGRAD_MW(cutlass::bfloat16_t, 12)
 #undef INST_DGRAD_MW
 
 // =============================================================================
