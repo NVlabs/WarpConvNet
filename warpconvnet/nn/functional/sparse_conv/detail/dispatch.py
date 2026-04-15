@@ -206,6 +206,12 @@ def _execute_forward(
         K = len(kernel_map)
         mask_words = (K + 31) // 32
 
+        # Submanifold identity shortcut: center offset maps each voxel to itself
+        # Enable when stride=1 (N_in == N_out) and K is odd
+        N_in_fwd = in_features.shape[0]
+        is_submanifold = (N_in_fwd == num_out_coords) and (K % 2 == 1)
+        identity_offset = K // 2 if is_submanifold else -1
+
         tile_id = params.get("tile_id", 41)
         pair_table, pair_mask, mask_argsort = _get_mask_data(
             kernel_map, num_out_coords, in_features.device
@@ -254,7 +260,17 @@ def _execute_forward(
                 (num_out_coords, C_out_g), dtype=out_dtype, device=in_features.device
             )
             status = _C.production.fwd(
-                _in, _w, output, pair_table, pair_mask, mask_argsort, K, tile_id, mask_words, 1.0
+                _in,
+                _w,
+                output,
+                pair_table,
+                pair_mask,
+                mask_argsort,
+                K,
+                tile_id,
+                mask_words,
+                identity_offset,
+                1.0,
             )
             if status != 0:
                 raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
@@ -278,6 +294,7 @@ def _execute_forward(
                     K,
                     tile_id,
                     mask_words,
+                    identity_offset,
                     1.0,
                 )
                 if status != 0:
@@ -474,6 +491,11 @@ def _execute_backward(
         split_k = params.get("split_k", 64)
         N_in = in_features.shape[0]
 
+        # Submanifold identity shortcut for dgrad
+        # For submanifold conv, reverse_pair_table[K//2, j] == j (identity)
+        is_submanifold_bwd = (N_in == num_out_coords) and (K % 2 == 1)
+        identity_offset_bwd = K // 2 if is_submanifold_bwd else -1
+
         # Per-group channel dimensions
         if groups > 1:
             C_in_g = weight.shape[2]
@@ -534,6 +556,8 @@ def _execute_backward(
                 elif not fwd_cout_aligned:
                     dgrad_tile = 72
 
+                # Dgrad via fwd: use identity_offset for submanifold (reverse pair_table
+                # also has identity at K//2)
                 def _run_dgrad_fwd(go_slice, wt_slice, out_slice):
                     return _C.production.fwd(
                         go_slice,
@@ -545,6 +569,7 @@ def _execute_backward(
                         K,
                         dgrad_tile,
                         mask_words,
+                        identity_offset_bwd,
                         1.0,
                     )
 
@@ -580,6 +605,7 @@ def _execute_backward(
                         K,
                         dgrad_tile,
                         mask_words,
+                        identity_offset_bwd,
                         1.0,
                     )
 
