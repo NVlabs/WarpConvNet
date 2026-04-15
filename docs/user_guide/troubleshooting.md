@@ -1,4 +1,6 @@
-# cuBLAS Version Mismatch: `CUBLAS_STATUS_INVALID_VALUE` with fp16/bf16
+# Troubleshooting
+
+## cuBLAS Version Mismatch: `CUBLAS_STATUS_INVALID_VALUE` with fp16/bf16
 
 ## Symptom
 

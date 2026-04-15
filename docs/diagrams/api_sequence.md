@@ -1,14 +1,19 @@
+# API Sequence
+
 ```mermaid
 sequenceDiagram
-    participant Geometry
     participant User
+    participant Points
     participant Voxels
-    participant WarpConvNet
+    participant SparseConv3d
 
-    User->>WarpConvNet: create_geometry(points)
-    WarpConvNet-->>User: Geometry object
-    User->>Geometry: voxelize(voxel_size)
-    Geometry-->>User: Voxels object
-    User->>Voxels: sparse_conv(kernel_size)
-    Voxels-->>User: Features
+    User->>Points: Points.from_list_of_coordinates(coords)
+    Points-->>User: points
+    User->>Points: points.to_voxels(voxel_size, reduction)
+    Points-->>User: voxels
+    User->>SparseConv3d: conv(voxels)
+    SparseConv3d-->>User: output voxels
 ```
+
+The typical workflow: create a `Points` geometry from raw coordinates,
+voxelize into `Voxels`, and pass through sparse convolution layers.

@@ -44,39 +44,35 @@ nav:
   - Getting Started:
       - Installation: getting_started/installation.md
       - Quick Start: getting_started/quickstart.md
-      - Deployment: deployment.md
+  - Examples:
+      - ModelNet: examples/modelnet.md
+      - ScanNet: examples/scannet.md
   - User Guide:
       - Basic Concepts: user_guide/concepts.md
       - Geometry Types: user_guide/geometry_types.md
       - Geometry Tutorial: user_guide/geometry_tutorial.md
       - Network Tutorial: user_guide/network_tutorial.md
       - Sparse Convolutions: user_guide/sparse_convolutions.md
-      - Adaptive GEMM Grouping: user_guide/adaptive_gemm_grouping.md
-      - Inspect Benchmark Cache: user_guide/inspect_benchmark_cache.md
-      - Pre-Populate Benchmark Cache: user_guide/populate_benchmark_cache.md
+      - Accumulator Precision: user_guide/accumulator_precision.md
       - Point Convolutions: user_guide/point_convolutions.md
       - Normalizations: user_guide/normalizations.md
-      - Diagram Generation: user_guide/diagrams.md
+      - Adaptive GEMM Grouping: user_guide/adaptive_gemm_grouping.md
+      - Pre-Populate Benchmark Cache: user_guide/populate_benchmark_cache.md
+      - Inspect Benchmark Cache: user_guide/inspect_benchmark_cache.md
+      - Troubleshooting: user_guide/troubleshooting.md
   - Diagrams:
-      - Architecture: diagrams/architecture.md
-      - Class Hierarchy: diagrams/class_hierarchy.md
-      - Data Flow: diagrams/data_flow.md
       - Geometry Types: diagrams/geometry_types.md
-      - Model Architecture: diagrams/model_architecture.md
       - API Sequence: diagrams/api_sequence.md
   - API Reference:
       - Core: api/core.md
       - Dataset: api/dataset.md
       - Geometry: api/geometry.md
       - Batched Geometry: api/geometry_batched.md
-      - Models: api/models.md
       - Neural Networks: api/nn.md
       - Neural Network Functionals: api/nn_functional.md
       - Operations: api/ops.md
-      - Utils: api/utils.md
       - Types: api/types.md
+      - Utils: api/utils.md
       - Miscellaneous: api/misc.md
-  - Examples:
-      - ScanNet: examples/scannet.md
-      - ModelNet: examples/modelnet.md
   - Contributing: contributing.md
+  - Doc Deployment: deployment.md
