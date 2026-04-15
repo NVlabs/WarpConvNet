@@ -438,14 +438,18 @@ int production_fwd(torch::Tensor input,
                               stream);
 
   // MW>1 dispatch helper macro
-#define DISPATCH_MW(CALL_MW1, CALL_MW2, CALL_MW4) \
-  do {                                            \
-    if (mask_words <= 1)                          \
-      return CALL_MW1;                            \
-    else if (mask_words <= 2)                     \
-      return CALL_MW2;                            \
-    else                                          \
-      return CALL_MW4;                            \
+#define DISPATCH_MW(CALL_MW1, CALL_MW2, CALL_MW4, CALL_MW8, CALL_MW12) \
+  do {                                                                 \
+    if (mask_words <= 1)                                               \
+      return CALL_MW1;                                                 \
+    else if (mask_words <= 2)                                          \
+      return CALL_MW2;                                                 \
+    else if (mask_words <= 4)                                          \
+      return CALL_MW4;                                                 \
+    else if (mask_words <= 8)                                          \
+      return CALL_MW8;                                                 \
+    else                                                               \
+      return CALL_MW12;                                                \
   } while (0)
 
   // fp32 output tiles (fp16/bf16 input, f32 output — for non-AMP)
@@ -494,7 +498,9 @@ int production_fwd(torch::Tensor input,
           args),                                                                                \
       std::apply(                                                                               \
           [](auto &&...a) { return cute_gemm::launch_scalar_fwd_sab_se_mw<In, Out, 4>(a...); }, \
-          args))
+          args),                                                                                \
+      -2 /* MW>4 unsupported for scalar path */,                                                \
+      -2)
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
@@ -539,7 +545,12 @@ int production_fwd(torch::Tensor input,
       std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 2>(a...); }, \
                  args),                                                                            \
       std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 4>(a...); }, \
-                 args))
+                 args),                                                                            \
+      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 8>(a...); }, \
+                 args),                                                                            \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 12>(a...); },       \
+          args))
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
@@ -656,7 +667,9 @@ int production_dgrad(torch::Tensor grad_output,
           args),                                                                                  \
       std::apply(                                                                                 \
           [](auto &&...a) { return cute_gemm::launch_scalar_dgrad_sab_se_mw<In, Out, 4>(a...); }, \
-          args))
+          args),                                                                                  \
+      -2 /* MW>4 unsupported for scalar path */,                                                  \
+      -2)
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
@@ -702,6 +715,12 @@ int production_dgrad(torch::Tensor grad_output,
           args),                                                                               \
       std::apply(                                                                              \
           [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 4>(a...); },  \
+          args),                                                                               \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 8>(a...); },  \
+          args),                                                                               \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 12>(a...); }, \
           args))
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {

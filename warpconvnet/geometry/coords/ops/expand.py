@@ -10,7 +10,7 @@ from torch import Tensor
 
 from warpconvnet.geometry.coords.ops.batch_index import offsets_from_batch_index
 from warpconvnet.geometry.coords.search.torch_discrete import kernel_offsets_from_size
-from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable
+from warpconvnet.geometry.coords.search.packed_hashmap import PackedHashTable
 
 
 @torch.no_grad()
@@ -32,9 +32,7 @@ def expand_coords(
     if target_device.type != "cuda":
         raise ValueError(f"expand_coords requires CUDA tensors, got {target_device}")
 
-    coords = batch_indexed_coords.to(
-        dtype=torch.int32, device=target_device
-    ).contiguous()
+    coords = batch_indexed_coords.to(dtype=torch.int32, device=target_device).contiguous()
     num_input = coords.shape[0]
 
     num_total_kernels = int(np.prod(kernel_size))
@@ -43,18 +41,15 @@ def expand_coords(
     else:
         kernel_batch = max(1, min(kernel_batch, num_total_kernels))
 
-    offsets = kernel_offsets_from_size(
-        kernel_size, kernel_dilation, device=target_device
-    )
+    offsets = kernel_offsets_from_size(kernel_size, kernel_dilation, device=target_device)
     offsets = offsets.to(dtype=torch.int32).contiguous()
 
     # Start with a moderate load factor and grow as needed.
     table_capacity = max(16, int(max(1, num_input) * 4))
-    hashtable = TorchHashTable.from_keys(
+    hashtable = PackedHashTable.from_coords(
         coords,
         device=target_device,
         capacity=table_capacity,
-        vector_capacity=num_input,
     )
 
     for batch_start in range(0, num_total_kernels, kernel_batch):
@@ -66,13 +61,10 @@ def expand_coords(
         potential_entries = hashtable.num_entries + num_input * curr_offsets.shape[0]
         if potential_entries > hashtable.capacity // 2:
             new_capacity = max(potential_entries * 2, hashtable.capacity * 2)
-            new_vector_capacity = max(potential_entries, hashtable.num_entries * 2)
-            hashtable = TorchHashTable.from_keys(
+            hashtable = PackedHashTable.from_coords(
                 hashtable.vector_keys,
-                hash_method=hashtable.hash_method,
                 device=target_device,
                 capacity=new_capacity,
-                vector_capacity=new_vector_capacity,
             )
         hashtable.expand_with_offsets(coords, curr_offsets)
 
