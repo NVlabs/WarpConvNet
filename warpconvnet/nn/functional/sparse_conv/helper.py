@@ -153,6 +153,7 @@ def spatially_sparse_conv(
     kernel_dilation: Union[int, List[int], Tuple[int, ...]] = 1,
     bias: Optional[Float[Tensor, "C_out"]] = None,  # noqa: F821
     groups: int = 1,
+    use_fp16_accum: Optional[bool] = None,
     kernel_matmul_batch_size: int = 2,
     generative: bool = False,
     output_spatially_sparse_tensor: Optional[Geometry] = None,
@@ -241,6 +242,12 @@ def spatially_sparse_conv(
             o < i for o, i in zip(out_tensor_stride, in_tensor_stride)
         ), "Output stride is larger than input stride"
 
+    # Resolve use_fp16_accum: None means use global setting
+    if use_fp16_accum is None:
+        from warpconvnet.constants import get_fp16_accum
+
+        use_fp16_accum = get_fp16_accum()
+
     # Determine effective compute_dtype. Under AMP autocast, use the
     # autocast dtype (fp16/bf16) rather than the tensor's storage dtype
     # (fp32) so that saved-for-backward tensors are in compute precision.
@@ -305,6 +312,7 @@ def spatially_sparse_conv(
         implicit_matmul_bwd_block_size,
         in_tensor_stride,
         groups,
+        use_fp16_accum,
     )
 
     if bias is not None:

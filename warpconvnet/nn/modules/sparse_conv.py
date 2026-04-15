@@ -89,6 +89,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         stride_mode: STRIDED_CONV_MODE = STRIDED_CONV_MODE.STRIDE_ONLY,
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         compute_dtype: Optional[torch.dtype] = None,
+        use_fp16_accum: Optional[bool] = None,
         implicit_matmul_fwd_block_size: Optional[int] = None,
         implicit_matmul_bwd_block_size: Optional[int] = None,
     ):
@@ -97,6 +98,7 @@ class SpatiallySparseConv(BaseSpatialModule):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.groups = groups
+        self.use_fp16_accum = use_fp16_accum
         if in_channels % groups != 0:
             raise ValueError(f"in_channels ({in_channels}) must be divisible by groups ({groups})")
         if out_channels % groups != 0:
@@ -233,6 +235,7 @@ class SpatiallySparseConv(BaseSpatialModule):
             stride_mode=self.stride_mode,
             order=self.order,
             compute_dtype=self.compute_dtype,
+            use_fp16_accum=self.use_fp16_accum,
             implicit_matmul_fwd_block_size=self.implicit_matmul_fwd_block_size,
             implicit_matmul_bwd_block_size=self.implicit_matmul_bwd_block_size,
         )
@@ -287,6 +290,7 @@ class SparseConv2d(SpatiallySparseConv):
         kernel_matmul_batch_size: int = 2,
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         compute_dtype: Optional[torch.dtype] = None,
+        use_fp16_accum: Optional[bool] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -306,6 +310,7 @@ class SparseConv2d(SpatiallySparseConv):
             kernel_matmul_batch_size=kernel_matmul_batch_size,
             order=order,
             compute_dtype=compute_dtype,
+            use_fp16_accum=use_fp16_accum,
         )
 
 
@@ -358,6 +363,7 @@ class SparseConv3d(SpatiallySparseConv):
         kernel_matmul_batch_size: int = 2,
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         compute_dtype: Optional[torch.dtype] = None,
+        use_fp16_accum: Optional[bool] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -377,4 +383,5 @@ class SparseConv3d(SpatiallySparseConv):
             kernel_matmul_batch_size=kernel_matmul_batch_size,
             order=order,
             compute_dtype=compute_dtype,
+            use_fp16_accum=use_fp16_accum,
         )

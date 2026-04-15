@@ -54,6 +54,34 @@ dense: Tensor = vox.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=
 
 See `examples/modelnet.py` for a full training script.
 
+### Group Convolution
+
+```python
+from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+
+# Group convolution (4 groups, weight shape [K, 4, 16, 32])
+conv = SparseConv3d(64, 128, kernel_size=3, groups=4)
+
+# Depthwise convolution (groups=C_in, weight shape [K, 64, 1, 1])
+conv_dw = SparseConv3d(64, 64, kernel_size=3, groups=64)
+```
+
+### Accumulator Precision
+
+Control tensor core accumulator precision globally without changing network code:
+
+```python
+import warpconvnet
+
+# Runtime: enable fp16 accumulator (~15% speedup, lower precision)
+warpconvnet.set_fp16_accum(True)
+
+# Or via environment variable (before import):
+# export WARPCONVNET_USE_FP16_ACCUM=true
+```
+
+See [Accumulator Precision](https://nvlabs.github.io/WarpConvNet/user_guide/accumulator_precision/) for details.
+
 ## Sparse Convolution Auto-Tuning
 
 WarpConvNet automatically benchmarks CUDA kernel algorithms on the first forward/backward pass and caches results to `~/.cache/warpconvnet/`. Subsequent runs reuse cached results with no overhead.
@@ -84,12 +112,13 @@ The auto-tuner supports three candidate selection modes, controlled by environme
 
 ### Environment Variables
 
-| Variable                          | Default                | Description                                 |
-| --------------------------------- | ---------------------- | ------------------------------------------- |
-| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | AB gather-scatter algorithm (forward/dgrad) |
-| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | AtB gather-gather algorithm (wgrad)         |
-| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` to suppress auto-tuning logs |
-| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Cache directory                             |
+| Variable                          | Default                | Description                                             |
+| --------------------------------- | ---------------------- | ------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | AB gather-scatter algorithm (forward/dgrad)             |
+| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | AtB gather-gather algorithm (wgrad)                     |
+| `WARPCONVNET_USE_FP16_ACCUM`      | `false`                | Use fp16 accumulator for ~15% speedup (lower precision) |
+| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` to suppress auto-tuning logs             |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Cache directory                                         |
 
 ```bash
 # Suppress auto-tuning logs
@@ -103,6 +132,9 @@ export WARPCONVNET_FWD_ALGO_MODE=all
 
 # Benchmark only specific algorithms
 export WARPCONVNET_FWD_ALGO_MODE="[mask_implicit_gemm,cutlass_implicit_gemm]"
+
+# Enable fp16 accumulator globally (2x tensor core throughput)
+export WARPCONVNET_USE_FP16_ACCUM=true
 ```
 
 Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`, `mask_implicit_gemm`.

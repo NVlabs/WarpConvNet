@@ -166,6 +166,35 @@ WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE = os.environ.get(
 # Set WARPCONVNET_AUTOTUNE_LOG=false (or 0) to suppress auto-tuning logs.
 WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
 
+# Accumulator precision for production mask GEMM kernels.
+# When True, autotune prefers F16Accum tiles (2x tensor core throughput, lower precision).
+# When False (default), fp32 accumulator tiles are used for training stability.
+# Can be set via environment variable or at runtime via set_fp16_accum().
+#
+# Examples:
+#   export WARPCONVNET_USE_FP16_ACCUM=true   # global fp16 accumulator
+#   export WARPCONVNET_USE_FP16_ACCUM=false  # global fp32 accumulator (default)
+WARPCONVNET_USE_FP16_ACCUM = _get_env_bool("WARPCONVNET_USE_FP16_ACCUM", False)
+
+
+def get_fp16_accum() -> bool:
+    """Get the current global fp16 accumulator setting."""
+    return WARPCONVNET_USE_FP16_ACCUM
+
+
+def set_fp16_accum(enabled: bool) -> None:
+    """Set the global fp16 accumulator preference at runtime.
+
+    This affects all subsequent sparse convolution operations that don't
+    explicitly override use_fp16_accum at the module level.
+
+    Args:
+        enabled: If True, prefer F16Accum tiles for ~15% speedup.
+                 If False, use fp32 accumulator for training stability.
+    """
+    global WARPCONVNET_USE_FP16_ACCUM
+    WARPCONVNET_USE_FP16_ACCUM = enabled
+
 
 # ---------------------------------------------------------------------------
 # Startup check: detect broken cuBLAS for fp16 matmul
