@@ -24,7 +24,9 @@ from warpconvnet.utils.benchmark_cache import (
     generic_benchmark_update_entry,
     mark_generic_benchmark_cache_dirty,
 )
-from warpconvnet.nn.functional.sparse_conv import _BENCHMARK_NUM_RUNS
+from warpconvnet.nn.functional.sparse_conv.detail.autotune import (
+    _BENCHMARK_NUM_ITERS as _BENCHMARK_NUM_RUNS,
+)
 from warpconvnet.utils.benchmark_cache import SpatiallySparseConvConfig
 from warpconvnet.utils.type_cast import _min_dtype, _max_dtype, _maybe_cast
 from warpconvnet.utils.timer import CUDATimer
@@ -38,9 +40,7 @@ logger = get_logger(__name__)
 try:
     import warpconvnet._C as _C
 except ImportError as e:
-    logger.warning(
-        f"Error importing warpconvnet._C: {e}. Using fallback implementation."
-    )
+    logger.warning(f"Error importing warpconvnet._C: {e}. Using fallback implementation.")
     _C = None
 
 
@@ -87,10 +87,7 @@ def _initialize_depthwise_benchmark_cache():
         bwd_ns = generic_benchmark_get_namespace("sparse_conv_depthwise_backward")
         _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.update(fwd_ns)
         _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.update(bwd_ns)
-        if (
-            _BENCHMARK_DEPTHWISE_FORWARD_RESULTS
-            or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS
-        ):
+        if _BENCHMARK_DEPTHWISE_FORWARD_RESULTS or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS:
             logger.info(
                 f"Loaded {len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward and "
                 f"{len(_BENCHMARK_DEPTHWISE_BACKWARD_RESULTS)} depthwise backward benchmark configurations from cache"
@@ -106,9 +103,7 @@ _initialize_depthwise_benchmark_cache()
 def _filter_depthwise_benchmark_params_by_env_config(
     default_params: List[
         Tuple[
-            Union[
-                SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE
-            ],
+            Union[SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE],
             Dict[str, Any],
         ]
     ],
@@ -402,9 +397,7 @@ def _run_depthwise_forward_benchmarks(
             )
 
     params_to_benchmark = (
-        custom_params
-        if custom_params is not None
-        else _BENCHMARK_DEPTHWISE_FORWARD_PARAMS
+        custom_params if custom_params is not None else _BENCHMARK_DEPTHWISE_FORWARD_PARAMS
     )
 
     for algo_mode, params_config in params_to_benchmark:
@@ -448,18 +441,14 @@ def _run_depthwise_forward_benchmarks(
             f"Depthwise forward benchmark result: {algo_mode.value} {params_config} {current_algo_min_time_ms:.2f}ms"
         )
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append(
-                (algo_mode, params_config, current_algo_min_time_ms)
-            )
+            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
 
     if not all_benchmark_results:
         logger.warning(
             "Warning: No depthwise forward benchmark was successful. Defaulting to EXPLICIT."
         )
         with timer:
-            _execute_single_depthwise_fwd_pass(
-                SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {}
-            )
+            _execute_single_depthwise_fwd_pass(SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {})
         fallback_time = timer.elapsed_time if timer.elapsed_time is not None else 0.0
         all_benchmark_results.append(
             (SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE.EXPLICIT, {}, fallback_time)
@@ -525,9 +514,7 @@ def _run_depthwise_backward_benchmarks(
             )
 
     params_to_benchmark = (
-        custom_params
-        if custom_params is not None
-        else _BENCHMARK_DEPTHWISE_BACKWARD_PARAMS
+        custom_params if custom_params is not None else _BENCHMARK_DEPTHWISE_BACKWARD_PARAMS
     )
 
     for algo_mode, params_config in params_to_benchmark:
@@ -571,18 +558,14 @@ def _run_depthwise_backward_benchmarks(
             f"Depthwise backward benchmark result: {algo_mode.value} {params_config} {current_algo_min_time_ms:.2f}ms"
         )
         if current_algo_min_time_ms != float("inf"):
-            all_benchmark_results.append(
-                (algo_mode, params_config, current_algo_min_time_ms)
-            )
+            all_benchmark_results.append((algo_mode, params_config, current_algo_min_time_ms))
 
     if not all_benchmark_results:
         logger.warning(
             "Warning: No depthwise backward benchmark was successful. Defaulting to EXPLICIT."
         )
         with timer:
-            _execute_single_depthwise_bwd_pass(
-                SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {}
-            )
+            _execute_single_depthwise_bwd_pass(SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {})
         fallback_time = timer.elapsed_time if timer.elapsed_time is not None else 0.0
         all_benchmark_results.append(
             (SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE.EXPLICIT, {}, fallback_time)
@@ -627,20 +610,12 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
 
         if isinstance(fwd_algo, list):
             fwd_algo = [
-                (
-                    SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE(algo)
-                    if isinstance(algo, str)
-                    else algo
-                )
+                (SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE(algo) if isinstance(algo, str) else algo)
                 for algo in fwd_algo
             ]
         if isinstance(bwd_algo, list):
             bwd_algo = [
-                (
-                    SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo)
-                    if isinstance(algo, str)
-                    else algo
-                )
+                (SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo) if isinstance(algo, str) else algo)
                 for algo in bwd_algo
             ]
 
@@ -785,12 +760,8 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
             or N_in == 0
             or grad_output.shape[0] == 0
         ):
-            grad_in_final = (
-                torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
-            )
-            grad_weight_final = (
-                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            )
+            grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
+            grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
             return _pad_tuple(grad_in_final, grad_weight_final, 7)
 
         # Convert string to enum if needed
@@ -799,11 +770,7 @@ class UnifiedSpatiallySparseDepthwiseConvFunction(Function):
 
         if isinstance(initial_bwd_algo, list):
             initial_bwd_algo = [
-                (
-                    SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo)
-                    if isinstance(algo, str)
-                    else algo
-                )
+                (SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE(algo) if isinstance(algo, str) else algo)
                 for algo in initial_bwd_algo
             ]
 

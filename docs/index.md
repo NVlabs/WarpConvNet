@@ -43,13 +43,12 @@ See `examples/modelnet.py` for a full training script.
 ## 📚 Documentation Sections
 
 - **Getting Started**: Installation and quick start guides
-- **User Guide**: Comprehensive tutorials and concepts
+- **User Guide**: Tutorials, concepts, and performance guides
 - **API Reference**: Complete API documentation
-- **Examples**: Real-world usage examples
-- **Diagrams**: Architecture and data flow visualizations
+- **Examples**: Training scripts for ModelNet and ScanNet
 
 ## 🔗 Links
 
-- [GitHub Repository](https://github.com/nvidia/warpconvnet)
+- [GitHub Repository](https://github.com/nvlabs/warpconvnet)
 - [Installation Guide](getting_started/installation.md)
 - [Quick Start Tutorial](getting_started/quickstart.md)

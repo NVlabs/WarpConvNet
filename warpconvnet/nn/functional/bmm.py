@@ -6,8 +6,8 @@ from jaxtyping import Float
 from torch import Tensor
 
 from warpconvnet.geometry.base.geometry import Geometry
+from warpconvnet.geometry.features.cat import CatFeatures
 from warpconvnet.geometry.features.ops.convert import (
-    CatFeatures,
     cat_to_pad_tensor,
     pad_to_cat_tensor,
 )
@@ -32,9 +32,7 @@ def bmm(
         out_bat_features = torch.bmm(bat_features, weights)  # BxMxC_out
         out_features = PadFeatures(out_bat_features, sf.offsets)
     else:
-        raise ValueError(
-            f"Unsupported batched features type: {type(sf.batched_features)}"
-        )
+        raise ValueError(f"Unsupported batched features type: {type(sf.batched_features)}")
     return sf.replace(
         batched_features=out_features,
     )
