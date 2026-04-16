@@ -255,54 +255,27 @@ def _execute_forward(
 
         out_dtype = torch.float32 if use_f32_output else _in.dtype
 
-        if groups == 1:
-            output = torch.zeros(
-                (num_out_coords, C_out_g), dtype=out_dtype, device=in_features.device
-            )
-            status = _C.production.fwd(
-                _in,
-                _w,
-                output,
-                pair_table,
-                pair_mask,
-                mask_argsort,
-                K,
-                tile_id,
-                mask_words,
-                identity_offset,
-                1.0,
-            )
-            if status != 0:
-                raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
-        else:
-            # Group conv: loop over groups with per-group contiguous slices
-            # Mask data (pair_table, pair_mask, mask_argsort) shared across groups
-            group_outputs = []
-            for g in range(groups):
-                in_g = _in[:, g * C_in_g : (g + 1) * C_in_g].contiguous()
-                w_g = _w[:, g]  # [K, C_in_g, C_out_g], contiguous since dim 1 is G
-                out_g = torch.zeros(
-                    (num_out_coords, C_out_g), dtype=out_dtype, device=in_features.device
-                )
-                status = _C.production.fwd(
-                    in_g,
-                    w_g,
-                    out_g,
-                    pair_table,
-                    pair_mask,
-                    mask_argsort,
-                    K,
-                    tile_id,
-                    mask_words,
-                    identity_offset,
-                    1.0,
-                )
-                if status != 0:
-                    raise RuntimeError(
-                        f"production fwd group {g} failed: status={status}, tile={tile_id}"
-                    )
-                group_outputs.append(out_g)
-            output = torch.cat(group_outputs, dim=1)
+        # Single launch handles groups=1 and groups>1 via grid.z
+        C_out_total = C_out_g * groups
+        output = torch.zeros(
+            (num_out_coords, C_out_total), dtype=out_dtype, device=in_features.device
+        )
+        status = _C.production.fwd(
+            _in,
+            _w,
+            output,
+            pair_table,
+            pair_mask,
+            mask_argsort,
+            K,
+            tile_id,
+            mask_words,
+            identity_offset,
+            1.0,
+            groups,
+        )
+        if status != 0:
+            raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
 
         return output.to(dtype=orig_dtype)
     else:
@@ -556,23 +529,7 @@ def _execute_backward(
                 elif not fwd_cout_aligned:
                     dgrad_tile = 72
 
-                # Dgrad via fwd: use identity_offset for submanifold (reverse pair_table
-                # also has identity at K//2)
-                def _run_dgrad_fwd(go_slice, wt_slice, out_slice):
-                    return _C.production.fwd(
-                        go_slice,
-                        wt_slice,
-                        out_slice,
-                        rev_pt,
-                        rev_pm,
-                        rev_as,
-                        K,
-                        dgrad_tile,
-                        mask_words,
-                        identity_offset_bwd,
-                        1.0,
-                    )
-
+                dgrad_fn = _C.production.fwd
             else:
                 cin_aligned = C_in_g % vec_width == 0
                 cout_aligned = C_out_g % vec_width == 0
@@ -594,41 +551,29 @@ def _execute_backward(
                     else:
                         dgrad_tile = 54 if is_fp16 else 52
 
-                def _run_dgrad_fwd(go_slice, wt_slice, out_slice):
-                    return _C.production.dgrad(
-                        go_slice,
-                        wt_slice,
-                        out_slice,
-                        rev_pt,
-                        rev_pm,
-                        rev_as,
-                        K,
-                        dgrad_tile,
-                        mask_words,
-                        identity_offset_bwd,
-                        1.0,
-                    )
+                dgrad_fn = _C.production.dgrad
 
-            if groups == 1:
-                grad_in = torch.zeros(
-                    (N_in, C_in_g), dtype=dgrad_out_dtype, device=grad_output.device
-                )
-                status = _run_dgrad_fwd(_go, _wT, grad_in)
-                if status != 0:
-                    raise RuntimeError(f"production dgrad failed: status={status}")
-            else:
-                group_grads = []
-                for g in range(groups):
-                    go_g = _go[:, g * C_out_g : (g + 1) * C_out_g].contiguous()
-                    wt_g = _wT[:, g]  # [K, C_out_g, C_in_g]
-                    gi_g = torch.zeros(
-                        (N_in, C_in_g), dtype=dgrad_out_dtype, device=grad_output.device
-                    )
-                    status = _run_dgrad_fwd(go_g, wt_g, gi_g)
-                    if status != 0:
-                        raise RuntimeError(f"production dgrad group {g} failed: status={status}")
-                    group_grads.append(gi_g)
-                grad_in = torch.cat(group_grads, dim=1)
+            # Single launch handles groups=1 and groups>1 via grid.z
+            C_in_total = C_in_g * groups
+            grad_in = torch.zeros(
+                (N_in, C_in_total), dtype=dgrad_out_dtype, device=grad_output.device
+            )
+            status = dgrad_fn(
+                _go,
+                _wT,
+                grad_in,
+                rev_pt,
+                rev_pm,
+                rev_as,
+                K,
+                dgrad_tile,
+                mask_words,
+                identity_offset_bwd,
+                1.0,
+                groups,
+            )
+            if status != 0:
+                raise RuntimeError(f"production dgrad failed: status={status}")
 
             grad_in = grad_in.to(dtype=orig_dtype)
 
@@ -651,52 +596,34 @@ def _execute_backward(
             else:
                 wgrad_tile = tile_id
 
+            # Single launch: [K, G, C_in_g, C_out_g] for groups>1, [K, C_in_g, C_out_g] for groups=1
             if groups == 1:
                 grad_weight = torch.zeros(
                     (K, C_in_g, C_out_g), dtype=torch.float32, device=grad_output.device
                 )
-                status = _C.production.wgrad(
-                    _in,
-                    _go,
-                    grad_weight,
-                    pair_table,
-                    pair_mask,
-                    mask_argsort,
-                    kernel_map._reduced_mask,
-                    K,
-                    wgrad_tile,
-                    split_k,
-                    1.0,
-                )
-                if status != 0:
-                    raise RuntimeError(f"production wgrad failed: status={status}")
-                grad_weight = grad_weight.to(dtype=weight.dtype)
             else:
-                # Group conv wgrad: [K, G, C_in_g, C_out_g]
-                group_grads = []
-                for g in range(groups):
-                    in_g = _in[:, g * C_in_g : (g + 1) * C_in_g].contiguous()
-                    go_g = _go[:, g * C_out_g : (g + 1) * C_out_g].contiguous()
-                    gw_g = torch.zeros(
-                        (K, C_in_g, C_out_g), dtype=torch.float32, device=grad_output.device
-                    )
-                    status = _C.production.wgrad(
-                        in_g,
-                        go_g,
-                        gw_g,
-                        pair_table,
-                        pair_mask,
-                        mask_argsort,
-                        kernel_map._reduced_mask,
-                        K,
-                        wgrad_tile,
-                        split_k,
-                        1.0,
-                    )
-                    if status != 0:
-                        raise RuntimeError(f"production wgrad group {g} failed: status={status}")
-                    group_grads.append(gw_g.unsqueeze(1))  # [K, 1, C_in_g, C_out_g]
-                grad_weight = torch.cat(group_grads, dim=1).to(dtype=weight.dtype)
+                grad_weight = torch.zeros(
+                    (K, groups, C_in_g, C_out_g),
+                    dtype=torch.float32,
+                    device=grad_output.device,
+                )
+            status = _C.production.wgrad(
+                _in,
+                _go,
+                grad_weight,
+                pair_table,
+                pair_mask,
+                mask_argsort,
+                kernel_map._reduced_mask,
+                K,
+                wgrad_tile,
+                split_k,
+                1.0,
+                groups,
+            )
+            if status != 0:
+                raise RuntimeError(f"production wgrad failed: status={status}")
+            grad_weight = grad_weight.to(dtype=weight.dtype)
 
         return grad_in, grad_weight
     else:

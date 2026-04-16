@@ -18,8 +18,6 @@
 #pragma once
 
 // clang-format off
-// IMPORTANT: cute/tensor.hpp MUST come before cute/atom/copy_atom.hpp
-// with nvcc 12.9+ (reversed order causes Copy_Atom undefined errors).
 #include "cute/tensor.hpp"
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
@@ -109,7 +107,6 @@ using SmemLayoutAtomB_FP32 =
 
 // FP16 accumulator + k=8 MMA atom (mma.sync.m16n8k8)
 // 4 k-blocks per tile (vs 2 with k=16): more interleaving points for MMA/load overlap
-// Default: SM80_16x8x16. This uses SM80_16x8x8 (m16n8k8).
 
 #define DEFINE_CUTE_TILE_CONFIG_FP16_K8(TileTag, M_DIM, N_DIM, K_DIM)                        \
   template <>                                                                                \
@@ -266,7 +263,7 @@ using SmemLayoutAtomB_FP16_N32 = decltype(cute::composition(
     cute::Swizzle<2, 3, 3>{},
     cute::Layout<cute::Shape<cute::_32, cute::_8>, cute::Stride<cute::_1, cute::_32>>{}));
 
-// 32x32x32 tile with 2-warp (64 thread) layout — optimized for small channel counts
+// 32x32x32 tile with 2-warp (64 thread) layout for small-C configs
 // Lower register pressure → higher occupancy → better for C=32
 template <>
 struct CuteTileConfig<cutlass::half_t, gemm::Tile32x32x32> {
@@ -307,7 +304,7 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile32x32x32_F16Accum> {
   static constexpr bool UseCpAsyncGatherA = false;
 };
 
-// 32×16×32 tile: tN=16 → 2× blocks for C=32
+// 32×16×32 tile: tN=16 → 2× blocks for C=32 (better wave scheduling)
 // SmemLayoutAtomB needs N=16 compatible atom
 using SmemLayoutAtomB_FP16_N16 = decltype(cute::composition(
     cute::Swizzle<2, 3, 3>{},

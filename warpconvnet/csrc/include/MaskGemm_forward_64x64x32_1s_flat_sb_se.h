@@ -94,6 +94,8 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
     const ElementInput *ptr_A = ptr_A_base + group_id * C_in;
     const ElementInput *ptr_B = ptr_B_base + group_id * C_in * C_out;
     ElementOutput *ptr_D = ptr_D_base + group_id * C_out;
+    // Weight K-stride: for [K, G, Cig, Cog] layout, stride between k and k+1 is G*Cig*Cog
+    int stride_B_K = int(gridDim.z) * C_in * C_out;
 
     int grid_n = (C_out + tN - 1) / tN;
     int m_tile = int(blockIdx.x) / grid_n;
@@ -225,7 +227,7 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
       uint32_t iden_bit = 1u << (iden_k % 32);
       if (active_offsets_arr[iden_word] & iden_bit) {
         active_offsets_arr[iden_word] &= ~iden_bit;  // remove from offset loop
-        const ElementInput *ptr_Bk = ptr_B + iden_k * C_in * C_out;
+        const ElementInput *ptr_Bk = ptr_B + iden_k * stride_B_K;
         // Dense A load: input row = real_rows[m] (identity mapping, no pair_table)
         _load_A_identity(ptr_A, storage.real_rows, sA(_, _, 0), 0, N_in, C_in, stride_A);
         _load_B_tile(ptr_Bk, sB(_, _, 0), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
@@ -255,7 +257,7 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
         int k = _mw * 32 + __ffs(_word) - 1;
         _word &= _word - 1;
 
-        const ElementInput *ptr_Bk = ptr_B + k * C_in * C_out;
+        const ElementInput *ptr_Bk = ptr_B + k * stride_B_K;
 
         _update_A_indices(a_state,
                           pair_table,
@@ -275,7 +277,7 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
         if (num_k_tiles == 1) {
           // Single k-tile: alternate stage per offset, skip post-MMA sync
           int smem_stage = _offset_idx & 1;
-          _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_in);
+          _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_in, stride_A);
           _load_B_tile(
               ptr_Bk, sB(_, _, smem_stage), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
           cute::cp_async_fence();
@@ -288,7 +290,7 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
           for (int kt = 0; kt < num_k_tiles; ++kt) {
             int k_start_cin = kt * tK;
             int smem_stage = kt & 1;
-            _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), k_start_cin, C_in);
+            _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), k_start_cin, C_in, stride_A);
             _load_B_tile(ptr_Bk,
                          sB(_, _, smem_stage),
                          gmem_thr_copy_B,
@@ -311,7 +313,7 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
     // --- Epilogue ---
     if constexpr (UseScalarEpilogue) {
       _epilogue_scalar(
-          accum, ptr_D, mask_argsort, m_start, n_start, N_out, stride_D, alpha, tiled_mma);
+          accum, ptr_D, mask_argsort, m_start, n_start, N_out, C_out, alpha, tiled_mma, stride_D);
     } else {
       _epilogue_direct(accum,
                        ptr_D,
@@ -319,10 +321,11 @@ struct MaskGemm_forward_64x64x32_1s_flat_sb_se {
                        m_start,
                        n_start,
                        N_out,
-                       stride_D,
+                       C_out,
                        alpha,
                        tiled_mma,
-                       smem_buf);
+                       smem_buf,
+                       stride_D);
     }
   }
 
@@ -444,7 +447,8 @@ private:
                                        const AIteratorState &state,
                                        SmemTensor smem_tile,
                                        int k_start,
-                                       int C_in) const {
+                                       int C_in,
+                                       int /*stride_A*/ = 0) const {
     _load_A_kblock<SmemTensor, 0>(ptr_A, state, smem_tile, k_start, C_in);
     if constexpr (K_BLOCK_MAX_STATIC > 1)
       _load_A_kblock<SmemTensor, 1>(ptr_A, state, smem_tile, k_start, C_in);
@@ -461,7 +465,8 @@ private:
                                  const AIteratorState &state,
                                  SmemTensor smem_tile,
                                  int k_start,
-                                 int C_in) const {
+                                 int C_in,
+                                 int /*stride_A*/ = 0) const {
     const char *base_ptr = reinterpret_cast<const char *>(ptr_A);
     int k_start_bytes = k_start * sizeof(ElementInput);
     constexpr int iters_per_kb = (kItersPerThread + K_BLOCK_MAX_STATIC - 1) / K_BLOCK_MAX_STATIC;
@@ -833,7 +838,9 @@ private:
                                    int C_out,
                                    float alpha,
                                    TiledMma_ &tiled_mma,
-                                   char *smem_buf) const {
+                                   char *smem_buf,
+                                   int stride_out = 0) const {
+    if (stride_out == 0) stride_out = C_out;
     using namespace cute;
     auto thr_mma = tiled_mma.get_slice(threadIdx.x);
     Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
@@ -869,7 +876,7 @@ private:
             uint64_t packed;
             memcpy(&packed, &epi_smem[row * EPL_STRIDE + col_start], sizeof(uint64_t));
             char *dst = reinterpret_cast<char *>(ptr_D) +
-                        ((size_t)out_row * C_out + n_start + col_start) * 2;
+                        ((size_t)out_row * stride_out + n_start + col_start) * 2;
             *reinterpret_cast<uint64_t *>(dst) = packed;
           } else if (sorted_row < N_out) {
             int out_row = mask_argsort[sorted_row];
@@ -877,7 +884,7 @@ private:
               int n_global = n_start + col_start + v;
               if (n_global < C_out) {
                 __half h = epi_smem[row * EPL_STRIDE + col_start + v];
-                memcpy(&ptr_D[out_row * C_out + n_global], &h, 2);
+                memcpy(&ptr_D[out_row * stride_out + n_global], &h, 2);
               }
             }
           }
@@ -903,12 +910,12 @@ private:
             memcpy(&s1, &h1, 2);
             uint32_t packed = (uint32_t)s0 | ((uint32_t)s1 << 16);
             char *base_ptr = reinterpret_cast<char *>(ptr_D);
-            *reinterpret_cast<uint32_t *>(base_ptr + ((size_t)out_row * C_out + n_global) * 2) =
-                packed;
+            *reinterpret_cast<uint32_t *>(base_ptr +
+                                          ((size_t)out_row * stride_out + n_global) * 2) = packed;
           } else if (sorted_row < N_out && n_global < C_out) {
             int out_row = mask_argsort[sorted_row];
             float val = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
-            ptr_D[out_row * C_out + n_global] = static_cast<ElementOutput>(val);
+            ptr_D[out_row * stride_out + n_global] = static_cast<ElementOutput>(val);
           }
         }
       }
@@ -924,7 +931,7 @@ private:
           float val = float(accum(i));
           ElementOutput result = (alpha == 1.0f) ? static_cast<ElementOutput>(val)
                                                  : static_cast<ElementOutput>(alpha * val);
-          ptr_D[out_row * C_out + n_global] = result;
+          ptr_D[out_row * stride_out + n_global] = result;
         }
       }
     }
@@ -939,7 +946,9 @@ private:
                                    int N_out,
                                    int C_out,
                                    float alpha,
-                                   TiledMma_ &tiled_mma) const {
+                                   TiledMma_ &tiled_mma,
+                                   int stride_out = 0) const {
+    if (stride_out == 0) stride_out = C_out;
     using namespace cute;
     auto thr_mma = tiled_mma.get_slice(threadIdx.x);
     Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
@@ -953,7 +962,7 @@ private:
       if (sorted_row < N_out && n_global < C_out) {
         int out_row = mask_argsort[sorted_row];
         float val = (alpha == 1.0f) ? float(accum(i)) : alpha * float(accum(i));
-        ptr_D[out_row * C_out + n_global] = static_cast<ElementOutput>(val);
+        ptr_D[out_row * stride_out + n_global] = static_cast<ElementOutput>(val);
       }
     }
   }

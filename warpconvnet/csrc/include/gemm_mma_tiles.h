@@ -82,37 +82,14 @@ enum class MMATile : int {
   Tile128x128x64 = 7,
   Tile256x64x32 = 8,
   Tile64x256x32 = 9,
-  // Production mask kernels (warp shuffle + precomp rows + double-buffered MMA)
-  // Forward (MaskWords=1, K<=32)
-  Prod_Fwd_32x32x32_F16Acc = 40,   // C<=48, fp16 only
-  Prod_Fwd_64x64x32 = 41,          // C=64 or C<=48 bf16
-  Prod_Fwd_64x128x32_F16Acc = 42,  // C>=128, C_in>=C_out, fp16
-  Prod_Fwd_64x128x32_3s = 43,      // C>=128, C_in>=C_out, bf16
-  Prod_Fwd_128x64x32 = 44,         // C>=128, C_in<C_out
-  // Dgrad
-  Prod_Dgrad_32x32x32 = 50,          // C<=48
-  Prod_Dgrad_64x64x32 = 51,          // C=64
-  Prod_Dgrad_64x128x32 = 52,         // C>=128
-  Prod_Dgrad_64x64x32_F16Acc = 53,   // C=64, fp16
-  Prod_Dgrad_64x128x32_F16Acc = 54,  // C>=128, fp16
-  // Dgrad pipelined (load-before-MMA)
-  Prod_Dgrad_64x64x32_Pipe = 55,   // 64x64 pipelined
-  Prod_Dgrad_64x128x32_Pipe = 56,  // 64x128 pipelined
-  Prod_Dgrad_128x64x32_Pipe = 57,  // 128x64 pipelined
-  // Wgrad (mask_words computed at runtime — works for any K)
-  Prod_Wgrad_64x64x32_f32 = 60,            // Direct store, split_k=1
-  Prod_Wgrad_64x64x32_f32_atomic = 61,     // Atomic accumulate, C<=64
-  Prod_Wgrad_64x128x32_f32_atomic = 62,    // Atomic accumulate, C>=128
-  Prod_Wgrad_64x64x32_3s_f32_atomic = 63,  // 3-stage atomic, autotune variant
-  // Scalar variants for unaligned C (no padding needed)
-  Prod_Scalar_SAB_SE = 70,     // Both C_in, C_out unaligned (fwd/dgrad)
-  Prod_Scalar_SA = 71,         // C_in unaligned, C_out aligned (fwd/dgrad)
-  Prod_Scalar_SB_SE = 72,      // C_in aligned, C_out unaligned (fwd/dgrad)
-  Prod_Wgrad_Scalar_SAB = 73,  // Wgrad with scalar A+B loads (any C)
-  // fp32 output kernels (fp16 compute, f32 output — for non-AMP)
-  Prod_Fwd_64x64x32_f32out = 80,     // Vectorized B (aligned C)
-  Prod_Dgrad_64x64x32_f32out = 81,   // Vectorized B (aligned C)
-  Prod_Fwd_64x64x32_f32out_sb = 82,  // Scalar B (any C) + f32 output
+  // V2 mask forward kernel tiles (cp.async dense B loads, 2-stage)
+  V2_Tile128x128x32 = 20,
+  V2_Tile128x64x32 = 21,
+  V2_Tile64x128x32 = 22,
+  V2_Tile64x64x32 = 23,
+  // V2 mask forward kernel tiles, 3-stage pipeline
+  V2_Tile64x128x32_3Stage = 30,
+  V2_Tile64x64x32_3Stage = 31,
 #if defined(WARPCONVNET_SM90_ENABLED)
   // SM90 (Hopper) WGMMA tiles
   SM90_Tile64x128x64 = 100,
@@ -130,6 +107,32 @@ enum class MMATile : int {
   SM90_FP8_Tile128x128x128 = 205,
   SM90_FP8_Tile64x256x128 = 206,
 #endif  // WARPCONVNET_SM90_ENABLED
+
+  // Production mask GEMM tile IDs (warpconvnet-specific)
+  Prod_Fwd_32x32x32_F16Acc = 40,
+  Prod_Fwd_64x64x32 = 41,
+  Prod_Fwd_64x128x32_F16Acc = 42,
+  Prod_Fwd_64x128x32_3s = 43,
+  Prod_Fwd_128x64x32 = 44,
+  Prod_Dgrad_32x32x32 = 50,
+  Prod_Dgrad_64x64x32 = 51,
+  Prod_Dgrad_64x128x32 = 52,
+  Prod_Dgrad_64x64x32_F16Acc = 53,
+  Prod_Dgrad_64x128x32_F16Acc = 54,
+  Prod_Dgrad_64x64x32_Pipe = 55,
+  Prod_Dgrad_64x128x32_Pipe = 56,
+  Prod_Dgrad_128x64x32_Pipe = 57,
+  Prod_Wgrad_64x64x32_f32 = 60,
+  Prod_Wgrad_64x64x32_f32_atomic = 61,
+  Prod_Wgrad_64x128x32_f32_atomic = 62,
+  Prod_Wgrad_64x64x32_3s_f32_atomic = 63,
+  Prod_Scalar_SAB_SE = 70,
+  Prod_Scalar_SA = 71,
+  Prod_Scalar_SB_SE = 72,
+  Prod_Wgrad_Scalar_SAB = 73,
+  Prod_Fwd_64x64x32_f32out = 80,
+  Prod_Dgrad_64x64x32_f32out = 81,
+  Prod_Fwd_64x64x32_f32out_sb = 82,
 };
 
 }  // namespace gemm
