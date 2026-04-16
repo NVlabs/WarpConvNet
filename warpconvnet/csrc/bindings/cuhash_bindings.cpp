@@ -20,7 +20,8 @@ void launch_packed_insert(torch::Tensor keys,
                           torch::Tensor coords,
                           int num_keys,
                           int capacity,
-                          bool use_double_hash);
+                          bool use_double_hash,
+                          torch::Tensor status_tensor);
 void launch_packed_search(torch::Tensor keys,
                           torch::Tensor values,
                           torch::Tensor search_coords,
@@ -225,7 +226,8 @@ void register_cuhash(pybind11::module_ &m) {
           py::arg("coords"),
           py::arg("num_keys"),
           py::arg("capacity"),
-          py::arg("use_double_hash") = false);
+          py::arg("use_double_hash") = false,
+          py::arg("status_tensor"));
   mod.def("packed_search",
           &cuhash::launch_packed_search,
           py::arg("keys"),

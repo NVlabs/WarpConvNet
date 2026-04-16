@@ -30,11 +30,15 @@ __device__ __forceinline__ uint64_t atomicCAS_u64(uint64_t *addr, uint64_t compa
 }
 
 // --- Insert (per-thread, linear probing) ---
+// status_ptr (optional): if non-null, set to 1 if the table is full and the
+// key could not be inserted. Uses atomicMax so a single failing thread is
+// enough to flag the failure.
 __device__ __forceinline__ void packed_insert(uint64_t *__restrict__ keys,
                                               int *__restrict__ values,
                                               uint64_t packed_key,
                                               int value,
-                                              uint32_t capacity_mask) {
+                                              uint32_t capacity_mask,
+                                              int *status_ptr = nullptr) {
   uint32_t slot = Splitmix64Hash::hash(packed_key, capacity_mask);
   uint32_t attempts = 0;
   while (attempts <= capacity_mask) {
@@ -52,7 +56,10 @@ __device__ __forceinline__ void packed_insert(uint64_t *__restrict__ keys,
     slot = (slot + 1) & capacity_mask;
     ++attempts;
   }
-  // Table full - should not happen with proper sizing
+  // Table full - set status flag if caller provided one
+  if (status_ptr != nullptr) {
+    atomicMax(status_ptr, 1);
+  }
 }
 
 // --- Insert (per-thread, double hashing probe) ---
@@ -60,7 +67,8 @@ __device__ __forceinline__ void packed_insert_double(uint64_t *__restrict__ keys
                                                      int *__restrict__ values,
                                                      uint64_t packed_key,
                                                      int value,
-                                                     uint32_t capacity_mask) {
+                                                     uint32_t capacity_mask,
+                                                     int *status_ptr = nullptr) {
   uint32_t slot = Splitmix64Hash::hash(packed_key, capacity_mask);
   uint32_t stride = double_hash_stride(packed_key, capacity_mask);
   uint32_t attempts = 0;
@@ -75,6 +83,10 @@ __device__ __forceinline__ void packed_insert_double(uint64_t *__restrict__ keys
     }
     slot = (slot + stride) & capacity_mask;
     ++attempts;
+  }
+  // Table full - set status flag if caller provided one
+  if (status_ptr != nullptr) {
+    atomicMax(status_ptr, 1);
   }
 }
 

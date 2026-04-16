@@ -14,26 +14,31 @@ namespace cuhash {
 // 4D Key Packing: (batch, x, y, z) -> uint64_t
 //
 // Bit layout (MSB to LSB):
-//   batch:  10 bits unsigned [0, 1023]         — bits 63..54
+//   valid:   1 bit                             — bit 63 (always 1 for occupied)
+//   batch:   9 bits unsigned [0, 511]          — bits 62..54
 //   x:      18 bits signed   [-131072, 131071] — bits 53..36
 //   y:      18 bits signed   [-131072, 131071] — bits 35..18
 //   z:      18 bits signed   [-131072, 131071] — bits 17..0
 //
 // Rationale: batch is typically tiny (< 32), spatial coords need wider range.
 // 18-bit signed covers ±131071, which at 0.01m voxel size spans ±1.3 km.
+// The top bit is reserved as a "valid" flag — every packed key has bit 63 set
+// to 1, so kEmpty = 0 cannot collide with any legitimately packed key.
 // ============================================================================
 
-static constexpr int kBatchBits = 10;
+static constexpr int kBatchBits = 9;
 static constexpr int kCoordBits = 18;
-static constexpr uint32_t kBatchMask = (1u << kBatchBits) - 1;  // 0x3FF
+static constexpr uint32_t kBatchMask = (1u << kBatchBits) - 1;  // 0x1FF
 static constexpr uint32_t kCoordMask = (1u << kCoordBits) - 1;  // 0x3FFFF
 static constexpr int kCoordMax = (1 << (kCoordBits - 1)) - 1;   // 131071
 static constexpr int kCoordMin = -(1 << (kCoordBits - 1));      // -131072
+static constexpr int kBatchMax = (1 << kBatchBits) - 1;         // 511
 
-static constexpr uint64_t kEmpty = 0xFFFFFFFFFFFFFFFFull;
+static constexpr uint64_t kValidBit = 1ull << 63;
+static constexpr uint64_t kEmpty = 0ull;
 
 __host__ __device__ __forceinline__ uint64_t pack_key_4d(int b, int x, int y, int z) {
-  return (static_cast<uint64_t>(b & kBatchMask) << 54) |
+  return kValidBit | (static_cast<uint64_t>(b & kBatchMask) << 54) |
          (static_cast<uint64_t>(x & kCoordMask) << 36) |
          (static_cast<uint64_t>(y & kCoordMask) << 18) | static_cast<uint64_t>(z & kCoordMask);
 }

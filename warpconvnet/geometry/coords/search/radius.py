@@ -9,7 +9,7 @@ from torch import Tensor
 
 import warpconvnet._C as _C
 
-from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable, HashMethod
+from warpconvnet.geometry.coords.search.packed_hashmap import PackedHashTable
 
 
 @torch.no_grad()
@@ -30,11 +30,14 @@ def _radius_search_cuda(
     device = points.device
     cell_size = radius
 
-    # Quantize points to grid cells
-    cell_coords = torch.floor(points / cell_size).int()  # [N, 3]
+    # Quantize points to grid cells and pad to 4D for PackedHashTable
+    cell_coords_3d = torch.floor(points / cell_size).int()  # [N, 3]
+    cell_coords = torch.nn.functional.pad(
+        cell_coords_3d, (1, 0), value=0
+    )  # [N, 4] = [0, cx, cy, cz]
 
-    # Build cell hash table
-    table = TorchHashTable.from_keys(cell_coords, device=device)
+    # Build packed hash table from cell coordinates
+    table = PackedHashTable.from_coords(cell_coords, device=device)
 
     # Get cell IDs for each point
     cell_ids = table.search(cell_coords)  # [N] unique cell ID per point
@@ -57,10 +60,6 @@ def _radius_search_cuda(
     cell_starts[unique_ids.long()] = offsets
     cell_counts[unique_ids.long()] = counts.int()
 
-    # Flatten the table_kvs and vector_keys for kernel access
-    table_kvs_flat = table._table_kvs.reshape(-1).contiguous()
-    vector_keys_flat = table._vector_keys[: table._num_entries].reshape(-1).contiguous()
-
     # Ensure contiguous float32 for points/queries
     points_f = points.float().contiguous()
     queries_f = queries.float().contiguous()
@@ -74,8 +73,8 @@ def _radius_search_cuda(
         sorted_order_i,
         cell_starts,
         cell_counts,
-        table_kvs_flat,
-        vector_keys_flat,
+        table.keys_tensor,
+        table.values_tensor,
         result_count,
         N,
         M,
@@ -83,10 +82,7 @@ def _radius_search_cuda(
         radius,
         cell_size,
         table.capacity,
-        table.hash_method.value,
     )
-    # No sync needed: cumsum runs on the same stream, and .item() below
-    # implicitly synchronizes before copying the value to CPU.
 
     # Build offsets from counts
     neighbor_split = torch.zeros(M + 1, dtype=torch.int32, device=device)
@@ -111,8 +107,8 @@ def _radius_search_cuda(
         sorted_order_i,
         cell_starts,
         cell_counts,
-        table_kvs_flat,
-        vector_keys_flat,
+        table.keys_tensor,
+        table.values_tensor,
         neighbor_split,
         result_indices,
         result_distances,
@@ -122,11 +118,7 @@ def _radius_search_cuda(
         radius,
         cell_size,
         table.capacity,
-        table.hash_method.value,
     )
-    # No sync needed: returned tensors are consumed by PyTorch ops on the
-    # same stream. CUDA stream ordering guarantees the kernel completes
-    # before any downstream operation reads the results.
 
     return result_indices, result_distances, neighbor_split
 

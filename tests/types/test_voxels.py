@@ -4,7 +4,6 @@
 import pytest
 import torch
 
-from warpconvnet.geometry.coords.search.torch_hashmap import HashMethod
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
@@ -44,16 +43,8 @@ def test_voxel_construction(setup_voxels):
 
 
 @pytest.mark.benchmark(group="unique_methods")
-@pytest.mark.parametrize(
-    "hash_method",
-    [
-        HashMethod.CITY,
-        HashMethod.MURMUR,
-        HashMethod.FNV1A,
-    ],
-)
-def test_hashmap_unique(setup_voxels, benchmark, hash_method):
-    """Benchmark different hash methods for unique operation."""
+def test_hashmap_unique(setup_voxels, benchmark):
+    """Benchmark PackedHashTable unique operation."""
     voxels, _, _ = setup_voxels
     device = "cuda:0"
     voxels = voxels.to(device)
@@ -61,7 +52,7 @@ def test_hashmap_unique(setup_voxels, benchmark, hash_method):
     bcoords = batch_indexed_coordinates(coords.batched_tensor, coords.offsets)
 
     result = benchmark.pedantic(
-        lambda: unique_hashmap(bcoords, hash_method),
+        lambda: unique_hashmap(bcoords),
         iterations=20,
         rounds=3,
         warmup_rounds=1,
@@ -94,7 +85,7 @@ def test_unique_results(setup_voxels):
     bcoords = batch_indexed_coordinates(coords.batched_tensor, coords.offsets)
 
     # Get results from both methods
-    unique_index, _ = unique_hashmap(bcoords, HashMethod.FNV1A)
+    unique_index, _ = unique_hashmap(bcoords)
     unique_coords, to_orig_indices, _, _, to_unique_indices = unique_torch(
         bcoords, dim=0, return_to_unique_indices=True
     )

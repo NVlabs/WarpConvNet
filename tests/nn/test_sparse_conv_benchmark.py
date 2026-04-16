@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from warpconvnet.geometry.coords.ops.stride import stride_coords
-from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable
 from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.sparse_conv import (

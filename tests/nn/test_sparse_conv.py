@@ -6,7 +6,7 @@ import torch
 
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
 from warpconvnet.geometry.coords.ops.stride import stride_coords
-from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable
+from warpconvnet.geometry.coords.search.packed_hashmap import PackedHashTable
 from warpconvnet.geometry.coords.search.torch_discrete import (
     generate_kernel_map,
     kernel_offsets_from_size,
@@ -27,7 +27,7 @@ from warpconvnet.nn.functional.sparse_conv import (
     UnifiedSpatiallySparseConvFunction,
     spatially_sparse_conv,
 )
-from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
+from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv, SparseConv2d, SparseConv3d
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
 
 
@@ -75,8 +75,8 @@ def test_generate_kernel_map(setup_voxels):
     for _, (in_map, out_map) in enumerate(kernel_map):
         assert in_map.shape[0] == out_map.shape[0]
 
-    # Manual verification with hashmap
-    in_hashmap = TorchHashTable.from_keys(batch_indexed_in_coords)
+    # Manual verification with PackedHashTable
+    in_hashmap = PackedHashTable.from_coords(batch_indexed_in_coords, device=device)
     kernel_offsets = kernel_offsets_from_size((3, 3, 3), (1, 1, 1), device=device)
 
     batch_indexed_output_coords = batch_indexed_output_coords * torch.tensor(
@@ -87,7 +87,7 @@ def test_generate_kernel_map(setup_voxels):
     N_out = batch_indexed_output_coords.shape[0]
 
     for i, (in_map, out_map) in enumerate(kernel_map):
-        offseted_out_coords = batch_indexed_output_coords + kernel_offsets[i]
+        offseted_out_coords = (batch_indexed_output_coords + kernel_offsets[i]).contiguous()
         indices = in_hashmap.search(offseted_out_coords)
         valid_bool = (indices >= 0).to(device)
         num_valid = valid_bool.sum().item()
@@ -684,9 +684,6 @@ def test_sparse_conv_algorithm_list_functionality(setup_small_voxels):
 # =============================================================================
 
 
-from warpconvnet.nn.modules.sparse_conv import SparseConv3d
-
-
 @pytest.mark.parametrize(
     "C_in,C_out,groups",
     [
@@ -798,3 +795,79 @@ def test_group_conv_invalid_groups():
 
     with pytest.raises(ValueError, match="divisible by groups"):
         SparseConv3d(64, 100, 3, groups=3)  # 100 not divisible by 3
+
+
+# ── SparseConv2d (2D sparse convolution via padded cuhash) ──────────────
+
+
+def _make_2d_voxels(B=2, min_N=500, max_N=2000, C=16, device="cuda"):
+    """Create 2D Voxels (N, 2) coordinates for SparseConv2d tests."""
+    torch.manual_seed(42)
+    coords_list = []
+    feats_list = []
+    for _ in range(B):
+        N = torch.randint(min_N, max_N, (1,)).item()
+        c = (torch.rand(N, 2) * 100).int()  # 2D spatial coords
+        f = torch.randn(N, C)
+        coords_list.append(c)
+        feats_list.append(f)
+    return Voxels(coords_list, feats_list, device=device).unique()
+
+
+def test_sparse_conv2d_forward():
+    """Test SparseConv2d forward through PackedHashTable (padded cuhash path)."""
+    voxels_2d = _make_2d_voxels(C=16)
+    layer = SparseConv2d(16, 32, kernel_size=3, bias=True, fwd_algo="explicit_gemm").cuda()
+
+    out = layer(voxels_2d)
+
+    assert out.num_channels == 32
+    assert out.coordinate_tensor.shape[1] == 2  # still 2D spatial
+    assert out.feature_tensor.shape[0] == voxels_2d.feature_tensor.shape[0]
+
+
+def test_sparse_conv2d_strided():
+    """Test SparseConv2d with stride=2 produces downsampled output."""
+    voxels_2d = _make_2d_voxels(C=16)
+    layer = SparseConv2d(16, 32, kernel_size=3, stride=2, fwd_algo="explicit_gemm").cuda()
+
+    out = layer(voxels_2d)
+
+    assert out.num_channels == 32
+    assert out.coordinate_tensor.shape[1] == 2
+    assert out.feature_tensor.shape[0] < voxels_2d.feature_tensor.shape[0]
+
+
+def test_sparse_conv2d_backward():
+    """Test SparseConv2d backward pass with gradient check."""
+    voxels_2d = _make_2d_voxels(B=1, min_N=50, max_N=100, C=8)
+    layer = SparseConv2d(8, 8, kernel_size=3, bias=False, fwd_algo="explicit_gemm").cuda().double()
+    voxels_2d = voxels_2d.replace(batched_features=voxels_2d.feature_tensor.double())
+
+    out = layer(voxels_2d)
+    loss = out.feature_tensor.sum()
+    loss.backward()
+
+    assert layer.weight.grad is not None
+    assert layer.weight.grad.shape == layer.weight.shape
+
+
+def test_sparse_conv2d_kernel_map_uses_cuhash():
+    """Verify 2D conv routes through PackedHashTable (padded to 4D), not TorchHashTable."""
+    voxels_2d = _make_2d_voxels(C=8)
+    bcoords = batch_indexed_coordinates(voxels_2d.coordinate_tensor, voxels_2d.offsets)
+    assert bcoords.shape[1] == 3  # [batch, x, y]
+
+    # generate_kernel_map should pad to 4D internally and use PackedHashTable
+    kernel_map = generate_kernel_map(
+        bcoords,
+        bcoords,
+        in_to_out_stride_ratio=(1, 1),
+        kernel_size=(3, 3),
+    )
+    # Verify we got valid kernel map results
+    assert kernel_map.in_maps.shape[0] > 0
+    assert kernel_map.out_maps.shape[0] > 0
+    assert kernel_map.offsets.shape[0] == 3 * 3 + 1  # K=9, offsets has K+1 entries
+    # Verify _pair_table was set (only happens on cuhash path)
+    assert hasattr(kernel_map, "_pair_table") and kernel_map._pair_table is not None
