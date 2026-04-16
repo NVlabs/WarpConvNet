@@ -532,6 +532,8 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
 // duplicate specializations — all use Tile64x64x32 config)
 // =============================================================================
 
+// For fwd: A=input (C_in), D=output (C_out) → stride_A=C_in*G, stride_D=C_out*G
+// For dgrad: A=grad_output (C_out), D=grad_input (C_in) → stride_A=C_out*G, stride_D=C_in*G
 #define DEFINE_SCALAR_LAUNCH(OP, SUFFIX, KernelClass, ElemIn, ElemOut)             \
   template <>                                                                      \
   int launch_scalar_##OP##_##SUFFIX<ElemIn, ElemOut>(const void *a,                \
@@ -553,8 +555,11 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
     using Kernel = KernelClass<Config, ElemOut>;                                   \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
     constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
-    int out_rows = (std::string(#OP) == "fwd") ? N_out : N_in;                     \
-    int out_cols = (std::string(#OP) == "fwd") ? C_out : C_in;                     \
+    bool is_fwd = (std::string(#OP) == "fwd");                                     \
+    int out_rows = is_fwd ? N_out : N_in;                                          \
+    int out_cols = is_fwd ? C_out : C_in;                                          \
+    int stride_a = (is_fwd ? C_in : C_out) * groups;                               \
+    int stride_d = (is_fwd ? C_out : C_in) * groups;                               \
     if (out_rows == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (out_rows + TileM - 1) / TileM;                                  \
     int n_tiles = (out_cols + TileN - 1) / TileN;                                  \
@@ -579,8 +584,8 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
                                                              C_out,                \
                                                              K,                    \
                                                              alpha,                \
-                                                             C_in * groups,        \
-                                                             C_out * groups,       \
+                                                             stride_a,             \
+                                                             stride_d,             \
                                                              identity_offset);     \
     return 0;                                                                      \
   }
@@ -771,8 +776,11 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
     using Kernel = KernelClass<Config, ElemOut, MW>;                               \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
     constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
-    int out_rows = (std::string(#OP) == "fwd") ? N_out : N_in;                     \
-    int out_cols = (std::string(#OP) == "fwd") ? C_out : C_in;                     \
+    bool is_fwd = (std::string(#OP) == "fwd");                                     \
+    int out_rows = is_fwd ? N_out : N_in;                                          \
+    int out_cols = is_fwd ? C_out : C_in;                                          \
+    int stride_a = (is_fwd ? C_in : C_out) * groups;                               \
+    int stride_d = (is_fwd ? C_out : C_in) * groups;                               \
     if (out_rows == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (out_rows + TileM - 1) / TileM;                                  \
     int n_tiles = (out_cols + TileN - 1) / TileN;                                  \
@@ -797,8 +805,8 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
                                                              C_out,                \
                                                              K,                    \
                                                              alpha,                \
-                                                             C_in * groups,        \
-                                                             C_out * groups,       \
+                                                             stride_a,             \
+                                                             stride_d,             \
                                                              identity_offset);     \
     return 0;                                                                      \
   }
@@ -828,6 +836,8 @@ DEFINE_SCALAR_LAUNCH_MW(
 // Dgrad instantiations
 // =============================================================================
 
+// Dgrad: A = grad_output [N_out, C_out*G], D = grad_input [N_in, C_in*G]
+// stride_A = C_out*groups (grad_output row stride), stride_D = C_in*groups (grad_input row stride)
 #define INSTANTIATE_PROD_DGRAD(KernelClass, ElemIn, TileTag, ElemOut)                \
   template <>                                                                        \
   int launch_production_dgrad<ElemIn, gemm::TileTag, ElemOut>(const void *a,         \
@@ -873,8 +883,8 @@ DEFINE_SCALAR_LAUNCH_MW(
                                                              C_out,                  \
                                                              K,                      \
                                                              alpha,                  \
-                                                             C_in * groups,          \
                                                              C_out * groups,         \
+                                                             C_in * groups,          \
                                                              identity_offset);       \
     return 0;                                                                        \
   }
@@ -963,6 +973,7 @@ int launch_dgrad_pipelined_128x64(const void *,
                                   int identity_offset = -1,
                                   cudaStream_t = 0);
 
+// Dgrad pipelined: stride_A = C_out*groups (grad_output), stride_D = C_in*groups (grad_input)
 #define INST_DGRAD_PIPE(SUFFIX, KernelClass, ElemIn, TileTag)                      \
   template <>                                                                      \
   int launch_dgrad_pipelined_##SUFFIX<ElemIn, ElemIn>(const void *a,               \
@@ -1008,8 +1019,8 @@ int launch_dgrad_pipelined_128x64(const void *,
                                                              C_out,                \
                                                              K,                    \
                                                              alpha,                \
-                                                             C_in * groups,        \
                                                              C_out * groups,       \
+                                                             C_in * groups,        \
                                                              identity_offset);     \
     return 0;                                                                      \
   }
@@ -1040,6 +1051,7 @@ int launch_production_dgrad_f32out(const void *a,
                                    int identity_offset = -1,
                                    cudaStream_t stream = 0);
 
+// Dgrad f32out: stride_A = C_out*groups (grad_output), stride_D = C_in*groups (grad_input)
 #define INST_DGRAD_F32OUT(ElemIn)                                               \
   template <>                                                                   \
   int launch_production_dgrad_f32out<ElemIn>(const void *a,                     \
@@ -1084,8 +1096,8 @@ int launch_production_dgrad_f32out(const void *a,
                                                              C_out,             \
                                                              K,                 \
                                                              alpha,             \
-                                                             C_in * groups,     \
                                                              C_out * groups,    \
+                                                             C_in * groups,     \
                                                              identity_offset);  \
     return 0;                                                                   \
   }
@@ -1115,6 +1127,7 @@ int launch_production_dgrad_mw(const void *a,
                                int identity_offset = -1,
                                cudaStream_t stream = 0);
 
+// Dgrad multi-word: stride_A = C_out*groups (grad_output), stride_D = C_in*groups (grad_input)
 #define INST_DGRAD_MW(ElemIn, MW)                                               \
   template <>                                                                   \
   int launch_production_dgrad_mw<ElemIn, MW>(const void *a,                     \
@@ -1159,8 +1172,8 @@ int launch_production_dgrad_mw(const void *a,
                                                              C_out,             \
                                                              K,                 \
                                                              alpha,             \
-                                                             C_in * groups,     \
                                                              C_out * groups,    \
+                                                             C_in * groups,     \
                                                              identity_offset);  \
     return 0;                                                                   \
   }
