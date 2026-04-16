@@ -19,7 +19,7 @@ Defined in `warpconvnet/constants.py`.
 Valid algorithm names: `explicit_gemm`, `implicit_gemm`,
 `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`,
 `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`,
-`mask_implicit_gemm`, `production`, `auto`, `all`, `trimmed`.
+`production`, `production`, `auto`, `all`, `trimmed`.
 
 ### Benchmark cache
 

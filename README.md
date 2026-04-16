@@ -97,7 +97,7 @@ Each operation is auto-tuned independently with its own candidate set and cache 
 
 ```
 Auto-tuning sparse convolution algorithms. The first few iterations will be slow...
-Auto-tune forward complete: mask_implicit_gemm (mma_tile=3) — 0.21ms
+Auto-tune forward complete: production (mma_tile=3) — 0.21ms
 ```
 
 ### Algorithm Selection Modes
@@ -125,19 +125,19 @@ The auto-tuner supports three candidate selection modes, controlled by environme
 export WARPCONVNET_AUTOTUNE_LOG=false
 
 # Pin a specific algorithm (skip auto-tuning entirely)
-export WARPCONVNET_FWD_ALGO_MODE=mask_implicit_gemm
+export WARPCONVNET_FWD_ALGO_MODE=production
 
 # Exhaustive search (slow, for benchmarking)
 export WARPCONVNET_FWD_ALGO_MODE=all
 
 # Benchmark only specific algorithms
-export WARPCONVNET_FWD_ALGO_MODE="[mask_implicit_gemm,cutlass_implicit_gemm]"
+export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
 
 # Enable fp16 accumulator globally (2x tensor core throughput)
 export WARPCONVNET_USE_FP16_ACCUM=true
 ```
 
-Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`, `mask_implicit_gemm`.
+Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`, `production`.
 
 ### Pre-Populating the Cache
 

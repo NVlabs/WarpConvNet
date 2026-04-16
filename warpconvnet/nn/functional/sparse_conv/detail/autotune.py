@@ -328,12 +328,9 @@ def _run_forward_benchmarks(
     if dtype_to_check == torch.float64:
         params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
 
-    # Note: no alignment filter for mask_implicit_gemm — both CUTLASS and mask
     # kernels auto-pad unaligned channels internally (see cutlass.py, mask_gemm.py).
     if False:
-        params_to_use = [
-            (algo, cfg) for (algo, cfg) in params_to_use if algo != "mask_implicit_gemm"
-        ]
+        params_to_use = []
 
     global _AUTOTUNE_BANNER_SHOWN
     num_candidates = len(params_to_use)

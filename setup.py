@@ -257,7 +257,6 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/implicit_reduction.cu",
                 "warpconvnet/csrc/segmented_arithmetic.cu",
                 "warpconvnet/csrc/implicit_gemm.cu",
-                "warpconvnet/csrc/mask_implicit_gemm.cu",
                 "warpconvnet/csrc/mask_data_kernels.cu",
                 "warpconvnet/csrc/implicit_gemm_split_k.cu",
                 "warpconvnet/csrc/bindings/sampling_bindings.cpp",
