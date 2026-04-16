@@ -230,8 +230,13 @@ _AB_PRODUCTION_FWD_AS_DGRAD = (
 
 _ATB_PRODUCTION = (
     [
-        ("production", {"tile_id": 60, "split_k": 64}),  # Direct store, high split_k
-        ("production", {"tile_id": 60, "split_k": 16}),  # Direct store, low split_k
+        # tile_id=60 (Prod_Wgrad_64x64x32_f32, non-atomic direct store) is excluded:
+        # numerically wrong at C_in>=64 (rdiff~0.9, corr~0.4) — produces output of
+        # the right magnitude but uncorrelated with the reference. The atomic
+        # variants below are correct. See warpgemm note 2026_04_17_DGRAD_NUMERICAL_BUG.md
+        # for the related dgrad investigation; the direct-store wgrad has its own
+        # bug (likely a missing accumulator clear or scatter-row collision in the
+        # non-atomic epilogue) and needs a fix on the warpgemm side before re-adding.
         ("production", {"tile_id": 61, "split_k": 128}),  # Atomic 64x64, high split_k
         ("production", {"tile_id": 61, "split_k": 32}),  # Atomic 64x64, low split_k
         ("production", {"tile_id": 62, "split_k": 64}),  # Atomic 64x128, high split_k

@@ -488,12 +488,10 @@ def _execute_backward(
             _go = grad_output.half()
             _in = in_features.half()
             _w = weight.half()
-            _wT_raw = weight_T.half() if weight_T is not None else None
         else:
             _go = grad_output
             _in = in_features
             _w = weight
-            _wT_raw = weight_T
 
         compute_dtype = _go.dtype
 
@@ -505,12 +503,15 @@ def _execute_backward(
                 kernel_map, N_in, num_out_coords, grad_output.device
             )
 
-            # Compute weight transpose (per-group for groups > 1)
-            if groups == 1:
-                _wT = _wT_raw if _wT_raw is not None else _w.transpose(1, 2).contiguous()
-            else:
-                # _w: [K, G, C_in_g, C_out_g] → transpose last two → [K, G, C_out_g, C_in_g]
-                _wT = _w.transpose(2, 3).contiguous()
+            # production.dgrad expects weight in its NATIVE [K, G, C_in, C_out] layout
+            # (the kernel header docstring states: "weight [K, G, C_in, C_out] — NOT
+            # transposed"). The mainloop's _load_B_tile addresses each per-K plane as
+            # rows of length C_out indexed by C_in (n_local * K_dim + k_local with
+            # K_dim=C_out), which matches the un-transposed memory layout. Earlier code
+            # passed _w.transpose(1,2) which double-transposed B and gave near-zero
+            # correlation with the reference (rdiff ~1.4 across every shape). The
+            # production_fwd_as_dgrad path also expects un-transposed weight here.
+            _w_dgrad = _w.contiguous()
 
             # Select dgrad tile based on per-group channel dims
             vec_width = 16 // _go.element_size()
@@ -560,7 +561,7 @@ def _execute_backward(
             )
             status = dgrad_fn(
                 _go,
-                _wT,
+                _w_dgrad,
                 grad_in,
                 rev_pt,
                 rev_pm,
