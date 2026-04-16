@@ -76,7 +76,10 @@ __global__ __launch_bounds__(
                                                                           int C_in,
                                                                           int C_out,
                                                                           int K,
-                                                                          float alpha) {
+                                                                          float alpha,
+                                                                          int stride_A,
+                                                                          int stride_D,
+                                                                          int identity_offset) {
   extern __shared__ char smem[];
   Kernel{}(ptr_A,
            ptr_B,
@@ -90,9 +93,9 @@ __global__ __launch_bounds__(
            C_out,
            K,
            alpha,
-           /*stride_A=*/C_in,
-           /*stride_D=*/C_out,
-           /*identity_offset=*/-1,
+           stride_A,
+           stride_D,
+           identity_offset,
            smem);
 }
 
@@ -116,7 +119,9 @@ __global__ __launch_bounds__(
                                                                            int C_in,
                                                                            int C_out,
                                                                            int K,
-                                                                           float alpha) {
+                                                                           float alpha,
+                                                                           int stride_A,
+                                                                           int stride_B) {
   extern __shared__ char smem[];
   Kernel{}(ptr_A,
            ptr_B,
@@ -131,8 +136,8 @@ __global__ __launch_bounds__(
            C_out,
            K,
            alpha,
-           /*stride_A=*/C_in,
-           /*stride_B=*/C_out,
+           stride_A,
+           stride_B,
            smem);
 }
 
@@ -153,6 +158,8 @@ int launch_production_fwd(const void *a,
                           int C_out,
                           int K,
                           float alpha,
+                          int groups = 1,
+                          int identity_offset = -1,
                           cudaStream_t stream = 0);
 
 template <typename ElementInput, class TileTag, typename ElementOutput>
@@ -168,6 +175,8 @@ int launch_production_dgrad(const void *a,
                             int C_out,
                             int K,
                             float alpha,
+                            int groups = 1,
+                            int identity_offset = -1,
                             cudaStream_t stream = 0);
 
 template <typename ElementInput, class TileTag, typename ElementOutput>
@@ -185,6 +194,7 @@ int launch_production_wgrad(const void *a,
                             int K,
                             int split_k,
                             float alpha,
+                            int groups = 1,
                             cudaStream_t stream = 0);
 
 // =============================================================================
@@ -205,6 +215,8 @@ int launch_production_wgrad(const void *a,
                                                             int C_out,             \
                                                             int K,                 \
                                                             float alpha,           \
+                                                            int groups,            \
+                                                            int identity_offset,   \
                                                             cudaStream_t stream) { \
     using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                          \
     using Kernel = KernelClass<Config, ElemOut>;                                   \
@@ -213,7 +225,7 @@ int launch_production_wgrad(const void *a,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
     int m_tiles = (N_out + TileM - 1) / TileM;                                     \
     int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles);                                                   \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
@@ -233,7 +245,10 @@ int launch_production_wgrad(const void *a,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
     return 0;                                                                      \
   }
 
@@ -300,7 +315,9 @@ int launch_production_fwd_f32out(const void *a,
                                  int C_out,
                                  int K,
                                  float alpha,
-                                 cudaStream_t stream);
+                                 int groups = 1,
+                                 int identity_offset = -1,
+                                 cudaStream_t stream = 0);
 
 #define INST_FWD_F32OUT(ElemIn)                                                 \
   template <>                                                                   \
@@ -316,6 +333,8 @@ int launch_production_fwd_f32out(const void *a,
                                            int C_out,                           \
                                            int K,                               \
                                            float alpha,                         \
+                                           int groups,                          \
+                                           int identity_offset,                 \
                                            cudaStream_t stream) {               \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, float>;            \
@@ -324,7 +343,7 @@ int launch_production_fwd_f32out(const void *a,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (N_out + TileM - 1) / TileM;                                  \
     int n_tiles = (C_out + TileN - 1) / TileN;                                  \
-    dim3 grid(m_tiles *n_tiles);                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
       if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
@@ -343,7 +362,10 @@ int launch_production_fwd_f32out(const void *a,
                                                              C_in,              \
                                                              C_out,             \
                                                              K,                 \
-                                                             alpha);            \
+                                                             alpha,             \
+                                                             C_in * groups,     \
+                                                             C_out * groups,    \
+                                                             identity_offset);  \
     return 0;                                                                   \
   }
 
@@ -365,7 +387,9 @@ int launch_production_fwd_f32out_sb(const void *a,
                                     int C_out,
                                     int K,
                                     float alpha,
-                                    cudaStream_t stream);
+                                    int groups = 1,
+                                    int identity_offset = -1,
+                                    cudaStream_t stream = 0);
 
 #define INST_FWD_F32OUT_SB(ElemIn)                                              \
   template <>                                                                   \
@@ -381,6 +405,8 @@ int launch_production_fwd_f32out_sb(const void *a,
                                               int C_out,                        \
                                               int K,                            \
                                               float alpha,                      \
+                                              int groups,                       \
+                                              int identity_offset,              \
                                               cudaStream_t stream) {            \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat_direpi_sb<Config, float>;  \
@@ -389,7 +415,7 @@ int launch_production_fwd_f32out_sb(const void *a,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (N_out + TileM - 1) / TileM;                                  \
     int n_tiles = (C_out + TileN - 1) / TileN;                                  \
-    dim3 grid(m_tiles *n_tiles);                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
       if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
@@ -408,7 +434,10 @@ int launch_production_fwd_f32out_sb(const void *a,
                                                              C_in,              \
                                                              C_out,             \
                                                              K,                 \
-                                                             alpha);            \
+                                                             alpha,             \
+                                                             C_in * groups,     \
+                                                             C_out * groups,    \
+                                                             identity_offset);  \
     return 0;                                                                   \
   }
 
@@ -434,7 +463,9 @@ int launch_production_fwd_mw(const void *a,
                              int C_out,
                              int K,
                              float alpha,
-                             cudaStream_t stream);
+                             int groups = 1,
+                             int identity_offset = -1,
+                             cudaStream_t stream = 0);
 
 #define INST_FWD_MW(ElemIn, MW)                                                 \
   template <>                                                                   \
@@ -450,6 +481,8 @@ int launch_production_fwd_mw(const void *a,
                                            int C_out,                           \
                                            int K,                               \
                                            float alpha,                         \
+                                           int groups,                          \
+                                           int identity_offset,                 \
                                            cudaStream_t stream) {               \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, ElemIn, MW>;       \
@@ -458,7 +491,7 @@ int launch_production_fwd_mw(const void *a,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (N_out + TileM - 1) / TileM;                                  \
     int n_tiles = (C_out + TileN - 1) / TileN;                                  \
-    dim3 grid(m_tiles *n_tiles);                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
       if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
@@ -477,7 +510,10 @@ int launch_production_fwd_mw(const void *a,
                                                              C_in,              \
                                                              C_out,             \
                                                              K,                 \
-                                                             alpha);            \
+                                                             alpha,             \
+                                                             C_in * groups,     \
+                                                             C_out * groups,    \
+                                                             identity_offset);  \
     return 0;                                                                   \
   }
 
@@ -510,6 +546,8 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
                                                      int C_out,                    \
                                                      int K,                        \
                                                      float alpha,                  \
+                                                     int groups,                   \
+                                                     int identity_offset,          \
                                                      cudaStream_t stream) {        \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                     \
     using Kernel = KernelClass<Config, ElemOut>;                                   \
@@ -520,7 +558,7 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
     if (out_rows == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (out_rows + TileM - 1) / TileM;                                  \
     int n_tiles = (out_cols + TileN - 1) / TileN;                                  \
-    dim3 grid(m_tiles *n_tiles);                                                   \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
@@ -540,7 +578,10 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
     return 0;                                                                      \
   }
 
@@ -558,7 +599,9 @@ int launch_scalar_fwd_sab_se(const void *,
                              int,
                              int,
                              float,
-                             cudaStream_t);
+                             int groups = 1,
+                             int identity_offset = -1,
+                             cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_fwd_sa(const void *,
                          const void *,
@@ -572,7 +615,9 @@ int launch_scalar_fwd_sa(const void *,
                          int,
                          int,
                          float,
-                         cudaStream_t);
+                         int groups = 1,
+                         int identity_offset = -1,
+                         cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_fwd_sb_se(const void *,
                             const void *,
@@ -586,7 +631,9 @@ int launch_scalar_fwd_sb_se(const void *,
                             int,
                             int,
                             float,
-                            cudaStream_t);
+                            int groups = 1,
+                            int identity_offset = -1,
+                            cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_dgrad_sab_se(const void *,
                                const void *,
@@ -600,7 +647,9 @@ int launch_scalar_dgrad_sab_se(const void *,
                                int,
                                int,
                                float,
-                               cudaStream_t);
+                               int groups = 1,
+                               int identity_offset = -1,
+                               cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_dgrad_sa(const void *,
                            const void *,
@@ -614,7 +663,9 @@ int launch_scalar_dgrad_sa(const void *,
                            int,
                            int,
                            float,
-                           cudaStream_t);
+                           int groups = 1,
+                           int identity_offset = -1,
+                           cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_dgrad_sb_se(const void *,
                               const void *,
@@ -628,7 +679,9 @@ int launch_scalar_dgrad_sb_se(const void *,
                               int,
                               int,
                               float,
-                              cudaStream_t);
+                              int groups = 1,
+                              int identity_offset = -1,
+                              cudaStream_t = 0);
 
 // Forward scalar instantiations (MW=1)
 DEFINE_SCALAR_LAUNCH(
@@ -677,7 +730,9 @@ int launch_scalar_fwd_sab_se_mw(const void *,
                                 int,
                                 int,
                                 float,
-                                cudaStream_t);
+                                int groups = 1,
+                                int identity_offset = -1,
+                                cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut, int MW>
 int launch_scalar_dgrad_sab_se_mw(const void *,
                                   const void *,
@@ -691,7 +746,9 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
                                   int,
                                   int,
                                   float,
-                                  cudaStream_t);
+                                  int groups = 1,
+                                  int identity_offset = -1,
+                                  cudaStream_t = 0);
 
 #define DEFINE_SCALAR_LAUNCH_MW(OP, KernelClass, ElemIn, ElemOut, MW)              \
   template <>                                                                      \
@@ -707,6 +764,8 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
                                                           int C_out,               \
                                                           int K,                   \
                                                           float alpha,             \
+                                                          int groups,              \
+                                                          int identity_offset,     \
                                                           cudaStream_t stream) {   \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                     \
     using Kernel = KernelClass<Config, ElemOut, MW>;                               \
@@ -717,7 +776,7 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
     if (out_rows == 0 || C_in == 0 || C_out == 0) return 0;                        \
     int m_tiles = (out_rows + TileM - 1) / TileM;                                  \
     int n_tiles = (out_cols + TileN - 1) / TileN;                                  \
-    dim3 grid(m_tiles *n_tiles);                                                   \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
@@ -737,7 +796,10 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
     return 0;                                                                      \
   }
 
@@ -780,6 +842,8 @@ DEFINE_SCALAR_LAUNCH_MW(
                                                               int C_out,             \
                                                               int K,                 \
                                                               float alpha,           \
+                                                              int groups,            \
+                                                              int identity_offset,   \
                                                               cudaStream_t stream) { \
     using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                            \
     using Kernel = KernelClass<Config, ElemOut>;                                     \
@@ -788,7 +852,7 @@ DEFINE_SCALAR_LAUNCH_MW(
     if (N_in == 0 || C_in == 0 || C_out == 0) return 0;                              \
     int m_tiles = (N_in + TileM - 1) / TileM;                                        \
     int n_tiles = (C_in + TileN - 1) / TileN;                                        \
-    dim3 grid(m_tiles *n_tiles);                                                     \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                          \
     size_t smem = Kernel::SharedStorageSize;                                         \
     if (smem > 48 * 1024) {                                                          \
       auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,          \
@@ -808,7 +872,10 @@ DEFINE_SCALAR_LAUNCH_MW(
                                                              C_in,                   \
                                                              C_out,                  \
                                                              K,                      \
-                                                             alpha);                 \
+                                                             alpha,                  \
+                                                             C_in * groups,          \
+                                                             C_out * groups,         \
+                                                             identity_offset);       \
     return 0;                                                                        \
   }
 
@@ -860,7 +927,9 @@ int launch_dgrad_pipelined_64x64(const void *,
                                  int,
                                  int,
                                  float,
-                                 cudaStream_t);
+                                 int groups = 1,
+                                 int identity_offset = -1,
+                                 cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_dgrad_pipelined_64x128(const void *,
                                   const void *,
@@ -874,7 +943,9 @@ int launch_dgrad_pipelined_64x128(const void *,
                                   int,
                                   int,
                                   float,
-                                  cudaStream_t);
+                                  int groups = 1,
+                                  int identity_offset = -1,
+                                  cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_dgrad_pipelined_128x64(const void *,
                                   const void *,
@@ -888,7 +959,9 @@ int launch_dgrad_pipelined_128x64(const void *,
                                   int,
                                   int,
                                   float,
-                                  cudaStream_t);
+                                  int groups = 1,
+                                  int identity_offset = -1,
+                                  cudaStream_t = 0);
 
 #define INST_DGRAD_PIPE(SUFFIX, KernelClass, ElemIn, TileTag)                      \
   template <>                                                                      \
@@ -904,6 +977,8 @@ int launch_dgrad_pipelined_128x64(const void *,
                                                       int C_out,                   \
                                                       int K,                       \
                                                       float alpha,                 \
+                                                      int groups,                  \
+                                                      int identity_offset,         \
                                                       cudaStream_t stream) {       \
     using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                          \
     using Kernel = KernelClass<Config, ElemIn>;                                    \
@@ -912,7 +987,7 @@ int launch_dgrad_pipelined_128x64(const void *,
     if (N_in == 0 || C_in == 0 || C_out == 0) return 0;                            \
     int m_tiles = (N_in + TileM - 1) / TileM;                                      \
     int n_tiles = (C_in + TileN - 1) / TileN;                                      \
-    dim3 grid(m_tiles *n_tiles);                                                   \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
@@ -932,7 +1007,10 @@ int launch_dgrad_pipelined_128x64(const void *,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
     return 0;                                                                      \
   }
 
@@ -958,7 +1036,9 @@ int launch_production_dgrad_f32out(const void *a,
                                    int C_out,
                                    int K,
                                    float alpha,
-                                   cudaStream_t stream);
+                                   int groups = 1,
+                                   int identity_offset = -1,
+                                   cudaStream_t stream = 0);
 
 #define INST_DGRAD_F32OUT(ElemIn)                                               \
   template <>                                                                   \
@@ -974,6 +1054,8 @@ int launch_production_dgrad_f32out(const void *a,
                                              int C_out,                         \
                                              int K,                             \
                                              float alpha,                       \
+                                             int groups,                        \
+                                             int identity_offset,               \
                                              cudaStream_t stream) {             \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb<Config, float>;    \
@@ -982,7 +1064,7 @@ int launch_production_dgrad_f32out(const void *a,
     if (N_in == 0 || C_in == 0 || C_out == 0) return 0;                         \
     int m_tiles = (N_in + TileM - 1) / TileM;                                   \
     int n_tiles = (C_in + TileN - 1) / TileN;                                   \
-    dim3 grid(m_tiles *n_tiles);                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
       if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
@@ -1001,7 +1083,10 @@ int launch_production_dgrad_f32out(const void *a,
                                                              C_in,              \
                                                              C_out,             \
                                                              K,                 \
-                                                             alpha);            \
+                                                             alpha,             \
+                                                             C_in * groups,     \
+                                                             C_out * groups,    \
+                                                             identity_offset);  \
     return 0;                                                                   \
   }
 
@@ -1026,7 +1111,9 @@ int launch_production_dgrad_mw(const void *a,
                                int C_out,
                                int K,
                                float alpha,
-                               cudaStream_t stream);
+                               int groups = 1,
+                               int identity_offset = -1,
+                               cudaStream_t stream = 0);
 
 #define INST_DGRAD_MW(ElemIn, MW)                                               \
   template <>                                                                   \
@@ -1042,6 +1129,8 @@ int launch_production_dgrad_mw(const void *a,
                                              int C_out,                         \
                                              int K,                             \
                                              float alpha,                       \
+                                             int groups,                        \
+                                             int identity_offset,               \
                                              cudaStream_t stream) {             \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_dgrad_64x64x32_1s_flat<Config, ElemIn, MW>;         \
@@ -1050,7 +1139,7 @@ int launch_production_dgrad_mw(const void *a,
     if (N_in == 0 || C_in == 0 || C_out == 0) return 0;                         \
     int m_tiles = (N_in + TileM - 1) / TileM;                                   \
     int n_tiles = (C_in + TileN - 1) / TileN;                                   \
-    dim3 grid(m_tiles *n_tiles);                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
       if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
@@ -1069,7 +1158,10 @@ int launch_production_dgrad_mw(const void *a,
                                                              C_in,              \
                                                              C_out,             \
                                                              K,                 \
-                                                             alpha);            \
+                                                             alpha,             \
+                                                             C_in * groups,     \
+                                                             C_out * groups,    \
+                                                             identity_offset);  \
     return 0;                                                                   \
   }
 
@@ -1103,6 +1195,7 @@ INST_DGRAD_MW(cutlass::bfloat16_t, 12)
                                                               int K,                 \
                                                               int split_k,           \
                                                               float alpha,           \
+                                                              int groups,            \
                                                               cudaStream_t stream) { \
     using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                            \
     using Kernel = KernelClass<Config, ElemOut>;                                     \
@@ -1111,7 +1204,7 @@ INST_DGRAD_MW(cutlass::bfloat16_t, 12)
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                             \
     int m_tiles = (C_in + TileM - 1) / TileM;                                        \
     int n_tiles = (C_out + TileN - 1) / TileN;                                       \
-    dim3 grid(m_tiles *n_tiles, K, split_k);                                         \
+    dim3 grid(m_tiles *n_tiles, groups *K, split_k);                                 \
     size_t smem = Kernel::SharedStorageSize;                                         \
     if (smem > 48 * 1024) {                                                          \
       auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,         \
@@ -1132,7 +1225,9 @@ INST_DGRAD_MW(cutlass::bfloat16_t, 12)
                                                              C_in,                   \
                                                              C_out,                  \
                                                              K,                      \
-                                                             alpha);                 \
+                                                             alpha,                  \
+                                                             C_in * groups,          \
+                                                             C_out * groups);        \
     return 0;                                                                        \
   }
 
@@ -1159,6 +1254,7 @@ int launch_wgrad_atomic_64x64(const void *,
                               int,
                               int,
                               float,
+                              int,
                               cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_wgrad_atomic_64x128(const void *,
@@ -1175,6 +1271,7 @@ int launch_wgrad_atomic_64x128(const void *,
                                int,
                                int,
                                float,
+                               int,
                                cudaStream_t);
 
 #define INST_WGRAD_ATOMIC(SUFFIX, KernelClass, ElemIn, TileTag)                    \
@@ -1193,6 +1290,7 @@ int launch_wgrad_atomic_64x128(const void *,
                                                   int K,                           \
                                                   int split_k,                     \
                                                   float alpha,                     \
+                                                  int groups,                      \
                                                   cudaStream_t stream) {           \
     using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                          \
     using Kernel = KernelClass<Config, float>;                                     \
@@ -1201,7 +1299,7 @@ int launch_wgrad_atomic_64x128(const void *,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
     int m_tiles = (C_in + TileM - 1) / TileM;                                      \
     int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles, K, split_k);                                       \
+    dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
@@ -1222,7 +1320,9 @@ int launch_wgrad_atomic_64x128(const void *,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups);      \
     return 0;                                                                      \
   }
 
@@ -1249,6 +1349,7 @@ int launch_wgrad_atomic_3s(const void *,
                            int,
                            int,
                            float,
+                           int,
                            cudaStream_t);
 
 #define INST_WGRAD_ATOMIC_3S(ElemIn)                                               \
@@ -1267,6 +1368,7 @@ int launch_wgrad_atomic_3s(const void *,
                                             int K,                                 \
                                             int split_k,                           \
                                             float alpha,                           \
+                                            int groups,                            \
                                             cudaStream_t stream) {                 \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                     \
     using Kernel = MaskGemm_wgrad_64x64x32_3s_f32_atomic<Config, float>;           \
@@ -1275,7 +1377,7 @@ int launch_wgrad_atomic_3s(const void *,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
     int m_tiles = (C_in + TileM - 1) / TileM;                                      \
     int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles, K, split_k);                                       \
+    dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
@@ -1296,7 +1398,9 @@ int launch_wgrad_atomic_3s(const void *,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups);      \
     return 0;                                                                      \
   }
 
@@ -1324,6 +1428,7 @@ int launch_scalar_wgrad_sab(const void *a,
                             int K,
                             int split_k,
                             float alpha,
+                            int groups,
                             cudaStream_t stream);
 
 #define INSTANTIATE_SCALAR_WGRAD(ElemIn, ElemOut)                                  \
@@ -1342,6 +1447,7 @@ int launch_scalar_wgrad_sab(const void *a,
                                                int K,                              \
                                                int split_k,                        \
                                                float alpha,                        \
+                                               int groups,                         \
                                                cudaStream_t stream) {              \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                     \
     using Kernel = MaskGemm_wgrad_64x64x32_2s_f32_sab<Config, ElemOut>;            \
@@ -1350,7 +1456,7 @@ int launch_scalar_wgrad_sab(const void *a,
     if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
     int m_tiles = (C_in + TileM - 1) / TileM;                                      \
     int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles, K, split_k);                                       \
+    dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
       auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
@@ -1371,7 +1477,9 @@ int launch_scalar_wgrad_sab(const void *a,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
-                                                             alpha);               \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups);      \
     return 0;                                                                      \
   }
 

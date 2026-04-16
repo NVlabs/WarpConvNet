@@ -28,6 +28,8 @@ int launch_production_fwd(const void *a,
                           int C_out,
                           int K,
                           float alpha,
+                          int groups,
+                          int identity_offset,
                           cudaStream_t stream);
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
@@ -43,6 +45,8 @@ int launch_production_dgrad(const void *a,
                             int C_out,
                             int K,
                             float alpha,
+                            int groups,
+                            int identity_offset,
                             cudaStream_t stream);
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
@@ -60,6 +64,7 @@ int launch_production_wgrad(const void *a,
                             int K,
                             int split_k,
                             float alpha,
+                            int groups,
                             cudaStream_t stream);
 
 // Scalar variant launch functions (separate template families)
@@ -76,6 +81,8 @@ int launch_scalar_fwd_sab_se(const void *,
                              int,
                              int,
                              float,
+                             int,
+                             int,
                              cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_fwd_sa(const void *,
@@ -90,6 +97,8 @@ int launch_scalar_fwd_sa(const void *,
                          int,
                          int,
                          float,
+                         int,
+                         int,
                          cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_fwd_sb_se(const void *,
@@ -104,6 +113,8 @@ int launch_scalar_fwd_sb_se(const void *,
                             int,
                             int,
                             float,
+                            int,
+                            int,
                             cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_dgrad_sab_se(const void *,
@@ -118,6 +129,8 @@ int launch_scalar_dgrad_sab_se(const void *,
                                int,
                                int,
                                float,
+                               int,
+                               int,
                                cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_dgrad_sa(const void *,
@@ -132,6 +145,8 @@ int launch_scalar_dgrad_sa(const void *,
                            int,
                            int,
                            float,
+                           int,
+                           int,
                            cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_dgrad_sb_se(const void *,
@@ -146,6 +161,8 @@ int launch_scalar_dgrad_sb_se(const void *,
                               int,
                               int,
                               float,
+                              int,
+                              int,
                               cudaStream_t);
 
 // MaskWords>1 forward/dgrad launch functions (K>32)
@@ -162,6 +179,8 @@ int launch_production_fwd_mw(const void *,
                              int,
                              int,
                              float,
+                             int,
+                             int,
                              cudaStream_t);
 template <typename ElemIn, int MaskWords>
 int launch_production_dgrad_mw(const void *,
@@ -176,6 +195,8 @@ int launch_production_dgrad_mw(const void *,
                                int,
                                int,
                                float,
+                               int,
+                               int,
                                cudaStream_t);
 
 // Pipelined dgrad launch functions
@@ -192,6 +213,8 @@ int launch_dgrad_pipelined_64x64(const void *,
                                  int,
                                  int,
                                  float,
+                                 int,
+                                 int,
                                  cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_dgrad_pipelined_64x128(const void *,
@@ -206,6 +229,8 @@ int launch_dgrad_pipelined_64x128(const void *,
                                   int,
                                   int,
                                   float,
+                                  int,
+                                  int,
                                   cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_dgrad_pipelined_128x64(const void *,
@@ -220,6 +245,8 @@ int launch_dgrad_pipelined_128x64(const void *,
                                   int,
                                   int,
                                   float,
+                                  int,
+                                  int,
                                   cudaStream_t);
 
 // Scalar MW>1 launch functions (K>32 with unaligned channels)
@@ -236,6 +263,8 @@ int launch_scalar_fwd_sab_se_mw(const void *,
                                 int,
                                 int,
                                 float,
+                                int,
+                                int,
                                 cudaStream_t);
 template <typename ElemIn, typename ElemOut, int MW>
 int launch_scalar_dgrad_sab_se_mw(const void *,
@@ -250,6 +279,8 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
                                   int,
                                   int,
                                   float,
+                                  int,
+                                  int,
                                   cudaStream_t);
 
 // fp32 output launch functions
@@ -266,6 +297,8 @@ int launch_production_fwd_f32out(const void *,
                                  int,
                                  int,
                                  float,
+                                 int,
+                                 int,
                                  cudaStream_t);
 template <typename ElemIn>
 int launch_production_fwd_f32out_sb(const void *,
@@ -280,6 +313,8 @@ int launch_production_fwd_f32out_sb(const void *,
                                     int,
                                     int,
                                     float,
+                                    int,
+                                    int,
                                     cudaStream_t);
 template <typename ElemIn>
 int launch_production_dgrad_f32out(const void *,
@@ -294,6 +329,8 @@ int launch_production_dgrad_f32out(const void *,
                                    int,
                                    int,
                                    float,
+                                   int,
+                                   int,
                                    cudaStream_t);
 
 // Atomic wgrad launch functions
@@ -312,6 +349,7 @@ int launch_wgrad_atomic_64x64(const void *,
                               int,
                               int,
                               float,
+                              int,
                               cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_wgrad_atomic_64x128(const void *,
@@ -328,6 +366,7 @@ int launch_wgrad_atomic_64x128(const void *,
                                int,
                                int,
                                float,
+                               int,
                                cudaStream_t);
 template <typename ElemIn, typename ElemOut>
 int launch_wgrad_atomic_3s(const void *,
@@ -344,6 +383,7 @@ int launch_wgrad_atomic_3s(const void *,
                            int,
                            int,
                            float,
+                           int,
                            cudaStream_t);
 
 // Scalar wgrad launch function
@@ -362,6 +402,7 @@ int launch_scalar_wgrad_sab(const void *,
                             int,
                             int,
                             float,
+                            int,
                             cudaStream_t);
 
 }  // namespace cute_gemm
@@ -402,7 +443,8 @@ int production_fwd(torch::Tensor input,
                    int tile_id,
                    int mask_words,
                    int identity_offset,
-                   float alpha) {
+                   float alpha,
+                   int groups) {
   TORCH_CHECK(input.is_cuda() && weight.is_cuda() && output.is_cuda());
   TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
               "production_fwd requires fp16 or bf16 input (cast in Python before calling)");
@@ -411,7 +453,9 @@ int production_fwd(torch::Tensor input,
   output = output.contiguous();
 
   int N_in = input.size(0), N_out = output.size(0);
-  int C_in = input.size(1), C_out = output.size(1);
+  // For group conv: input is [N, C_in_total], C_in/C_out are per-group
+  int C_in_total = input.size(1), C_out_total = output.size(1);
+  int C_in = C_in_total / groups, C_out = C_out_total / groups;
 
   // Alignment check — skip for scalar tiles which handle any C
   int elem_sz = input.element_size(), vec = 16 / elem_sz;
@@ -436,6 +480,8 @@ int production_fwd(torch::Tensor input,
                               C_out,
                               K,
                               alpha,
+                              groups,
+                              identity_offset,
                               stream);
 
   // MW>1 dispatch helper macro
@@ -612,7 +658,8 @@ int production_dgrad(torch::Tensor grad_output,
                      int tile_id,
                      int mask_words,
                      int identity_offset,
-                     float alpha) {
+                     float alpha,
+                     int groups) {
   TORCH_CHECK(grad_output.is_cuda() && weight_T.is_cuda() && grad_input.is_cuda());
   TORCH_CHECK(
       grad_output.scalar_type() == torch::kFloat16 || grad_output.scalar_type() == torch::kBFloat16,
@@ -621,7 +668,8 @@ int production_dgrad(torch::Tensor grad_output,
   weight_T = weight_T.contiguous();
 
   int N_in = grad_input.size(0), N_out = grad_output.size(0);
-  int C_in = grad_input.size(1), C_out = grad_output.size(1);
+  int C_in_total = grad_input.size(1), C_out_total = grad_output.size(1);
+  int C_in = C_in_total / groups, C_out = C_out_total / groups;
 
   auto si = grad_output.scalar_type();
   auto so = grad_input.scalar_type();
@@ -640,6 +688,8 @@ int production_dgrad(torch::Tensor grad_output,
                               C_out,
                               K,
                               alpha,
+                              groups,
+                              identity_offset,
                               stream);
 
   // fp32 output dgrad tile
@@ -805,7 +855,8 @@ int production_wgrad(torch::Tensor input,
                      int K,
                      int tile_id,
                      int split_k,
-                     float alpha) {
+                     float alpha,
+                     int groups) {
   TORCH_CHECK(input.is_cuda() && grad_output.is_cuda() && grad_weight.is_cuda());
   TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
               "production_wgrad requires fp16 or bf16 input (cast in Python before calling)");
@@ -813,7 +864,9 @@ int production_wgrad(torch::Tensor input,
   grad_output = grad_output.contiguous();
 
   int N_in = input.size(0), N_out = grad_output.size(0);
-  int C_in = input.size(1), C_out = grad_output.size(1);
+  // For group conv: input is [N, C_in_total], C_in/C_out are per-group
+  int C_in_total = input.size(1), C_out_total = grad_output.size(1);
+  int C_in = C_in_total / groups, C_out = C_out_total / groups;
 
   int elem_sz = input.element_size(), vec = 16 / elem_sz;
   bool is_scalar_tile = (tile_id == 73);
@@ -846,6 +899,7 @@ int production_wgrad(torch::Tensor input,
                                                                         K,
                                                                         split_k,
                                                                         alpha,
+                                                                        groups,
                                                                         stream);
 #ifndef DISABLE_BFLOAT16
     if (si == torch::kBFloat16)
@@ -863,6 +917,7 @@ int production_wgrad(torch::Tensor input,
                                                                             K,
                                                                             split_k,
                                                                             alpha,
+                                                                            groups,
                                                                             stream);
 #endif
   }
@@ -883,6 +938,7 @@ int production_wgrad(torch::Tensor input,
                                                                    K,                      \
                                                                    split_k,                \
                                                                    alpha,                  \
+                                                                   groups,                 \
                                                                    stream)
 
 #define WGRAD_ATOMIC(ElemIn, suffix)                                             \
@@ -900,6 +956,7 @@ int production_wgrad(torch::Tensor input,
                                                          K,                      \
                                                          split_k,                \
                                                          alpha,                  \
+                                                         groups,                 \
                                                          stream)
 
   if (si == torch::kFloat16) {
@@ -1008,7 +1065,8 @@ void register_production(py::module &m) {
            py::arg("tile_id"),
            py::arg("mask_words") = 1,
            py::arg("identity_offset") = -1,
-           py::arg("alpha") = 1.0f);
+           py::arg("alpha") = 1.0f,
+           py::arg("groups") = 1);
 
   prod.def("dgrad",
            &production_dgrad,
@@ -1022,7 +1080,8 @@ void register_production(py::module &m) {
            py::arg("tile_id"),
            py::arg("mask_words") = 1,
            py::arg("identity_offset") = -1,
-           py::arg("alpha") = 1.0f);
+           py::arg("alpha") = 1.0f,
+           py::arg("groups") = 1);
 
   prod.def("wgrad",
            &production_wgrad,
@@ -1036,7 +1095,8 @@ void register_production(py::module &m) {
            py::arg("K"),
            py::arg("tile_id") = 60,
            py::arg("split_k") = 64,
-           py::arg("alpha") = 1.0f);
+           py::arg("alpha") = 1.0f,
+           py::arg("groups") = 1);
 
   prod.def("build_reduced_mask",
            &build_reduced_mask,
