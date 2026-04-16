@@ -43,9 +43,9 @@ These backends process multiple (or all) kernel offsets in a single launch:
 | ------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch           | Dominant wgrad winner (64%). Amortizes launch overhead at medium-large channels. |
 | `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets                      | Strong at large N with medium-large channels.                                    |
-| `mask_implicit_gemm`     | Mask-based fused kernel — iterates all K offsets per output row using bitmask skipping | **Dominant AB winner (56% fwd, 74% dgrad)**. No atomicAdd. CuTe tensor core MMA. |
+| `production`             | Mask-based fused kernel — iterates all K offsets per output row using bitmask skipping | **Dominant AB winner (56% fwd, 74% dgrad)**. No atomicAdd. CuTe tensor core MMA. |
 
-### How `mask_implicit_gemm` Works
+### How `production` Works
 
 Unlike per-offset and grouped backends that launch separate work per offset, the mask kernel processes **all K offsets in a single launch**. For each output row:
 
@@ -104,10 +104,10 @@ export WARPCONVNET_FWD_ALGO_MODE=auto
 export WARPCONVNET_FWD_ALGO_MODE=all
 
 # Specific algorithm (no benchmarking, just use it)
-export WARPCONVNET_FWD_ALGO_MODE=mask_implicit_gemm
+export WARPCONVNET_FWD_ALGO_MODE=production
 
 # Algorithm list (benchmark only these)
-export WARPCONVNET_FWD_ALGO_MODE="[mask_implicit_gemm,cutlass_implicit_gemm]"
+export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
 ```
 
 The same options apply to `WARPCONVNET_BWD_ALGO_MODE` (controls wgrad AtB algorithm).
@@ -148,16 +148,16 @@ Forward, dgrad, and wgrad can each be controlled independently:
 # Different algorithms for each operation
 output = spatially_sparse_conv(
     input_voxels, weight, kernel_size=3,
-    fwd_algo="mask_implicit_gemm",       # AB gather-scatter for forward
-    dgrad_algo="mask_implicit_gemm",     # AB gather-scatter for dgrad
+    fwd_algo="production",       # AB gather-scatter for forward
+    dgrad_algo="production",     # AB gather-scatter for dgrad
     wgrad_algo="cute_grouped",           # AtB gather-gather for wgrad
 )
 
 # Algorithm list -- benchmarks only these
 output = spatially_sparse_conv(
     input_voxels, weight, kernel_size=3,
-    fwd_algo=["mask_implicit_gemm", "cutlass_implicit_gemm"],
-    dgrad_algo=["mask_implicit_gemm", "cute_grouped"],
+    fwd_algo=["production", "cutlass_implicit_gemm"],
+    dgrad_algo=["production", "cute_grouped"],
     wgrad_algo=["cute_grouped", "cutlass_grouped_hybrid"],
 )
 ```
@@ -222,7 +222,7 @@ export WARPCONVNET_BWD_ALGO_MODE=auto
 
 Accepted values: `auto`, `all`, `trimmed`, any single algorithm name, or a bracket list like `[algo1,algo2]`.
 
-Valid algorithm names: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`, `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`, `mask_implicit_gemm`.
+Valid algorithm names: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`, `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`, `production`.
 
 ### Cache and Logging
 
@@ -259,7 +259,7 @@ Based on empirical analysis on RTX 6000 Ada with cuBLAS 12.9.1.4:
 
 | Condition                  | Best AB Backend         | Best AtB Backend                      |
 | -------------------------- | ----------------------- | ------------------------------------- |
-| ch \<= 256, any N          | `mask_implicit_gemm`    | `cute_grouped`                        |
+| ch \<= 256, any N          | `production`            | `cute_grouped`                        |
 | ch > 256, small N          | `cute_grouped`          | `cute_grouped`                        |
 | ch > 256, large N          | `cutlass_implicit_gemm` | `cute_grouped`                        |
 | ch \<= 64, small N (wgrad) | —                       | `implicit_gemm` or `explicit_grouped` |
@@ -277,7 +277,7 @@ rm -rf ~/.cache/warpconvnet/
 **CUTLASS not available**: Some backends require specific GPU compute capability. Fall back to:
 
 ```bash
-export WARPCONVNET_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm,mask_implicit_gemm]"
+export WARPCONVNET_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm,production]"
 ```
 
 ## Source Files
