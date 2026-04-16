@@ -3,10 +3,7 @@
 
 import hashlib
 import logging
-import math
 import os
-from enum import Enum
-from pathlib import Path
 from typing import Literal, Optional, Sequence, Tuple, Dict
 
 import numpy as np
@@ -16,7 +13,6 @@ from jaxtyping import Int
 from torch import Tensor
 
 import warpconvnet._C as _C
-from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable, HashMethod
 from warpconvnet.geometry.coords.search.packed_hashmap import PackedHashTable
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.ntuple import ntuple
@@ -65,55 +61,36 @@ def _kernel_map_search_to_result(
     found_in_coord_index: Int[Tensor, "K M"],
     identity_map_index: Optional[int] = None,
     return_type: Literal["indices", "offsets"] = "offsets",
-    threads_per_block: int = 256,
 ) -> Int[Tensor, "K M"] | IntSearchResult:
-    """Processes the raw found_in_coord_index tensor into the desired format.
+    """Processes the raw found_in_coord_index tensor into compacted kernel maps.
 
-    The found_in_coord_index is a tensor of shape (K, M) where K is the number of kernel offsets and M is the number of query coordinates. The value is the index of the query coordinate if the kernel offset is found in the query coordinate, otherwise -1. We remove the -1 values and return valid indices for each kernel offset.
-
-    The return_type offset means the offsets will contain [0, K_0, K_0 + K_1, ...] where K_i is the number of valid maps for the i-th kernel offset.
+    The found_in_coord_index is a tensor of shape (K, M) where K is the number of
+    kernel offsets and M is the number of query coordinates. The value is the index
+    of the input coordinate matched at that (offset, query) position, or -1 if no match.
     """
-    target_device = found_in_coord_index.device
-    K, M = found_in_coord_index.shape
-
     if return_type == "indices":
         return found_in_coord_index
 
     assert return_type == "offsets"
+    target_device = found_in_coord_index.device
+    K, M = found_in_coord_index.shape
 
-    found_in_coord_index_bool = found_in_coord_index >= 0
+    counts = torch.zeros(K, dtype=torch.int32, device=target_device)
+    _C.cuhash.postprocess_count(found_in_coord_index, counts, K, M)
 
-    # get the index of the non zero elements
-    mapped_indices = (
-        torch.cumsum(found_in_coord_index_bool.to(torch.int32), dim=1, dtype=torch.int32) - 1
-    )
-    # Need to handle rows with zero valid maps correctly (cumsum results in -1)
-    # Clamp minimum value to 0 after subtracting 1
-    mapped_indices = torch.clamp(mapped_indices, min=-1)  # Keep -1 for rows with no hits
-
-    # Count valid maps per kernel offset row
-    # If mapped_indices is -1 everywhere in a row, max will be -1, add 1 -> 0 count.
-    num_valid_maps = mapped_indices.max(dim=1).values + 1
-
-    # Calculate offsets
-    offsets = torch.cumsum(num_valid_maps, dim=0, dtype=torch.int32)
-    offsets = torch.cat([torch.zeros(1, dtype=torch.int32, device=target_device), offsets], dim=0)
+    offsets = torch.zeros(K + 1, dtype=torch.int32, device=target_device)
+    torch.cumsum(counts, dim=0, out=offsets[1:])
     num_total_maps = offsets[-1].item()
 
-    # Allocate output tensors
     in_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
     out_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
 
     if num_total_maps > 0:
-        # Launch CUDA kernel to gather results
-        found_in_coord_index_cont = found_in_coord_index.contiguous()
-        mapped_indices_cont = mapped_indices.contiguous()
-        offsets_cont = offsets.contiguous()
-
-        _C.coords.map_found_indices_to_maps(
-            found_in_coord_index_cont,
-            mapped_indices_cont,
-            offsets_cont,
+        scatter_counters = torch.zeros(K, dtype=torch.int32, device=target_device)
+        _C.cuhash.postprocess_scatter(
+            found_in_coord_index,
+            offsets,
+            scatter_counters,
             in_maps,
             out_maps,
             K,
@@ -153,12 +130,9 @@ def _kernel_map_from_offsets(
     assert batched_query_coords.dtype == torch.int32
     assert kernel_offsets.dtype == torch.int32
 
-    _is_packed = isinstance(hashtable, PackedHashTable)
-    if not _is_packed:
-        if hashtable._table_kvs is None or hashtable._vector_keys is None:
-            raise RuntimeError(
-                "Input TorchHashTable must be populated before calling kernel map functions."
-            )
+    assert isinstance(
+        hashtable, PackedHashTable
+    ), "Only PackedHashTable is supported. TorchHashTable legacy path has been removed."
 
     if identity_map_index is not None:
         assert (
@@ -168,7 +142,6 @@ def _kernel_map_from_offsets(
         assert torch.all(iden_offset == 0), "Identity map offset must be all zeros"
 
     num_query_coords = batched_query_coords.shape[0]
-    key_dim = batched_query_coords.shape[1]
     num_kernel_offsets = kernel_offsets.shape[0]
 
     # Allocate output tensor
@@ -178,34 +151,18 @@ def _kernel_map_from_offsets(
         device=target_device,
     )
 
-    if _is_packed:
-        _C.cuhash.packed_kernel_map_offset(
-            hashtable.keys_tensor,
-            hashtable.values_tensor,
-            batched_query_coords.contiguous(),
-            kernel_offsets.contiguous(),
-            found_in_coord_index,
-            num_query_coords,
-            num_kernel_offsets,
-            hashtable.capacity,
-            threads_per_block_x,
-            threads_per_block_y,
-        )
-    else:
-        _C.coords.kernel_map_offset(
-            hashtable._table_kvs.contiguous(),
-            hashtable.vector_keys.contiguous(),
-            batched_query_coords.contiguous(),
-            kernel_offsets.contiguous(),
-            found_in_coord_index,
-            num_query_coords,
-            key_dim,
-            num_kernel_offsets,
-            hashtable.capacity,
-            hashtable.hash_method.value,
-            threads_per_block_x,
-            threads_per_block_y,
-        )
+    _C.cuhash.packed_kernel_map_offset(
+        hashtable.keys_tensor,
+        hashtable.values_tensor,
+        batched_query_coords.contiguous(),
+        kernel_offsets.contiguous(),
+        found_in_coord_index,
+        num_query_coords,
+        num_kernel_offsets,
+        hashtable.capacity,
+        threads_per_block_x,
+        threads_per_block_y,
+    )
 
     return _kernel_map_search_to_result(
         found_in_coord_index,
@@ -238,219 +195,100 @@ def _kernel_map_from_size(
     assert str(target_device) == str(batched_query_coords.device)
     assert batched_query_coords.dtype == torch.int32
 
-    _is_packed = isinstance(hashtable, PackedHashTable)
-    if not _is_packed:
-        if hashtable._table_kvs is None or hashtable._vector_keys is None:
-            raise RuntimeError(
-                "Input TorchHashTable must be populated before calling kernel map functions."
-            )
+    assert isinstance(
+        hashtable, PackedHashTable
+    ), "Only PackedHashTable is supported. TorchHashTable legacy path has been removed."
 
     num_dims = batched_query_coords.shape[1]
     assert (
         len(kernel_sizes) == num_dims - 1
     ), f"kernel_size ({len(kernel_sizes)}) must match spatial dims ({num_dims - 1})"
 
-    # Check if we should skip symmetric kernel parts
     if skip_symmetric_kernel_map:
         assert all(
             k % 2 == 1 for k in kernel_sizes
         ), f"Kernel sizes must be odd for symmetric skipping. Got {kernel_sizes}"
 
     num_offsets = np.prod(kernel_sizes).item()
+    assert num_dims == 4, f"Expected 4D batch-indexed coords, got {num_dims}D"
 
-    # --- Specialized 4D Case ---
-    if num_dims == 4:
-        num_query_coords = batched_query_coords.shape[0]
+    num_query_coords = batched_query_coords.shape[0]
 
-        if skip_symmetric_kernel_map:
-            num_offsets = num_offsets // 2
-            if identity_map_index is not None:
-                assert identity_map_index == num_offsets
+    if skip_symmetric_kernel_map:
+        num_offsets = num_offsets // 2
+        if identity_map_index is not None:
+            assert identity_map_index == num_offsets
 
-        kernel_size_tensor = torch.tensor(kernel_sizes, dtype=torch.int32, device=target_device)
-        query_coords = batched_query_coords.contiguous()
-        capacity = hashtable.capacity
+    kernel_size_tensor = torch.tensor(kernel_sizes, dtype=torch.int32, device=target_device)
+    query_coords = batched_query_coords.contiguous()
+    capacity = hashtable.capacity
+    keys = hashtable.keys_tensor
+    values = hashtable.values_tensor
 
-        # --- Packed hash table path (cuhash) ---
-        if _is_packed:
-            keys = hashtable.keys_tensor
-            values = hashtable.values_tensor
-
-            if return_type == "indices":
-                found_in_coord_index = torch.empty(
-                    (num_offsets, num_query_coords),
-                    dtype=torch.int32,
-                    device=target_device,
-                )
-                _C.cuhash.packed_kernel_map_size(
-                    keys,
-                    values,
-                    query_coords,
-                    kernel_size_tensor,
-                    found_in_coord_index,
-                    num_query_coords,
-                    num_offsets,
-                    capacity,
-                    threads_per_block_x,
-                    threads_per_block_y,
-                )
-                return found_in_coord_index
-
-            # Search-once + postprocess pipeline (single hash table pass)
-            found_in_coord_index = torch.empty(
-                (num_offsets, num_query_coords),
-                dtype=torch.int32,
-                device=target_device,
-            )
-            _C.cuhash.packed_kernel_map_size(
-                keys,
-                values,
-                query_coords,
-                kernel_size_tensor,
-                found_in_coord_index,
-                num_query_coords,
-                num_offsets,
-                capacity,
-                threads_per_block_x,
-                threads_per_block_y,
-            )
-
-            counts = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
-            _C.cuhash.postprocess_count(
-                found_in_coord_index, counts, num_offsets, num_query_coords
-            )
-
-            offsets = torch.zeros(num_offsets + 1, dtype=torch.int32, device=target_device)
-            torch.cumsum(counts, dim=0, out=offsets[1:])
-            num_total_maps = offsets[-1].item()
-
-            in_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
-            out_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
-
-            if num_total_maps > 0:
-                scatter_counters = torch.zeros(
-                    num_offsets, dtype=torch.int32, device=target_device
-                )
-                _C.cuhash.postprocess_scatter(
-                    found_in_coord_index,
-                    offsets,
-                    scatter_counters,
-                    in_maps,
-                    out_maps,
-                    num_offsets,
-                    num_query_coords,
-                )
-
-            result = IntSearchResult(
-                in_maps, out_maps, offsets, identity_map_index=identity_map_index
-            )
-            result._pair_table = found_in_coord_index
-            return result
-
-        # --- Legacy TorchHashTable path ---
-        if return_type == "indices":
-            found_in_coord_index = torch.empty(
-                (num_offsets, num_query_coords),
-                dtype=torch.int32,
-                device=target_device,
-            )
-            _C.coords.kernel_map_size_4d(
-                hashtable._table_kvs.contiguous(),
-                hashtable.vector_keys.contiguous(),
-                query_coords,
-                kernel_size_tensor,
-                found_in_coord_index,
-                num_query_coords,
-                capacity,
-                num_offsets,
-                hashtable.hash_method.value,
-                threads_per_block_x,
-                threads_per_block_y,
-            )
-            return found_in_coord_index
-
-        if hasattr(_C.coords, "fused_kernel_map") and not skip_symmetric_kernel_map:
-            in_maps, out_maps, offsets = _C.coords.fused_kernel_map(
-                query_coords,
-                hashtable._table_kvs.contiguous(),
-                hashtable.vector_keys.contiguous(),
-                capacity,
-                list(kernel_sizes),
-                hashtable.hash_method.value,
-            )
-            return IntSearchResult(
-                in_maps,
-                out_maps,
-                offsets,
-                identity_map_index=identity_map_index,
-            )
-
-        table_kvs = hashtable._table_kvs.contiguous()
-        vector_keys = hashtable.vector_keys.contiguous()
-        hash_method_val = hashtable.hash_method.value
-
+    if return_type == "indices":
         found_in_coord_index = torch.empty(
             (num_offsets, num_query_coords),
             dtype=torch.int32,
             device=target_device,
         )
-        _C.coords.kernel_map_size_4d(
-            table_kvs,
-            vector_keys,
+        _C.cuhash.packed_kernel_map_size(
+            keys,
+            values,
             query_coords,
             kernel_size_tensor,
             found_in_coord_index,
             num_query_coords,
-            capacity,
             num_offsets,
-            hash_method_val,
+            capacity,
             threads_per_block_x,
             threads_per_block_y,
         )
+        return found_in_coord_index
 
-        counts = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
-        _C.coords.postprocess_count(found_in_coord_index, counts, num_offsets, num_query_coords)
+    # Search-once + postprocess pipeline (single hash table pass)
+    found_in_coord_index = torch.empty(
+        (num_offsets, num_query_coords),
+        dtype=torch.int32,
+        device=target_device,
+    )
+    _C.cuhash.packed_kernel_map_size(
+        keys,
+        values,
+        query_coords,
+        kernel_size_tensor,
+        found_in_coord_index,
+        num_query_coords,
+        num_offsets,
+        capacity,
+        threads_per_block_x,
+        threads_per_block_y,
+    )
 
-        offsets = torch.zeros(num_offsets + 1, dtype=torch.int32, device=target_device)
-        torch.cumsum(counts, dim=0, out=offsets[1:])
-        num_total_maps = offsets[-1].item()
+    counts = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
+    _C.cuhash.postprocess_count(found_in_coord_index, counts, num_offsets, num_query_coords)
 
-        in_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
-        out_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
+    offsets = torch.zeros(num_offsets + 1, dtype=torch.int32, device=target_device)
+    torch.cumsum(counts, dim=0, out=offsets[1:])
+    num_total_maps = offsets[-1].item()
 
-        if num_total_maps > 0:
-            scatter_counters = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
-            _C.coords.postprocess_scatter(
-                found_in_coord_index,
-                offsets,
-                scatter_counters,
-                in_maps,
-                out_maps,
-                num_offsets,
-                num_query_coords,
-            )
+    in_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
+    out_maps = torch.empty(num_total_maps, dtype=torch.int32, device=target_device)
 
-        result = IntSearchResult(in_maps, out_maps, offsets, identity_map_index=identity_map_index)
-        result._pair_table = found_in_coord_index
-        return result
-
-    # --- Generic Case (Fallback to offset method) ---
-    else:
-        kernel_offsets_tensor = kernel_offsets_from_size(
-            kernel_sizes, (1,) * len(kernel_sizes), device=target_device
+    if num_total_maps > 0:
+        scatter_counters = torch.zeros(num_offsets, dtype=torch.int32, device=target_device)
+        _C.cuhash.postprocess_scatter(
+            found_in_coord_index,
+            offsets,
+            scatter_counters,
+            in_maps,
+            out_maps,
+            num_offsets,
+            num_query_coords,
         )
 
-        if skip_symmetric_kernel_map:
-            num_offsets = num_offsets // 2
-            kernel_offsets_tensor = kernel_offsets_tensor[:num_offsets]
-
-        return _kernel_map_from_offsets(
-            hashtable,
-            batched_query_coords,
-            kernel_offsets_tensor,
-            return_type=return_type,
-            identity_map_index=identity_map_index,
-        )
+    result = IntSearchResult(in_maps, out_maps, offsets, identity_map_index=identity_map_index)
+    result._pair_table = found_in_coord_index
+    return result
 
 
 @torch.compiler.disable
@@ -462,15 +300,15 @@ def generate_kernel_map(
     kernel_size: Tuple[int, ...],
     kernel_dilation: Optional[Tuple[int, ...]] = None,
     kernel_center_offset: Optional[Tuple[int, ...]] = None,
-    method: Literal["offset", "size"] = "size",  # Size is the default fastest method
-    hash_method: HashMethod = HashMethod.CITY,  # Allow selecting hash method
+    method: Literal["offset", "size"] = "size",
     skip_symmetric_kernel_map: bool = False,
+    **kwargs,
 ) -> IntSearchResult:
     """
-    Generate the kernel map for the spatially sparse convolution using TorchHashTable.
+    Generate the kernel map for the spatially sparse convolution using PackedHashTable.
 
     in_to_out_stride_ratio: the ratio of the input stride to the output stride. This will be multiplied to output coordinates to find matching input coordinates.
-    method: 'query' directly queries the hash table for each offset point (can be slower for large kernels but flexible).
+    method: 'offset' pre-calculates all kernel offsets and uses a custom kernel to find matches.
             'offset' pre-calculates all kernel offsets and uses a custom kernel to find matches (generally faster).
             'size' uses a specialized kernel for 4D coordinates if applicable, otherwise falls back to 'offset'.
     skip_symmetric_kernel_map: If True, skip symmetric parts of the kernel map for odd-sized kernels.
@@ -487,14 +325,25 @@ def generate_kernel_map(
             k % 2 == 1 for k in kernel_size
         ), "Kernel size must be odd for symmetric skipping."
 
-    # Create hash table for the input coordinates
+    # Pad 3D coords (2D sparse conv) to 4D for PackedHashTable compatibility.
+    # [batch, x, y] → [batch, x, y, 0] with kernel_size/stride/dilation extended by 1.
     num_dims = batch_indexed_in_coords.shape[1]
-    if num_dims == 4:
-        hashtable = PackedHashTable.from_coords(batch_indexed_in_coords, device=target_device)
-    else:
-        hashtable = TorchHashTable.from_keys(
-            batch_indexed_in_coords, hash_method=hash_method, device=target_device
+    if num_dims == 3:
+        batch_indexed_in_coords = torch.nn.functional.pad(batch_indexed_in_coords, (0, 1), value=0)
+        batch_indexed_out_coords = torch.nn.functional.pad(
+            batch_indexed_out_coords, (0, 1), value=0
         )
+        kernel_size = tuple(kernel_size) + (1,)
+        in_to_out_stride_ratio = tuple(in_to_out_stride_ratio) + (1,)
+        if kernel_dilation is not None:
+            kernel_dilation = tuple(kernel_dilation) + (1,)
+        if kernel_center_offset is not None:
+            kernel_center_offset = tuple(kernel_center_offset) + (0,)
+        num_dims = 4
+
+    # Create hash table for the input coordinates (always 4D after padding)
+    assert num_dims == 4, f"Expected 4D coords after padding, got {num_dims}D"
+    hashtable = PackedHashTable.from_coords(batch_indexed_in_coords, device=target_device)
 
     num_spatial_dims = batch_indexed_out_coords.shape[1] - 1
     assert len(in_to_out_stride_ratio) == num_spatial_dims
@@ -546,58 +395,18 @@ def generate_kernel_map(
             identity_map_index=identity_map_index,
         )
     elif method == "size":
-        # This method uses _kernel_map_from_size, which has the 4D specialization
         assert kernel_dilation is None or all(
             s == 1 for s in kernel_dilation
         ), "Kernel dilation is not supported with method='size'. Use method='offset' instead."
         assert (
             kernel_center_offset is None
         ), "Custom kernel_center_offset is not supported with method='size'. Use method='offset' instead."
-        # For legacy TorchHashTable with stride-1 and K<=32, use the fused C++
-        # path that generates kernel_map + pair_table + mask + argsort + reverse
-        # in one call. PackedHashTable uses the faster packed search + lazy mask.
-        _use_legacy_fused = not isinstance(hashtable, PackedHashTable)
-        _has_direct = (
-            _use_legacy_fused
-            and same_in_out_coords
-            and not skip_symmetric_kernel_map
-            and hasattr(_C, "coords")
-            and hasattr(_C.coords, "fused_kernel_map_direct")
-            and int(np.prod(kernel_size)) <= 32
-        )
-        _has_fused = (
-            not _has_direct
-            and _use_legacy_fused
-            and same_in_out_coords
-            and not skip_symmetric_kernel_map
-            and hasattr(_C, "coords")
-            and hasattr(_C.coords, "fused_kernel_map_with_mask")
-            and int(np.prod(kernel_size)) <= 32
-        )
-        if _has_direct or _has_fused:
-            _fn = (
-                _C.coords.fused_kernel_map_direct
-                if _has_direct
-                else _C.coords.fused_kernel_map_with_mask
-            )
-            im, om, off, pt, pm, ms, rpt, rpm, rms = _fn(
-                strided_out_coords.contiguous(),
-                hashtable._table_kvs.contiguous(),
-                hashtable.vector_keys.contiguous(),
-                hashtable.capacity,
-                list(kernel_size),
-                hash_method.value,
-                True,  # build_reverse
-            )
-            result = IntSearchResult(im, om, off, identity_map_index=identity_map_index)
-            result._mask_data = (pt, pm, ms)
-            result._reverse_mask_data = (rpt, rpm, rms)
-            return result
 
-        # For large kernels (K >= 343 i.e. 7^3+) with packed hash table, use
-        # hierarchical search: coarse probe prunes fine probes via bitmask.
+        # For large odd kernels (K >= 125, i.e. 5^3+), use hierarchical
+        # search: coarse probe prunes fine probes via bitmask.
         _K = int(np.prod(kernel_size))
-        if isinstance(hashtable, PackedHashTable) and _K >= 343 and not skip_symmetric_kernel_map:
+        is_odd_kernel_all = all(k % 2 == 1 for k in kernel_size)
+        if _K >= 125 and is_odd_kernel_all and not skip_symmetric_kernel_map:
             from warpconvnet.geometry.coords.search.hierarchical_search import (
                 kernel_map_from_size_hierarchical,
             )

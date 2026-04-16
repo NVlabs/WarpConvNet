@@ -40,13 +40,16 @@ class PackedHashTable:
     """Hash table for 4D integer coordinates packed into uint64.
 
     Bit layout:
-      batch:  10 bits unsigned [0, 1023]
-      x,y,z:  18 bits signed   [-131072, 131071] each
+      valid:  1 bit (top bit, always 1 for occupied)
+      batch:  9 bits unsigned [0, 511]
+      x,y,z:  18 bits signed  [-131072, 131071] each
 
     At 0.01m voxel size, 18-bit spatial range covers +/-1.3 km per axis.
+    The top bit is reserved as a validity flag to avoid kEmpty sentinel
+    collisions; batch is therefore limited to 9 bits ([0, 511]).
     """
 
-    BATCH_MAX = 1023
+    BATCH_MAX = 511
     COORD_MIN = -131072
     COORD_MAX = 131071
 
@@ -63,6 +66,7 @@ class PackedHashTable:
         self._values: Optional[Tensor] = None
         self._num_entries = 0
         self._coords: Optional[Tensor] = None
+        self._coarse_cache: dict = {}  # stride -> PackedHashTable
 
     @property
     def capacity(self) -> int:
@@ -102,10 +106,29 @@ class PackedHashTable:
 
         Args:
             coords: int32 tensor of shape (N, 4) on CUDA device.
+
+        Raises:
+            ValueError: If any batch index is outside [0, BATCH_MAX] or any
+                spatial coordinate is outside [COORD_MIN, COORD_MAX].
+            RuntimeError: If the hash table is full during insertion.
         """
         assert coords.ndim == 2 and coords.shape[1] == 4
         assert coords.is_cuda
         coords = coords.contiguous().to(dtype=torch.int32, device=self._device)
+
+        if coords.shape[0] > 0:
+            batch = coords[:, 0]
+            spatial = coords[:, 1:]
+            if batch.min().item() < 0 or batch.max().item() > self.BATCH_MAX:
+                raise ValueError(
+                    f"Batch index out of range [0, {self.BATCH_MAX}]: "
+                    f"got [{batch.min().item()}, {batch.max().item()}]"
+                )
+            if spatial.min().item() < self.COORD_MIN or spatial.max().item() > self.COORD_MAX:
+                raise ValueError(
+                    f"Spatial coord out of range [{self.COORD_MIN}, {self.COORD_MAX}]: "
+                    f"got [{spatial.min().item()}, {spatial.max().item()}]"
+                )
 
         num_keys = coords.shape[0]
         assert (
@@ -116,6 +139,7 @@ class PackedHashTable:
         self._values = torch.empty(self._capacity, dtype=torch.int32, device=self._device)
 
         _C.cuhash.packed_prepare(self._keys, self._values, self._capacity)
+        status_tensor = torch.zeros(1, dtype=torch.int32, device=self._device)
         _C.cuhash.packed_insert(
             self._keys,
             self._values,
@@ -123,7 +147,14 @@ class PackedHashTable:
             num_keys,
             self._capacity,
             self._use_double_hash,
+            status_tensor,
         )
+        if int(status_tensor.item()) != 0:
+            raise RuntimeError(
+                f"PackedHashTable.insert failed: hash table is full "
+                f"(num_keys={num_keys}, capacity={self._capacity}). "
+                f"Increase capacity or reduce load factor."
+            )
 
         self._num_entries = num_keys
         self._coords = coords
@@ -219,6 +250,35 @@ class PackedHashTable:
         indices = self.search(self._coords)
         valid_indices = indices[indices != -1]
         return torch.unique(valid_indices)
+
+    def _get_coarse(self, stride: int) -> "PackedHashTable":
+        """Get or build a coarse hash table at the given stride.
+
+        The coarse table maps floor-divided spatial coordinates to arbitrary
+        (unique) indices. It's cached on the fine table, so repeat calls with
+        the same stride reuse the built table.
+
+        Note: Currently unused by the fused C++ hierarchical_kernel_map path,
+        which builds the coarse table internally. Kept here so Python callers
+        that want explicit control (or a different C++ signature) can benefit.
+
+        Args:
+            stride: Coarse table stride (must be a positive power of 2).
+        """
+        assert (
+            stride > 0 and (stride & (stride - 1)) == 0
+        ), f"stride must be a positive power of 2, got {stride}"
+        if stride in self._coarse_cache:
+            return self._coarse_cache[stride]
+
+        assert self._coords is not None, "Call insert() before _get_coarse()"
+        fine_coords = self._coords[: self._num_entries]
+        coarse_coords = fine_coords.clone()
+        coarse_coords[:, 1:] = torch.div(fine_coords[:, 1:], stride, rounding_mode="floor")
+        coarse_coords = torch.unique(coarse_coords, dim=0)
+        coarse_ht = PackedHashTable.from_coords(coarse_coords, device=self._device)
+        self._coarse_cache[stride] = coarse_ht
+        return coarse_ht
 
     def search(
         self,

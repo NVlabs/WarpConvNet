@@ -6,7 +6,9 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
+#include "cuhash/cuda_check.cuh"
 #include "cuhash/hash_table.cuh"
+#include "cuhash/nvtx_range.cuh"
 
 namespace cuhash {
 
@@ -26,26 +28,28 @@ __global__ void packed_insert_kernel(uint64_t *__restrict__ keys,
                                      int *__restrict__ values,
                                      const int *__restrict__ coords,
                                      int num_keys,
-                                     uint32_t capacity_mask) {
+                                     uint32_t capacity_mask,
+                                     int *__restrict__ status_ptr) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_keys) return;
 
   const int *key = &coords[idx * 4];
   uint64_t packed = pack_key_4d(key[0], key[1], key[2], key[3]);
-  packed_insert(keys, values, packed, idx, capacity_mask);
+  packed_insert(keys, values, packed, idx, capacity_mask, status_ptr);
 }
 
 __global__ void packed_insert_double_kernel(uint64_t *__restrict__ keys,
                                             int *__restrict__ values,
                                             const int *__restrict__ coords,
                                             int num_keys,
-                                            uint32_t capacity_mask) {
+                                            uint32_t capacity_mask,
+                                            int *__restrict__ status_ptr) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_keys) return;
 
   const int *key = &coords[idx * 4];
   uint64_t packed = pack_key_4d(key[0], key[1], key[2], key[3]);
-  packed_insert_double(keys, values, packed, idx, capacity_mask);
+  packed_insert_double(keys, values, packed, idx, capacity_mask, status_ptr);
 }
 
 __global__ void packed_search_kernel(const uint64_t *__restrict__ keys,
@@ -164,15 +168,21 @@ __global__ void generic_search_kernel(const int *__restrict__ table_kvs,
 // Host Launcher Functions
 // ============================================================================
 
+// 256 threads/block: balances occupancy against register/shared-memory pressure.
+// At 256 threads each kernel fits 8 blocks/SM on Ampere/Ada (2048 threads/SM
+// cap) with ~32 regs/thread, keeping the SM fully loaded without spilling.
+// Empirically tuned for RTX 6000 Ada; may need retuning for newer GPUs.
 static constexpr int kBlockSize = 256;
 
 // --- Packed key table ---
 
 void launch_packed_prepare(torch::Tensor keys, torch::Tensor values, int capacity) {
+  CUHASH_NVTX_SCOPE("launch_packed_prepare");
   auto stream = at::cuda::getCurrentCUDAStream();
   int blocks = (capacity + kBlockSize - 1) / kBlockSize;
   packed_prepare_kernel<<<blocks, kBlockSize, 0, stream>>>(
       reinterpret_cast<uint64_t *>(keys.data_ptr<int64_t>()), values.data_ptr<int>(), capacity);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_insert(torch::Tensor keys,
@@ -180,24 +190,32 @@ void launch_packed_insert(torch::Tensor keys,
                           torch::Tensor coords,
                           int num_keys,
                           int capacity,
-                          bool use_double_hash) {
+                          bool use_double_hash,
+                          torch::Tensor status_tensor) {
+  CUHASH_NVTX_SCOPE("launch_packed_insert");
+  if (num_keys == 0) return;
   auto stream = at::cuda::getCurrentCUDAStream();
   int blocks = (num_keys + kBlockSize - 1) / kBlockSize;
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
+  int *status_ptr = status_tensor.data_ptr<int>();
   if (use_double_hash) {
     packed_insert_double_kernel<<<blocks, kBlockSize, 0, stream>>>(
         reinterpret_cast<uint64_t *>(keys.data_ptr<int64_t>()),
         values.data_ptr<int>(),
         coords.data_ptr<int>(),
         num_keys,
-        mask);
+        mask,
+        status_ptr);
+    CUHASH_CHECK_CUDA_LAUNCH();
   } else {
     packed_insert_kernel<<<blocks, kBlockSize, 0, stream>>>(
         reinterpret_cast<uint64_t *>(keys.data_ptr<int64_t>()),
         values.data_ptr<int>(),
         coords.data_ptr<int>(),
         num_keys,
-        mask);
+        mask,
+        status_ptr);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 }
 
@@ -208,6 +226,8 @@ void launch_packed_search(torch::Tensor keys,
                           int num_search,
                           int capacity,
                           int search_mode) {
+  CUHASH_NVTX_SCOPE("launch_packed_search");
+  if (num_search == 0) return;
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
 
@@ -222,6 +242,7 @@ void launch_packed_search(torch::Tensor keys,
         results.data_ptr<int>(),
         num_search,
         mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   } else if (search_mode == 1) {
     // Double hash search
     int blocks = (num_search + kBlockSize - 1) / kBlockSize;
@@ -232,6 +253,7 @@ void launch_packed_search(torch::Tensor keys,
         results.data_ptr<int>(),
         num_search,
         mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   } else {
     // Linear probe search
     int blocks = (num_search + kBlockSize - 1) / kBlockSize;
@@ -242,15 +264,18 @@ void launch_packed_search(torch::Tensor keys,
         results.data_ptr<int>(),
         num_search,
         mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 }
 
 // --- Generic key table ---
 
 void launch_generic_prepare(torch::Tensor table_kvs, int capacity) {
+  CUHASH_NVTX_SCOPE("launch_generic_prepare");
   auto stream = at::cuda::getCurrentCUDAStream();
   int blocks = (capacity + kBlockSize - 1) / kBlockSize;
   generic_prepare_kernel<<<blocks, kBlockSize, 0, stream>>>(table_kvs.data_ptr<int>(), capacity);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_generic_insert(torch::Tensor table_kvs,
@@ -259,15 +284,19 @@ void launch_generic_insert(torch::Tensor table_kvs,
                            int key_dim,
                            int capacity,
                            int hash_method) {
+  CUHASH_NVTX_SCOPE("launch_generic_insert");
+  if (num_keys == 0) return;
   auto stream = at::cuda::getCurrentCUDAStream();
   int blocks = (num_keys + kBlockSize - 1) / kBlockSize;
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
   if (hash_method == 0) {
     generic_insert_kernel<FNV1AHash><<<blocks, kBlockSize, 0, stream>>>(
         table_kvs.data_ptr<int>(), vector_keys.data_ptr<int>(), num_keys, key_dim, mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   } else {
     generic_insert_kernel<MurmurHash><<<blocks, kBlockSize, 0, stream>>>(
         table_kvs.data_ptr<int>(), vector_keys.data_ptr<int>(), num_keys, key_dim, mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 }
 
@@ -279,6 +308,8 @@ void launch_generic_search(torch::Tensor table_kvs,
                            int key_dim,
                            int capacity,
                            int hash_method) {
+  CUHASH_NVTX_SCOPE("launch_generic_search");
+  if (num_search == 0) return;
   auto stream = at::cuda::getCurrentCUDAStream();
   int blocks = (num_search + kBlockSize - 1) / kBlockSize;
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
@@ -290,6 +321,7 @@ void launch_generic_search(torch::Tensor table_kvs,
                                                                         num_search,
                                                                         key_dim,
                                                                         mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   } else {
     generic_search_kernel<MurmurHash>
         <<<blocks, kBlockSize, 0, stream>>>(table_kvs.data_ptr<int>(),
@@ -299,6 +331,7 @@ void launch_generic_search(torch::Tensor table_kvs,
                                             num_search,
                                             key_dim,
                                             mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 }
 
@@ -374,6 +407,7 @@ void launch_packed_expand_insert(torch::Tensor keys,
                                  int vector_capacity,
                                  torch::Tensor num_entries_tensor,
                                  torch::Tensor status_tensor) {
+  CUHASH_NVTX_SCOPE("launch_packed_expand_insert");
   auto stream = at::cuda::getCurrentCUDAStream();
   long long total = static_cast<long long>(num_base) * static_cast<long long>(num_offsets);
   int blocks = (total + kBlockSize - 1) / kBlockSize;
@@ -390,6 +424,7 @@ void launch_packed_expand_insert(torch::Tensor keys,
       vector_capacity,
       num_entries_tensor.data_ptr<int>(),
       status_tensor.data_ptr<int>());
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 // ============================================================================
@@ -438,6 +473,7 @@ void launch_packed_build_coarse(torch::Tensor keys,
                                 int stride_shift,
                                 int capacity,
                                 torch::Tensor num_entries_tensor) {
+  CUHASH_NVTX_SCOPE("launch_packed_build_coarse");
   auto stream = at::cuda::getCurrentCUDAStream();
   int blocks = (num_fine + kBlockSize - 1) / kBlockSize;
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
@@ -449,6 +485,7 @@ void launch_packed_build_coarse(torch::Tensor keys,
       stride_shift,
       mask,
       num_entries_tensor.data_ptr<int>());
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 }  // namespace cuhash

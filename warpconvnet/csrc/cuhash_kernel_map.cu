@@ -7,9 +7,57 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
+#include <cstring>
+
+#include "cuhash/cuda_check.cuh"
 #include "cuhash/kernel_map.cuh"
+#include "cuhash/nvtx_range.cuh"
 
 namespace cuhash {
+
+// ============================================================================
+// Tunable launch parameters (kernel_map)
+// ----------------------------------------------------------------------------
+// These are empirically tuned for RTX 6000 Ada (SM89). They may need
+// retuning for newer GPUs; the invariants noted below should be preserved.
+// ============================================================================
+
+// Per-query loop launchers use 1D blocks of 128 threads. Each thread processes
+// one query over all K kernel offsets, so increasing block size costs shared
+// memory (K*6 ints for the fused scatter) without raising occupancy. 128
+// hits the sweet spot: 16 blocks/SM, enough waves to hide probe latency.
+static constexpr int kLoopBlockSize = 128;
+
+// 2-D block y-dim for count/scatter kernels. Threads within one block share
+// the ksz / center shared variables and the K-way s_block_count reduction, so
+// y must be small enough to keep __shared__ usage low; 8 pairs with x=32
+// (one warp per kernel offset) to give 256 threads/block total.
+static constexpr int kKernelMapBlockY = 8;
+
+// Postprocess (K*M intermediate) block size. 256 threads gives tight
+// shared-memory reduction across kernel offsets, with one block per 256
+// flat indices.
+static constexpr int kPostprocessBlockSize = 256;
+
+// Mask-data kernels (csr_to_pair_table, build_pair_mask): 1-D, 256 threads.
+static constexpr int kMaskBlockSize = 256;
+
+// Onepass fused kernel maximum K for which found_vals[] stays in registers.
+// Power-of-2 register-array bound; K>27 falls back to the scatter_loop path.
+static constexpr int kOnepassMaxK = 27;
+
+// Fused hierarchical launcher tuning parameters (launch_hierarchical_kernel_map).
+// coarse_probe uses 1-D blocks of 128 threads (same rationale as kLoopBlockSize).
+static constexpr int kHierCoarseBlockSize = 128;
+// fine_search_pruned uses a 2-D grid. (M, K) is the logical dimension, so we
+// pick threads_x=64 (covers one full cache-line of queries worth of probes)
+// and threads_y=8 (one row per kernel offset, same as kKernelMapBlockY).
+// Total = 512 threads/block, one warp of y-fanout.
+static constexpr int kHierFineBlockX = 64;
+static constexpr int kHierFineBlockY = 8;
+// Initial coarse-table capacity grows with N and is rounded up to the next
+// power of 2. Minimum size avoids degenerate atomics when N is tiny.
+static constexpr int kHierCoarseCapacityMin = 16;
 
 // ============================================================================
 // Packed Key Kernel Map Kernels (4D)
@@ -89,7 +137,11 @@ __global__ void packed_kernel_map_size_kernel(const uint64_t *__restrict__ keys,
 // Fused Kernel Map: Count + Scatter (eliminates K*M intermediate)
 // ============================================================================
 
-// Pass 1: Count matches per kernel offset
+// Pass 1: Count matches per kernel offset.
+// BLOCK_DIM_Y = 8: bounds __shared__ int s_block_counts[BLOCK_DIM_Y]. The
+// launcher configures block=(threads_x, threads_y) with threads_y <= 8, so
+// one thread per y-row handles its own kernel-offset reduction. Empirically
+// tuned for RTX 6000 Ada; may need retuning for newer GPUs.
 template <int BLOCK_DIM_Y = 8>
 __global__ void packed_kernel_map_count_kernel(const uint64_t *__restrict__ keys,
                                                const int *__restrict__ values,
@@ -148,7 +200,9 @@ __global__ void packed_kernel_map_count_kernel(const uint64_t *__restrict__ keys
   }
 }
 
-// Pass 2: Scatter results directly to in_maps/out_maps
+// Pass 2: Scatter results directly to in_maps/out_maps.
+// BLOCK_DIM_Y = 8: see packed_kernel_map_count_kernel. Must match the y-dim
+// threads_y the launcher configures.
 template <int BLOCK_DIM_Y = 8>
 __global__ void packed_kernel_map_scatter_kernel(const uint64_t *__restrict__ keys,
                                                  const int *__restrict__ values,
@@ -455,6 +509,9 @@ __global__ void postprocess_count_kernel(const int *__restrict__ found_in_coord_
                                          int *__restrict__ counts,
                                          int K,
                                          int M) {
+  // BLOCK_SIZE = 256 must match launch_postprocess_count's block-size arg.
+  // Bounds s_counts — each block spans at most BLOCK_SIZE consecutive flat
+  // indices, so at most BLOCK_SIZE distinct k values can appear in a block.
   const int BLOCK_SIZE = 256;
   __shared__ int s_counts[BLOCK_SIZE];
 
@@ -493,6 +550,8 @@ __global__ void postprocess_scatter_kernel(const int *__restrict__ found_in_coor
                                            int *__restrict__ out_maps,
                                            int K,
                                            int M) {
+  // BLOCK_SIZE = 256 must match launch_postprocess_scatter's block-size arg.
+  // See postprocess_count_kernel for rationale.
   const int BLOCK_SIZE = 256;
   __shared__ int s_counts[BLOCK_SIZE];
   __shared__ int s_base[BLOCK_SIZE];
@@ -553,6 +612,7 @@ void launch_packed_kernel_map_offset(torch::Tensor keys,
                                      int capacity,
                                      int threads_x,
                                      int threads_y) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_offset");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
   dim3 block(threads_x, threads_y);
@@ -567,6 +627,7 @@ void launch_packed_kernel_map_offset(torch::Tensor keys,
       num_query,
       num_offsets,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_kernel_map_size(torch::Tensor keys,
@@ -579,6 +640,7 @@ void launch_packed_kernel_map_size(torch::Tensor keys,
                                    int capacity,
                                    int threads_x,
                                    int threads_y) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_size");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
   dim3 block(threads_x, threads_y);
@@ -593,6 +655,7 @@ void launch_packed_kernel_map_size(torch::Tensor keys,
       num_query,
       num_kernels,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_kernel_map_count(torch::Tensor keys,
@@ -605,6 +668,7 @@ void launch_packed_kernel_map_count(torch::Tensor keys,
                                     int capacity,
                                     int threads_x,
                                     int threads_y) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_count");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
   dim3 block(threads_x, threads_y);
@@ -619,6 +683,7 @@ void launch_packed_kernel_map_count(torch::Tensor keys,
       num_query,
       num_kernels,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_kernel_map_scatter(torch::Tensor keys,
@@ -634,6 +699,7 @@ void launch_packed_kernel_map_scatter(torch::Tensor keys,
                                       int capacity,
                                       int threads_x,
                                       int threads_y) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_scatter");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
   dim3 block(threads_x, threads_y);
@@ -651,6 +717,7 @@ void launch_packed_kernel_map_scatter(torch::Tensor keys,
       num_query,
       num_kernels,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 // --- Per-query loop launchers ---
@@ -663,9 +730,10 @@ void launch_packed_kernel_map_loop(torch::Tensor keys,
                                    int num_query,
                                    int num_kernels,
                                    int capacity) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_loop");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
-  int block_size = 128;
+  int block_size = kLoopBlockSize;
   int grid = (num_query + block_size - 1) / block_size;
   int smem = num_kernels * 3 * sizeof(int);
 
@@ -678,6 +746,7 @@ void launch_packed_kernel_map_loop(torch::Tensor keys,
       num_query,
       num_kernels,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_kernel_map_count_loop(torch::Tensor keys,
@@ -688,9 +757,10 @@ void launch_packed_kernel_map_count_loop(torch::Tensor keys,
                                          int num_query,
                                          int num_kernels,
                                          int capacity) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_count_loop");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
-  int block_size = 128;
+  int block_size = kLoopBlockSize;
   int grid = (num_query + block_size - 1) / block_size;
   int smem = (num_kernels * 3 + num_kernels) * sizeof(int);  // offsets + counts
 
@@ -703,6 +773,7 @@ void launch_packed_kernel_map_count_loop(torch::Tensor keys,
       num_query,
       num_kernels,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_kernel_map_scatter_loop(torch::Tensor keys,
@@ -716,9 +787,10 @@ void launch_packed_kernel_map_scatter_loop(torch::Tensor keys,
                                            int num_query,
                                            int num_kernels,
                                            int capacity) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_scatter_loop");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
-  int block_size = 128;
+  int block_size = kLoopBlockSize;
   int grid = (num_query + block_size - 1) / block_size;
   // offsets(K*3) + block_count(K) + block_base(K) + local_pos(K) = K*6
   int smem = num_kernels * 6 * sizeof(int);
@@ -735,6 +807,7 @@ void launch_packed_kernel_map_scatter_loop(torch::Tensor keys,
       num_query,
       num_kernels,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_packed_kernel_map_onepass(torch::Tensor keys,
@@ -748,15 +821,16 @@ void launch_packed_kernel_map_onepass(torch::Tensor keys,
                                       int num_query,
                                       int num_kernels,
                                       int capacity) {
+  CUHASH_NVTX_SCOPE("launch_packed_kernel_map_onepass");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(capacity - 1);
-  int block_size = 128;
+  int block_size = kLoopBlockSize;
   int grid_size = (num_query + block_size - 1) / block_size;
   int smem = num_kernels * 6 * sizeof(int);
 
   // Dispatch to the right template instantiation
-  if (num_kernels <= 27) {
-    packed_kernel_map_onepass_kernel<27><<<grid_size, block_size, smem, stream>>>(
+  if (num_kernels <= kOnepassMaxK) {
+    packed_kernel_map_onepass_kernel<kOnepassMaxK><<<grid_size, block_size, smem, stream>>>(
         reinterpret_cast<const uint64_t *>(keys.data_ptr<int64_t>()),
         values.data_ptr<int>(),
         query_coords.data_ptr<int>(),
@@ -768,8 +842,10 @@ void launch_packed_kernel_map_onepass(torch::Tensor keys,
         num_query,
         num_kernels,
         mask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   } else {
-    // K > 27: use the loop scatter kernel (re-searches matching offsets)
+    // K > kOnepassMaxK: fall back to the loop scatter kernel
+    // (re-searches matching offsets).
     launch_packed_kernel_map_scatter_loop(keys,
                                           values,
                                           query_coords,
@@ -785,11 +861,13 @@ void launch_packed_kernel_map_onepass(torch::Tensor keys,
 }
 
 void launch_postprocess_count(torch::Tensor found, torch::Tensor counts, int K, int M) {
+  CUHASH_NVTX_SCOPE("launch_postprocess_count");
   auto stream = at::cuda::getCurrentCUDAStream();
   int total = K * M;
-  int blocks = (total + 255) / 256;
-  postprocess_count_kernel<<<blocks, 256, 0, stream>>>(
+  int blocks = (total + kPostprocessBlockSize - 1) / kPostprocessBlockSize;
+  postprocess_count_kernel<<<blocks, kPostprocessBlockSize, 0, stream>>>(
       found.data_ptr<int>(), counts.data_ptr<int>(), K, M);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_postprocess_scatter(torch::Tensor found,
@@ -799,16 +877,19 @@ void launch_postprocess_scatter(torch::Tensor found,
                                 torch::Tensor out_maps,
                                 int K,
                                 int M) {
+  CUHASH_NVTX_SCOPE("launch_postprocess_scatter");
   auto stream = at::cuda::getCurrentCUDAStream();
   int total = K * M;
-  int blocks = (total + 255) / 256;
-  postprocess_scatter_kernel<<<blocks, 256, 0, stream>>>(found.data_ptr<int>(),
-                                                         offsets.data_ptr<int>(),
-                                                         scatter_counters.data_ptr<int>(),
-                                                         in_maps.data_ptr<int>(),
-                                                         out_maps.data_ptr<int>(),
-                                                         K,
-                                                         M);
+  int blocks = (total + kPostprocessBlockSize - 1) / kPostprocessBlockSize;
+  postprocess_scatter_kernel<<<blocks, kPostprocessBlockSize, 0, stream>>>(
+      found.data_ptr<int>(),
+      offsets.data_ptr<int>(),
+      scatter_counters.data_ptr<int>(),
+      in_maps.data_ptr<int>(),
+      out_maps.data_ptr<int>(),
+      K,
+      M);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 // ============================================================================
@@ -862,22 +943,26 @@ void launch_csr_to_pair_table(torch::Tensor in_maps,
                               int N_out,
                               int K,
                               int L) {
+  CUHASH_NVTX_SCOPE("launch_csr_to_pair_table");
   auto stream = at::cuda::getCurrentCUDAStream();
-  int blocks = (L + 255) / 256;
-  csr_to_pair_table_kernel<<<blocks, 256, 0, stream>>>(in_maps.data_ptr<int>(),
-                                                       out_maps.data_ptr<int>(),
-                                                       offsets.data_ptr<int>(),
-                                                       pair_table.data_ptr<int>(),
-                                                       N_out,
-                                                       K,
-                                                       L);
+  int blocks = (L + kMaskBlockSize - 1) / kMaskBlockSize;
+  csr_to_pair_table_kernel<<<blocks, kMaskBlockSize, 0, stream>>>(in_maps.data_ptr<int>(),
+                                                                  out_maps.data_ptr<int>(),
+                                                                  offsets.data_ptr<int>(),
+                                                                  pair_table.data_ptr<int>(),
+                                                                  N_out,
+                                                                  K,
+                                                                  L);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_build_pair_mask(torch::Tensor pair_table, torch::Tensor pair_mask, int N, int K) {
+  CUHASH_NVTX_SCOPE("launch_build_pair_mask");
   auto stream = at::cuda::getCurrentCUDAStream();
-  int blocks = (N + 255) / 256;
-  build_pair_mask_kernel<<<blocks, 256, 0, stream>>>(
+  int blocks = (N + kMaskBlockSize - 1) / kMaskBlockSize;
+  build_pair_mask_kernel<<<blocks, kMaskBlockSize, 0, stream>>>(
       pair_table.data_ptr<int>(), pair_mask.data_ptr<int>(), N, K);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 // ============================================================================
@@ -982,7 +1067,9 @@ __global__ void fine_search_pruned_kernel(const uint64_t *__restrict__ keys_f,
   int ci = (ccx - cqx - coarse_min) * coarse_dy * coarse_dz + (ccy - cqy - coarse_min) * coarse_dz +
            (ccz - cqz - coarse_min);
 
-  // Prune: skip fine search if coarse cell is empty
+  // Prune: skip fine search if coarse cell is empty.
+  // 27 = max bits in `coarse_masks[qidx]` (3x3x3 = 27 coarse offsets); this
+  // matches the K_c <= 27 invariant enforced by the hierarchical launcher.
   if (ci < 0 || ci >= 27 || !(cmask & (1u << ci))) {
     found[kidx * num_query + qidx] = -1;
     return;
@@ -1006,9 +1093,12 @@ void launch_coarse_probe(torch::Tensor keys_c,
                          int num_coarse_offsets,
                          int stride_shift,
                          int coarse_capacity) {
+  CUHASH_NVTX_SCOPE("launch_coarse_probe");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(coarse_capacity - 1);
-  int bs = 128;
+  // 128 threads/block matches the rest of the per-query-loop launchers
+  // (kLoopBlockSize). See rationale at the top of this file.
+  int bs = kLoopBlockSize;
   int grid = (num_query + bs - 1) / bs;
   int smem = num_coarse_offsets * 3 * sizeof(int);
   coarse_probe_kernel<<<grid, bs, smem, stream>>>(
@@ -1021,6 +1111,7 @@ void launch_coarse_probe(torch::Tensor keys_c,
       num_coarse_offsets,
       stride_shift,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 void launch_fine_search_pruned(torch::Tensor keys_f,
@@ -1038,6 +1129,7 @@ void launch_fine_search_pruned(torch::Tensor keys_f,
                                int fine_capacity,
                                int threads_x,
                                int threads_y) {
+  CUHASH_NVTX_SCOPE("launch_fine_search_pruned");
   auto stream = at::cuda::getCurrentCUDAStream();
   uint32_t mask = static_cast<uint32_t>(fine_capacity - 1);
   dim3 block(threads_x, threads_y);
@@ -1058,6 +1150,7 @@ void launch_fine_search_pruned(torch::Tensor keys_f,
       coarse_dy,
       coarse_dz,
       mask);
+  CUHASH_CHECK_CUDA_LAUNCH();
 }
 
 // ============================================================================
@@ -1097,6 +1190,7 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
                                std::vector<int> kernel_size,  // [kx, ky, kz]
                                int stride,
                                int fine_capacity) {
+  CUHASH_NVTX_SCOPE("launch_hierarchical_kernel_map");
   TORCH_CHECK(kernel_size.size() == 3);
   TORCH_CHECK(stride > 0 && (stride & (stride - 1)) == 0, "stride must be power of 2");
 
@@ -1120,7 +1214,9 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
   int K = kx * ky * kz;
 
   // --- 1. Build coarse hash table ---
-  int coarse_cap = next_power_of_2(std::max(16, N * 2));
+  // Load factor <= 0.5 via N*2; power-of-2 rounding lets us use
+  // bitwise-AND for the capacity mask in the probe kernels.
+  int coarse_cap = next_power_of_2(std::max(kHierCoarseCapacityMin, N * 2));
   auto coarse_keys = torch::empty({coarse_cap}, opts_i64);
   auto coarse_vals = torch::empty({coarse_cap}, opts_i32);
   launch_packed_prepare(coarse_keys, coarse_vals, coarse_cap);
@@ -1140,6 +1236,9 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
 
   int coarse_dim[3] = {2 * c[0] + 1, 2 * c[1] + 1, 2 * c[2] + 1};
   int K_c = coarse_dim[0] * coarse_dim[1] * coarse_dim[2];
+  // 27 is the max number of bits we encode into `coarse_masks[qidx]` (uint32)
+  // for the pruning bitmask. Symmetric 3x3x3 = 27; larger coarse grids would
+  // overflow the bitmask in fine_search_pruned_kernel.
   TORCH_CHECK(K_c <= 27, "Coarse grid too large (", K_c, " > 27). Use a larger stride.");
 
   // Coarse offsets: (K_c, 3)
@@ -1152,7 +1251,15 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
         coff_vec.push_back(j);
         coff_vec.push_back(k);
       }
-  auto coarse_spatial_off = torch::from_blob(coff_vec.data(), {K_c, 3}, torch::kInt32).to(dev);
+  // Allocate a CPU tensor that OWNS its memory (torch::from_blob does not
+  // take ownership, so an async .to(dev) copy would read freed stack memory
+  // once coff_vec goes out of scope). Copy into the owning tensor, then
+  // transfer to device.
+  auto coarse_spatial_off_cpu = torch::empty({K_c, 3}, torch::TensorOptions().dtype(torch::kInt32));
+  std::memcpy(coarse_spatial_off_cpu.data_ptr<int>(),
+              coff_vec.data(),
+              static_cast<size_t>(K_c) * 3 * sizeof(int));
+  auto coarse_spatial_off = coarse_spatial_off_cpu.to(dev);
 
   // Fine offsets: (K, 3)
   int fcx = (kx % 2 == 1) ? kx / 2 : 0;
@@ -1167,7 +1274,11 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
         foff_vec.push_back(j - fcy);
         foff_vec.push_back(k - fcz);
       }
-  auto fine_spatial_off = torch::from_blob(foff_vec.data(), {K, 3}, torch::kInt32).to(dev);
+  auto fine_spatial_off_cpu = torch::empty({K, 3}, torch::TensorOptions().dtype(torch::kInt32));
+  std::memcpy(fine_spatial_off_cpu.data_ptr<int>(),
+              foff_vec.data(),
+              static_cast<size_t>(K) * 3 * sizeof(int));
+  auto fine_spatial_off = fine_spatial_off_cpu.to(dev);
 
   int coarse_min = -c[0];  // same for all dims (symmetric kernel)
 
@@ -1175,7 +1286,9 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
   auto coarse_masks = torch::zeros({M}, opts_i32);
   {
     uint32_t cmask = static_cast<uint32_t>(coarse_cap - 1);
-    int bs = 128;
+    // 1-D grid over M queries, block = kHierCoarseBlockSize (=128) to match
+    // launch_coarse_probe's standalone launcher.
+    int bs = kHierCoarseBlockSize;
     int grid = (M + bs - 1) / bs;
     int smem = K_c * 3 * sizeof(int);
     coarse_probe_kernel<<<grid, bs, smem, stream>>>(
@@ -1188,13 +1301,18 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
         K_c,
         stride_shift,
         cmask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 
   // --- 4. Pruned fine search ---
   auto found = torch::empty({K, M}, opts_i32);
   {
     uint32_t fmask = static_cast<uint32_t>(fine_capacity - 1);
-    int tx = 64, ty = 8;
+    // 2-D block: x-dim over queries (coalesced int4 loads), y-dim over kernel
+    // offsets. 64x8 = 512 threads/block — one warp per kernel-offset row,
+    // two warps per query tile. Same tuning as launch_fine_search_pruned's
+    // default in the standalone cuhash library.
+    int tx = kHierFineBlockX, ty = kHierFineBlockY;
     dim3 block(tx, ty);
     dim3 grid((M + tx - 1) / tx, (K + ty - 1) / ty);
     int smem = K * 3 * sizeof(int);
@@ -1212,43 +1330,59 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,       // int64 [fine_cap
         coarse_dim[1],
         coarse_dim[2],
         fmask);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 
   // --- 5. Postprocess: count → cumsum → scatter ---
+  // To avoid a CUDA→CPU sync in the middle of the launcher (which would stall
+  // scatter launches), we overallocate in_maps/out_maps to the absolute upper
+  // bound (K * M). Each query can match at most once per kernel offset, so
+  // total <= K * M. We then launch the scatter kernel into the oversized
+  // buffers, and only sync ONCE at the very end to read the true total
+  // (needed to size the returned tensors correctly via `.narrow`, which is a
+  // cheap view).
   auto counts = torch::zeros({K}, opts_i32);
   {
     int total_elems = K * M;
-    int blocks = (total_elems + 255) / 256;
-    postprocess_count_kernel<<<blocks, 256, 0, stream>>>(
+    int blocks = (total_elems + kPostprocessBlockSize - 1) / kPostprocessBlockSize;
+    postprocess_count_kernel<<<blocks, kPostprocessBlockSize, 0, stream>>>(
         found.data_ptr<int>(), counts.data_ptr<int>(), K, M);
+    CUHASH_CHECK_CUDA_LAUNCH();
   }
 
   auto offsets = torch::zeros({K + 1}, opts_i32);
   auto offsets_tail = offsets.slice(0, 1, K + 1);
   at::cumsum_out(offsets_tail, counts, 0);
 
-  // Need total on CPU for allocation
+  // Overallocate in_maps/out_maps at upper bound K*M — no sync needed here.
+  long long upper_bound = static_cast<long long>(K) * static_cast<long long>(M);
+  auto in_maps_full = torch::empty({upper_bound}, opts_i32);
+  auto out_maps_full = torch::empty({upper_bound}, opts_i32);
+
+  if (upper_bound > 0) {
+    auto scatter_counters = torch::zeros({K}, opts_i32);
+    int total_elems = K * M;
+    int blocks = (total_elems + kPostprocessBlockSize - 1) / kPostprocessBlockSize;
+    postprocess_scatter_kernel<<<blocks, kPostprocessBlockSize, 0, stream>>>(
+        found.data_ptr<int>(),
+        offsets.data_ptr<int>(),
+        scatter_counters.data_ptr<int>(),
+        in_maps_full.data_ptr<int>(),
+        out_maps_full.data_ptr<int>(),
+        K,
+        M);
+    CUHASH_CHECK_CUDA_LAUNCH();
+  }
+
+  // Single CUDA→CPU sync at the very end to size the returned tensors.
   int total;
   {
     auto total_t = offsets[K].cpu();
     total = total_t.item<int>();
   }
 
-  auto in_maps = torch::empty({total}, opts_i32);
-  auto out_maps = torch::empty({total}, opts_i32);
-
-  if (total > 0) {
-    auto scatter_counters = torch::zeros({K}, opts_i32);
-    int total_elems = K * M;
-    int blocks = (total_elems + 255) / 256;
-    postprocess_scatter_kernel<<<blocks, 256, 0, stream>>>(found.data_ptr<int>(),
-                                                           offsets.data_ptr<int>(),
-                                                           scatter_counters.data_ptr<int>(),
-                                                           in_maps.data_ptr<int>(),
-                                                           out_maps.data_ptr<int>(),
-                                                           K,
-                                                           M);
-  }
+  auto in_maps = in_maps_full.narrow(0, 0, total);
+  auto out_maps = out_maps_full.narrow(0, 0, total);
 
   return std::make_tuple(in_maps, out_maps, offsets, found);
 }

@@ -43,6 +43,14 @@ def kernel_map_from_size_hierarchical(
     """
     query_coords = query_coords.contiguous().to(dtype=torch.int32, device=fine_ht.device)
 
+    # TODO(perf): The fused C++ launcher `_C.cuhash.hierarchical_kernel_map`
+    # rebuilds the coarse hash table on every call. `PackedHashTable._get_coarse`
+    # already caches coarse tables per stride on the fine table, but the fused
+    # launcher does not accept a prebuilt coarse keys/values pair. Add a new
+    # C++ signature (e.g. `hierarchical_kernel_map_with_coarse`) that takes
+    # `coarse_keys`, `coarse_values`, `coarse_capacity` and skip the internal
+    # build when `fine_ht._coarse_cache` already has an entry for `stride`.
+    # Until then, correctness is unaffected; we just miss a caching win.
     in_maps, out_maps, offsets, pair_table = _C.cuhash.hierarchical_kernel_map(
         fine_ht.keys_tensor,
         fine_ht.values_tensor,

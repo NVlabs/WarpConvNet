@@ -193,6 +193,9 @@ class IntCoords(Coords):
     def hashmap(self) -> PackedHashTable:
         if not hasattr(self, "_hashmap") or self._hashmap is None:
             bcoords = batch_indexed_coordinates(self.batched_tensor, self.offsets)
+            # Pad 3D coords (2D spatial) to 4D for PackedHashTable compatibility
+            if bcoords.shape[1] == 3:
+                bcoords = torch.nn.functional.pad(bcoords, (0, 1), value=0)
             self._hashmap = PackedHashTable.from_coords(bcoords)
         return self._hashmap
 

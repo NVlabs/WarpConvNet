@@ -6,6 +6,7 @@
 
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
+
 #include <cub/cub.cuh>
 
 /**
@@ -17,21 +18,27 @@
  * Grid: (ceil(N_out / 256), 1)
  * Block: (256, 1)
  */
-__global__ void build_pair_mask_kernel(
-    const int *__restrict__ pair_table,  // [K * N_out]
-    uint32_t *__restrict__ pair_mask,    // [N_out]
-    const int N_out,
-    const int K) {
+__global__ void build_pair_mask_kernel(const int *__restrict__ pair_table,  // [K * N_out]
+                                       uint32_t *__restrict__ pair_mask,    // [N_out * mask_words]
+                                       const int N_out,
+                                       const int K,
+                                       const int mask_words) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= N_out) return;
 
-  uint32_t mask = 0;
-  for (int k = 0; k < K; k++) {
-    if (pair_table[k * N_out + i] >= 0) {
-      mask |= (1u << k);
+  // Interleaved layout: pair_mask[i * mask_words + w]
+  for (int w = 0; w < mask_words; w++) {
+    uint32_t word = 0;
+    int k_start = w * 32;
+    int k_end = k_start + 32;
+    if (k_end > K) k_end = K;
+    for (int k = k_start; k < k_end; k++) {
+      if (pair_table[k * N_out + i] >= 0) {
+        word |= (1u << (k - k_start));
+      }
     }
+    pair_mask[i * mask_words + w] = word;
   }
-  pair_mask[i] = mask;
 }
 
 /**
@@ -44,10 +51,10 @@ __global__ void build_pair_mask_kernel(
  * Block: (256, 1)
  */
 __global__ void csr_to_pair_table_kernel(
-    const int *__restrict__ in_maps,     // [L]
-    const int *__restrict__ out_maps,    // [L]
-    const int *__restrict__ offsets,     // [K+1]
-    int *__restrict__ pair_table,        // [K * N_out], pre-filled with -1
+    const int *__restrict__ in_maps,   // [L]
+    const int *__restrict__ out_maps,  // [L]
+    const int *__restrict__ offsets,   // [K+1]
+    int *__restrict__ pair_table,      // [K * N_out], pre-filled with -1
     const int N_out,
     const int K,
     const int L) {
@@ -75,26 +82,21 @@ __global__ void csr_to_pair_table_kernel(
 namespace warpconvnet {
 namespace mask_data {
 
-void build_pair_mask(
-    const int *pair_table,
-    uint32_t *pair_mask,
-    int N_out,
-    int K) {
+void build_pair_mask(const int *pair_table, uint32_t *pair_mask, int N_out, int K, int mask_words) {
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   int threads = 256;
   int blocks = (N_out + threads - 1) / threads;
   build_pair_mask_kernel<<<blocks, threads, 0, stream>>>(
-      pair_table, pair_mask, N_out, K);
+      pair_table, pair_mask, N_out, K, mask_words);
 }
 
-void csr_to_pair_table(
-    const int *in_maps,
-    const int *out_maps,
-    const int *offsets,
-    int *pair_table,
-    int N_out,
-    int K,
-    int L) {
+void csr_to_pair_table(const int *in_maps,
+                       const int *out_maps,
+                       const int *offsets,
+                       int *pair_table,
+                       int N_out,
+                       int K,
+                       int L) {
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   int threads = 256;
   int blocks = (L + threads - 1) / threads;

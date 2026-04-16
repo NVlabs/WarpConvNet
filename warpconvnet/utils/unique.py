@@ -8,7 +8,7 @@ import torch
 from jaxtyping import Int
 from torch import Tensor
 
-from warpconvnet.geometry.coords.search.torch_hashmap import HashMethod, TorchHashTable
+from warpconvnet.geometry.coords.search.packed_hashmap import PackedHashTable
 from warpconvnet.geometry.coords.ops.serialization import STR2POINT_ORDERING, encode
 from warpconvnet.utils.ravel import ravel_multi_index
 
@@ -47,9 +47,9 @@ def unique_inverse(
     """
     unique, to_orig_indices = torch.unique(x, dim=dim, sorted=True, return_inverse=True)
     to_unique_indices = torch.arange(x.size(dim), dtype=x.dtype, device=x.device)
-    to_unique_indices = torch.empty(
-        unique.size(dim), dtype=x.dtype, device=x.device
-    ).scatter_(dim, to_orig_indices, to_unique_indices)
+    to_unique_indices = torch.empty(unique.size(dim), dtype=x.dtype, device=x.device).scatter_(
+        dim, to_orig_indices, to_unique_indices
+    )
     return to_unique_indices, to_orig_indices
 
 
@@ -91,9 +91,9 @@ def unique_torch(
     if return_to_unique_indices:
         dtype_ind, device = to_orig_indices.dtype, to_orig_indices.device
         to_unique_indices = torch.arange(x.size(dim), dtype=dtype_ind, device=device)
-        to_unique_indices = torch.empty(
-            unique.size(dim), dtype=dtype_ind, device=device
-        ).scatter_(dim, to_orig_indices, to_unique_indices)
+        to_unique_indices = torch.empty(unique.size(dim), dtype=dtype_ind, device=device).scatter_(
+            dim, to_orig_indices, to_unique_indices
+        )
     else:
         to_unique_indices = None
 
@@ -122,25 +122,25 @@ def unique_ravel(
 
 
 def unique_hashmap(
-    bcoords: Int[Tensor, "N 4"],  # noqa: F821
-    hash_method: HashMethod = HashMethod.CITY,
-) -> Tuple[Int[Tensor, "M"], TorchHashTable]:  # noqa: F821
+    bcoords: Int[Tensor, "N D"],  # noqa: F821
+    **kwargs,
+) -> Tuple[Int[Tensor, "M"], PackedHashTable]:  # noqa: F821
     """
     Args:
-        bcoords: Batched coordinates.
-        hash_method: Hash method.
+        bcoords: Batched coordinates (batch-indexed, 3D or 4D).
 
     Returns:
         unique_indices: bcoords[unique_indices] == unique
-        hash_table: Hash table.
+        hash_table: PackedHashTable instance.
     """
-    # Append batch index to the coordinates
     assert "cuda" in str(
         bcoords.device
     ), f"Batched coordinates must be on cuda device, got {bcoords.device}"
-    table = TorchHashTable(2 * len(bcoords), hash_method)
-    table.insert(bcoords)
-    return table.unique_index, table  # this is a torch tensor
+    # Pad 3D coords to 4D for PackedHashTable
+    if bcoords.shape[1] == 3:
+        bcoords = torch.nn.functional.pad(bcoords, (0, 1), value=0)
+    table = PackedHashTable.from_coords(bcoords, device=bcoords.device)
+    return table.unique_index, table
 
 
 @dataclass
@@ -161,9 +161,7 @@ class ToUnique:
     ):
         # Ravel can be used only when the raveled coordinates is less than 2**31
         self.unique_method = unique_method or "torch"
-        self.return_to_unique_indices = (
-            return_to_unique_indices or self.unique_method == "ravel"
-        )
+        self.return_to_unique_indices = return_to_unique_indices or self.unique_method == "ravel"
 
     def to_unique(self, x: Int[Tensor, "N C"], dim: int = 0) -> Int[Tensor, "M C"]:
         if self.unique_method == "ravel":

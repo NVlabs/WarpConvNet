@@ -10,7 +10,7 @@ implementations for all three backends.
 import pytest
 import torch
 
-from warpconvnet.geometry.coords.search.torch_hashmap import TorchHashTable, HashMethod
+from warpconvnet.geometry.coords.search.packed_hashmap import PackedHashTable
 from warpconvnet.geometry.coords.search.torch_discrete import _kernel_map_from_size
 from warpconvnet.nn.functional.sparse_conv.detail.explicit import (
     _explicit_gemm_forward_logic,
@@ -32,7 +32,7 @@ def _make_kernel_map(num_coords, kernel_size=(3, 3, 3), device="cuda"):
     """Create a realistic kernel map from random coordinates."""
     coords = torch.randint(-128, 128, (num_coords, 4), dtype=torch.int32, device=device)
     coords[:, 0] = torch.randint(0, 2, (num_coords,), dtype=torch.int32, device=device)
-    ht = TorchHashTable.from_keys(coords, hash_method=HashMethod.CITY, device=device)
+    ht = PackedHashTable.from_coords(coords, device=device)
     kernel_map = _kernel_map_from_size(ht, coords, kernel_size, return_type="offsets")
     return kernel_map, num_coords
 

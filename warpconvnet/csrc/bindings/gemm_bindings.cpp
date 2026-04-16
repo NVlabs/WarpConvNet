@@ -69,7 +69,7 @@ int run_split_k_implicit_gemm_templated(const void *tensor_a,
 }  // namespace split_k_implicit_gemm
 
 namespace mask_data {
-void build_pair_mask(const int *pair_table, uint32_t *pair_mask, int N_out, int K);
+void build_pair_mask(const int *pair_table, uint32_t *pair_mask, int N_out, int K, int mask_words);
 void csr_to_pair_table(const int *in_maps,
                        const int *out_maps,
                        const int *offsets,
@@ -2678,20 +2678,22 @@ void register_gemm(py::module_ &m) {
 
   gemm.def(
       "build_pair_mask_cuda",
-      [](torch::Tensor pair_table, torch::Tensor pair_mask, int K) {
+      [](torch::Tensor pair_table, torch::Tensor pair_mask, int K, int mask_words) {
         TORCH_CHECK(pair_table.is_cuda() && pair_mask.is_cuda());
         TORCH_CHECK(pair_table.scalar_type() == torch::kInt32);
         TORCH_CHECK(pair_mask.scalar_type() == torch::kInt32);
-        int N_out = pair_mask.size(0);
+        int N_out = pair_mask.size(0) / mask_words;
         ::warpconvnet::mask_data::build_pair_mask(
             pair_table.data_ptr<int>(),
             reinterpret_cast<uint32_t *>(pair_mask.data_ptr<int>()),
             N_out,
-            K);
+            K,
+            mask_words);
       },
       py::arg("pair_table"),
       py::arg("pair_mask"),
-      py::arg("K"));
+      py::arg("K"),
+      py::arg("mask_words") = 1);
 
   gemm.def(
       "csr_to_pair_table_cuda",
