@@ -163,6 +163,32 @@ _AB_CUTLASS_GROUPED = (
     if _HAS_CUTLASS_BACKEND
     else []
 )
+
+
+def _with_fp16_accum(pool, enabled: bool):
+    """Override ``accumulator_type`` on CUTLASS pool entries when fp16 accum on.
+
+    CUTLASS kernels (cutlass_implicit_gemm, cutlass_grouped_hybrid) accept
+    ``accumulator_type`` via params dict. Swap the default fp32 to fp16 so
+    autotune measures the fp16-accum path. Non-CUTLASS entries pass through
+    unchanged — implicit_gemm and cute_* kernels don't expose accum choice.
+    """
+    if not enabled:
+        return pool
+    import torch as _torch
+
+    _CUTLASS_ALGOS = {"cutlass_implicit_gemm", "cutlass_grouped_hybrid"}
+    out = []
+    for algo, params in pool:
+        if algo in _CUTLASS_ALGOS:
+            new_params = dict(params)
+            new_params["accumulator_type"] = _torch.float16
+            out.append((algo, new_params))
+        else:
+            out.append((algo, params))
+    return out
+
+
 # SM90 WGMMA building blocks (only on Hopper+ hardware with SM90 compiled support)
 _AB_CUTE_SM90 = (
     []
@@ -306,6 +332,7 @@ def _get_adaptive_AB_params(
     kernel_volume: int,
     num_in_coords: int = 0,
     voxel_size: Union[Tuple[int, ...], None] = None,
+    use_fp16_accum: bool = False,
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get AB (gather-scatter) auto candidates — most aggressive trimming.
 
@@ -316,19 +343,25 @@ def _get_adaptive_AB_params(
       cute_grouped: 2% (marginal, dropped from auto)
 
     Auto picks only the dominant winner per region. 4-5 candidates.
+
+    ``use_fp16_accum``: when True, add the F16Acc production tiles (40/42)
+    to the pool so autotune can pick them for ~15% speedup at lower
+    precision. Off by default because the precision loss degrades training
+    convergence (see ``_AB_PRODUCTION_F16ACC`` docstring).
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # F32Acc only — F16Acc tiles 40/42 would be faster here but their
-    # fp16-accumulated gradients degrade training convergence (see
-    # _AB_PRODUCTION_F16ACC docstring).
-    _ab_prod = _AB_PRODUCTION_F32ACC
+    _ab_prod = list(_AB_PRODUCTION_F32ACC)
+    if use_fp16_accum:
+        _ab_prod.extend(_AB_PRODUCTION_F16ACC)
+    _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
+    _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
         params.extend(_ab_prod)
-        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_cutlass)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -338,7 +371,7 @@ def _get_adaptive_AB_params(
     if max_ch <= 128:
         params = []
         params.extend(_ab_prod)
-        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_cutlass)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -348,8 +381,12 @@ def _get_adaptive_AB_params(
         params = []
         params.extend(_ab_prod)
         if log_n == 0 or log_n > 17:
-            params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
-        params.extend(_AB_CUTLASS_IMPLICIT)
+            params.extend(
+                _with_fp16_accum(
+                    [("cutlass_grouped_hybrid", {"saturation_m": 5000})], use_fp16_accum
+                )
+            )
+        params.extend(_cutlass)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -359,7 +396,7 @@ def _get_adaptive_AB_params(
     params = []
     params.extend(_ab_prod)
     params.extend(_AB_CUTE_GROUPED)
-    params.extend(_AB_CUTLASS_IMPLICIT)
+    params.extend(_cutlass)
     params.extend(_AB_CUTE_SM90)
     params.extend(_AB_CUTE_GROUPED_SM90)
     return params
@@ -370,22 +407,28 @@ def _get_trimmed_AB_params(
     out_channels: int,
     kernel_volume: int,
     num_in_coords: int = 0,
+    use_fp16_accum: bool = False,
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get AB (gather-scatter) trimmed candidates — moderate trimming.
 
     Includes runner-ups that cover edge cases. 5-11 candidates.
+
+    ``use_fp16_accum``: see ``_get_adaptive_AB_params``.
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # F32Acc only — see note in _get_adaptive_AB_params.
-    _ab_prod = _AB_PRODUCTION_F32ACC
+    _ab_prod = list(_AB_PRODUCTION_F32ACC)
+    if use_fp16_accum:
+        _ab_prod.extend(_AB_PRODUCTION_F16ACC)
+    _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
+    _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
         params.extend(_ab_prod)
-        params.extend(_AB_CUTLASS_IMPLICIT)
-        params.extend(_AB_CUTLASS_GROUPED)
+        params.extend(_cutlass)
+        params.extend(_cutlass_grp)
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
@@ -395,7 +438,7 @@ def _get_trimmed_AB_params(
     if max_ch <= 128:
         params = []
         params.extend(_ab_prod)
-        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_cutlass)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -404,8 +447,8 @@ def _get_trimmed_AB_params(
     if max_ch <= 256:
         params = []
         params.extend(_ab_prod)
-        params.extend(_AB_CUTLASS_IMPLICIT)
-        params.extend(_AB_CUTLASS_GROUPED)
+        params.extend(_cutlass)
+        params.extend(_cutlass_grp)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -413,8 +456,8 @@ def _get_trimmed_AB_params(
     # ch > 256: all major backends
     params = []
     params.extend(_ab_prod)
-    params.extend(_AB_CUTLASS_IMPLICIT)
-    params.extend(_AB_CUTLASS_GROUPED)
+    params.extend(_cutlass)
+    params.extend(_cutlass_grp)
     params.extend(_AB_CUTE_GROUPED)
     params.extend(_AB_CUTE_SM90)
     params.extend(_AB_CUTE_GROUPED_SM90)
@@ -509,6 +552,7 @@ def _get_adaptive_AtB_params(
     kernel_volume: int,
     num_in_coords: int = 0,
     voxel_size: Union[Tuple[int, ...], None] = None,
+    use_fp16_accum: bool = False,
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get AtB (wgrad) auto candidates — most aggressive trimming.
 
@@ -519,17 +563,22 @@ def _get_adaptive_AtB_params(
       cutlass: 7%, explicit: 5%, implicit: 3% (minor winners)
 
     Auto picks only the dominant winner per region. 2-4 candidates.
+
+    ``use_fp16_accum``: rewrites CUTLASS entries to ``accumulator_type=
+    torch.float16``. Other backends ignore the flag — implicit_gemm /
+    cute_* wgrad kernels don't expose accumulator choice.
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
     _atb_prod = _ATB_PRODUCTION
+    _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
         params.extend(_atb_prod)
         params.extend(_AB_CUTE_GROUPED)
-        params.extend(_AB_CUTLASS_GROUPED)
+        params.extend(_cutlass_grp)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -557,7 +606,9 @@ def _get_adaptive_AtB_params(
     if max_ch > 64:
         params = []
         params.extend(_atb_prod)
-        params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
+        params.extend(
+            _with_fp16_accum([("cutlass_grouped_hybrid", {"saturation_m": 5000})], use_fp16_accum)
+        )
         params.extend(_AB_CUTE_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
@@ -588,7 +639,9 @@ def _get_adaptive_AtB_params(
     # ch <= 64, large N or unknown: cutlass_grouped 43%, explicit 43%
     params = []
     params.extend(_atb_prod)
-    params.extend([("cutlass_grouped_hybrid", {"saturation_m": 5000})])
+    params.extend(
+        _with_fp16_accum([("cutlass_grouped_hybrid", {"saturation_m": 5000})], use_fp16_accum)
+    )
     params.extend(_ATB_EXPLICIT)
     params.extend(_AB_CUTE_SM90)
     params.extend(_AB_CUTE_GROUPED_SM90)
@@ -600,21 +653,26 @@ def _get_trimmed_AtB_params(
     out_channels: int,
     kernel_volume: int,
     num_in_coords: int = 0,
+    use_fp16_accum: bool = False,
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """Get AtB (wgrad) trimmed candidates — moderate trimming.
 
     Includes runner-ups that cover edge cases. 3-9 candidates.
+
+    ``use_fp16_accum``: see ``_get_adaptive_AtB_params``.
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
     _atb_prod = _ATB_PRODUCTION
+    _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
+    _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
         params.extend(_atb_prod)
         params.extend(_AB_CUTE_GROUPED)
-        params.extend(_AB_CUTLASS_GROUPED)
+        params.extend(_cutlass_grp)
         params.extend(_ATB_EXPLICIT)
         params.extend(_ATB_EXPLICIT_GROUPED)
         params.extend(_ATB_IMPLICIT_GEMM)
@@ -628,7 +686,7 @@ def _get_trimmed_AtB_params(
         params.extend(_atb_prod)
         params.extend(_AB_CUTE_GROUPED)
         if log_n == 0 or log_n > 17:
-            params.extend(_AB_CUTLASS_GROUPED)
+            params.extend(_cutlass_grp)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
         return params
@@ -638,8 +696,8 @@ def _get_trimmed_AtB_params(
         params = []
         params.extend(_atb_prod)
         params.extend(_AB_CUTE_GROUPED)
-        params.extend(_AB_CUTLASS_GROUPED)
-        params.extend(_AB_CUTLASS_IMPLICIT)
+        params.extend(_cutlass_grp)
+        params.extend(_cutlass)
         params.extend(_ATB_EXPLICIT_GROUPED)
         params.extend(_AB_CUTE_SM90)
         params.extend(_AB_CUTE_GROUPED_SM90)
@@ -648,7 +706,7 @@ def _get_trimmed_AtB_params(
     # ch <= 64: all wgrad-relevant backends
     params = []
     params.extend(_AB_CUTE_GROUPED)
-    params.extend(_AB_CUTLASS_GROUPED)
+    params.extend(_cutlass_grp)
     params.extend(_ATB_EXPLICIT)
     params.extend(_ATB_EXPLICIT_GROUPED)
     params.extend(_ATB_IMPLICIT_GEMM)
