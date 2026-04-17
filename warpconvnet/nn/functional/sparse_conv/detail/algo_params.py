@@ -759,15 +759,24 @@ def _filter_benchmark_params_by_env_config(
     env_config: Union[str, List[Union[str, Any]]],
     is_forward: bool = True,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Filter benchmark parameters based on environment variable configuration.
+    """Filter benchmark parameters based on caller's algorithm selection.
+
+    When the caller names specific algorithms (e.g. ``['explicit_gemm']``),
+    the result is a strict filter: only those algorithms appear in the
+    output, pulled from ``all_params`` if present, otherwise from the
+    exhaustive pool (``_ALL_AB_PARAMS`` / ``_ALL_ATB_PARAMS``). If a named
+    algorithm has no params row in either pool (e.g. ``explicit_gemm``,
+    which takes no tuning parameters), it is synthesised as
+    ``(algo, {})`` so the benchmarker still executes it.
+
+    Raises ``ValueError`` if the caller names an algorithm that does not
+    exist in either pool — catching typos instead of silently routing to
+    a different algorithm.
 
     Args:
-        all_params: All available benchmark parameters (the reduced "auto" set)
-        env_config: Environment variable value (string or list of algorithm names)
-        is_forward: Whether this is for AB pass (affects which exhaustive set to use)
-
-    Returns:
-        Filtered list of benchmark parameters
+        all_params: The reduced adaptive/trimmed pool for the current shape.
+        env_config: ``"auto"``/``"all"``/``"trimmed"`` or list of algo names.
+        is_forward: If True, use AB exhaustive pool; else AtB.
     """
     if env_config == "all":
         # When "all", use the full exhaustive candidate set (nothing excluded)
@@ -787,20 +796,37 @@ def _filter_benchmark_params_by_env_config(
         target_algos = [str(a) for a in env_config]
 
     if not target_algos:
-        logger.warning("No valid algorithms found, using all algorithms")
-        return all_params
+        logger.warning("Empty algorithm filter; returning adaptive pool.")
+        return [(str(algo), params) for algo, params in all_params]
 
-    # Filter parameters to only include target algorithms
+    # Algos with no tuning parameters must still run with {}.
+    _PARAMLESS_ALGOS = {"explicit_gemm", "cutlass_implicit_gemm", "cute_implicit_gemm"}
+
+    exhaustive = _ALL_AB_PARAMS if is_forward else _ALL_ATB_PARAMS
+    # Build a lookup: algo_name -> list[params dict] across both pools.
+    name_to_params: Dict[str, List[Dict[str, Any]]] = {}
+    for source in (all_params, exhaustive):
+        for algo_tag, params in source:
+            name_to_params.setdefault(str(algo_tag), []).append(params)
+
     filtered_params: List[Tuple[str, Dict[str, Any]]] = []
-    for algo_tag, params in all_params:
-        algo_str = str(algo_tag)
-        if algo_str in target_algos:
-            filtered_params.append((algo_str, params))
+    missing: List[str] = []
+    for algo in target_algos:
+        if algo in name_to_params:
+            for p in name_to_params[algo]:
+                filtered_params.append((algo, p))
+        elif algo in _PARAMLESS_ALGOS:
+            # Known parameterless algo not materialised in either pool — synthesise.
+            filtered_params.append((algo, {}))
+        else:
+            missing.append(algo)
 
-    if not filtered_params:
-        logger.warning(
-            f"No benchmark parameters found for algorithms {target_algos}, using all algorithms"
+    if missing:
+        raise ValueError(
+            f"Unknown algorithm(s) in filter: {missing}. "
+            f"Not present in adaptive pool or exhaustive "
+            f"{'_ALL_AB_PARAMS' if is_forward else '_ALL_ATB_PARAMS'}. "
+            f"Fix the algo name or extend the pool."
         )
-        return all_params
 
     return filtered_params
