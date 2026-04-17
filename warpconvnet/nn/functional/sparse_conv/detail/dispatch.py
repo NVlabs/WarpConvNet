@@ -237,23 +237,29 @@ def _execute_forward(
             _in = in_features
             _w = weight
 
-        # Select tile based on per-group channel alignment and output dtype
+        # Select tile based on per-group channel alignment and output dtype.
+        # mask_words > 1 (K > 32) is only supported by tile 41 (aligned MW) and
+        # tile 70 (scalar SAB_SE MW). Tiles 80/82 (f32out) and 71/72 (partial
+        # scalar) are MW=1 only. Fall back when mask_words > 1 and upcast to fp32
+        # in Python to preserve f32-output semantics.
         vec_width = 16 // _in.element_size()
         cin_aligned = C_in_g % vec_width == 0
         cout_aligned = C_out_g % vec_width == 0
-        if use_f32_output:
-            if cin_aligned and cout_aligned:
-                tile_id = 80
+        use_f32_out_tile = use_f32_output and mask_words == 1
+        if use_f32_out_tile:
+            tile_id = 80 if (cin_aligned and cout_aligned) else 82
+        elif not cin_aligned or not cout_aligned:
+            # Scalar path. Only tile 70 supports mask_words > 1; force it.
+            if mask_words > 1:
+                tile_id = 70
+            elif not cin_aligned and not cout_aligned:
+                tile_id = 70
+            elif not cin_aligned:
+                tile_id = 71
             else:
-                tile_id = 82
-        elif not cin_aligned and not cout_aligned:
-            tile_id = 70
-        elif not cin_aligned:
-            tile_id = 71
-        elif not cout_aligned:
-            tile_id = 72
+                tile_id = 72
 
-        out_dtype = torch.float32 if use_f32_output else _in.dtype
+        out_dtype = torch.float32 if use_f32_out_tile else _in.dtype
 
         # Single launch handles groups=1 and groups>1 via grid.z
         C_out_total = C_out_g * groups
@@ -513,34 +519,44 @@ def _execute_backward(
             # production_fwd_as_dgrad path also expects un-transposed weight here.
             _w_dgrad = _w.contiguous()
 
-            # Select dgrad tile based on per-group channel dims
+            # Select dgrad tile based on per-group channel dims.
+            # Note: f32out tiles (80, 81, 82) and partial-scalar tiles (71, 72)
+            # are MW=1 only. For mask_words > 1, fall back to tile 70 (scalar
+            # SAB_SE) or aligned tile with MW support; Python upcasts output.
             vec_width = 16 // _go.element_size()
-            dgrad_out_dtype = torch.float32 if use_f32_output else compute_dtype
+            use_f32_out_tile = use_f32_output and mask_words == 1
+            dgrad_out_dtype = torch.float32 if use_f32_out_tile else compute_dtype
 
             if use_fwd_for_dgrad:
                 dgrad_tile = params.get("tile_id", 41)
                 fwd_cin_aligned = C_out_g % vec_width == 0
                 fwd_cout_aligned = C_in_g % vec_width == 0
-                if use_f32_output:
+                if use_f32_out_tile:
                     dgrad_tile = 80 if (fwd_cin_aligned and fwd_cout_aligned) else 82
-                elif not fwd_cin_aligned and not fwd_cout_aligned:
-                    dgrad_tile = 70
-                elif not fwd_cin_aligned:
-                    dgrad_tile = 71
-                elif not fwd_cout_aligned:
-                    dgrad_tile = 72
+                elif not fwd_cin_aligned or not fwd_cout_aligned:
+                    if mask_words > 1:
+                        dgrad_tile = 70
+                    elif not fwd_cin_aligned and not fwd_cout_aligned:
+                        dgrad_tile = 70
+                    elif not fwd_cin_aligned:
+                        dgrad_tile = 71
+                    else:
+                        dgrad_tile = 72
 
                 dgrad_fn = _C.production.fwd
             else:
                 cin_aligned = C_in_g % vec_width == 0
                 cout_aligned = C_out_g % vec_width == 0
-                if not cin_aligned and not cout_aligned:
-                    dgrad_tile = 70
-                elif not cout_aligned:
-                    dgrad_tile = 71
-                elif not cin_aligned:
-                    dgrad_tile = 72
-                elif use_f32_output:
+                if not cin_aligned or not cout_aligned:
+                    if mask_words > 1:
+                        dgrad_tile = 70
+                    elif not cin_aligned and not cout_aligned:
+                        dgrad_tile = 70
+                    elif not cout_aligned:
+                        dgrad_tile = 71
+                    else:
+                        dgrad_tile = 72
+                elif use_f32_out_tile:
                     dgrad_tile = 81
                 else:
                     C = max(C_in_g, C_out_g)
