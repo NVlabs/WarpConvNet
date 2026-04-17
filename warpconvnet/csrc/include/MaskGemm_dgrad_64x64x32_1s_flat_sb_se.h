@@ -77,8 +77,37 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sb_se {
                                                   ? sizeof(SharedStorage)
                                                   : EpilogueSmemSize;
 
+  // ============================================================================
+  // INTEGRATOR CONTRACT — read this before calling.
+  // ============================================================================
+  //
+  // Pass weight in its NATIVE layout [K, G, C_in, C_out]. Do NOT transpose.
+  //
+  //   ✓ correct:    weight = torch.randn(K, G, C_in, C_out)
+  //                 _C.mask_gemm_dgrad(grad_output, weight.contiguous(), ...)
+  //
+  //   ✗ wrong:      weight_T = weight.transpose(-2, -1).contiguous()
+  //                 _C.mask_gemm_dgrad(grad_output, weight_T, ...)
+  //
+  // The wrong call gives output of the right MAGNITUDE but ~zero correlation
+  // with the true gradient (rdiff ~1.4 in practice). The kernel header field
+  // `BIsTransposed = true` describes the SMEM layout, not the gmem layout
+  // expected from the caller — the loader (_load_B_tile) walks K_dim=C_out
+  // and treats N_dim=C_in as the row index, which matches the un-transposed
+  // [K, G, C_in, C_out] memory layout exactly.
+  //
+  // History: this contract was previously stated only in a single inline
+  // parameter comment ("weight [K, G, C_in, C_out] — NOT transposed") which
+  // an integrator missed. The result was a numerical regression that broke
+  // ScanNet training (warpconvnet val/miou collapse from 53% to 5%, run
+  // y26vckgf). Fixed in warpconvnet commit 0e98dd7d. See
+  // notes/2026_04_17_DGRAD_NUMERICAL_BUG.md and
+  // tests/test_dgrad_correctness.py for the regression guard.
+  //
+  // ============================================================================
   __device__ void operator()(
       const ElementInput *ptr_A_base,  // grad_output [N_out, C_out_total]
+      // PASS WEIGHT UN-TRANSPOSED — see contract above.
       const ElementInput *ptr_B_base,  // weight [K, G, C_in, C_out] — NOT transposed
       ElementOutput *ptr_D_base,       // grad_input [N_in, C_in_total]
       const int *pair_table,           // reverse_pair_table [K * N_in]

@@ -216,6 +216,11 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
       cute::cp_async_fence();
       cute::cp_async_wait<0>();
       __syncthreads();
+      // Advance past the prolog tile. For strided split-K, this shard's
+      // next tile is split_k away (shard i owns tiles i, i+split_k, i+2*split_k, ...);
+      // plain ++vt would drift into the next shard's territory and
+      // double-count one tile per shard — producing high-correlation but
+      // high-magnitude output (corr ~0.98, rdiff ~0.91 in practice).
       ++vt;
 
       // Main loop (vt already advanced past prolog tile)
@@ -262,7 +267,22 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
         int n_global = n_start + get<1>(coord);
         if (m_global < C_in && n_global < C_out) {
           float val = float(accum(i));
-          out_ptr[m_global * C_out + n_global] = static_cast<ElementOutput>(val);
+          // Direct store at split_k==1, atomicAdd otherwise.
+          // With split_k>1 the grid launches split_k blocks per (m_tile, n_tile, k_off) — each
+          // computes a partial sum over a disjoint voxel-row range — and they all need to
+          // accumulate into the same grad_w slot. Plain assignment races (only the last-completing
+          // shard survives). grad_w is pre-zeroed by the Python caller, so atomicAdd from the first
+          // shard is valid.
+          if (split_k == 1) {
+            out_ptr[m_global * C_out + n_global] = static_cast<ElementOutput>(val);
+          } else {
+            if constexpr (sizeof(ElementOutput) == 4) {
+              atomicAdd(reinterpret_cast<float *>(&out_ptr[m_global * C_out + n_global]), val);
+            } else {
+              atomicAdd(reinterpret_cast<__half *>(&out_ptr[m_global * C_out + n_global]),
+                        __float2half(val));
+            }
+          }
         }
       }
     }
