@@ -847,17 +847,30 @@ private:
         int k_global = k_start + k_local;
         int in_row = real_rows[pair_local];
         uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(pair_local, k_local));
-        bool valid = (in_row >= 0) && (in_row < N_in) && (k_global + kVec <= C_in);
-        if (valid) {
+        // Vectorized fast path needs C_in >= kVec AND (k_global + kVec) <= C_in.
+        // Unaligned tail or C_in < kVec: per-element scalar load with bounds check.
+        bool row_valid = (in_row >= 0) && (in_row < N_in);
+        if (row_valid && (k_global + kVec <= C_in)) {
           const void *src = &ptr_A[in_row * stride_A + k_global];
           asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                        "l"(src),
                        "n"(16));
         } else {
-          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
-                       "l"(ptr_A),
-                       "n"(16),
-                       "r"(0));
+          int4 frag = make_int4(0, 0, 0, 0);
+          if (row_valid) {
+            const ElementInput *row_ptr = ptr_A + in_row * stride_A;
+            ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
+            CUTLASS_PRAGMA_UNROLL
+            for (int v = 0; v < kVec; ++v) {
+              int k = k_global + v;
+              if (k < C_in) dst[v] = row_ptr[k];
+            }
+          }
+          asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                       "r"(frag.x),
+                       "r"(frag.y),
+                       "r"(frag.z),
+                       "r"(frag.w));
         }
       }
     }
