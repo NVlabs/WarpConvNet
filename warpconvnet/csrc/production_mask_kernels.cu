@@ -528,6 +528,395 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
 #undef INST_FWD_MW
 
 // =============================================================================
+// Forward f32-output MaskWords>1 launch functions (tile 80: aligned, tile 82: scalar B)
+// =============================================================================
+
+template <typename ElemIn, int MaskWords>
+int launch_production_fwd_f32out_mw(const void *a,
+                                    const void *b,
+                                    void *d,
+                                    const int *pt,
+                                    const uint32_t *pm,
+                                    const int *ms,
+                                    int N_in,
+                                    int N_out,
+                                    int C_in,
+                                    int C_out,
+                                    int K,
+                                    float alpha,
+                                    int groups = 1,
+                                    int identity_offset = -1,
+                                    cudaStream_t stream = 0);
+
+#define INST_FWD_F32OUT_MW(ElemIn, MW)                                          \
+  template <>                                                                   \
+  int launch_production_fwd_f32out_mw<ElemIn, MW>(const void *a,                \
+                                                  const void *b,                \
+                                                  void *d,                      \
+                                                  const int *pt,                \
+                                                  const uint32_t *pm,           \
+                                                  const int *ms,                \
+                                                  int N_in,                     \
+                                                  int N_out,                    \
+                                                  int C_in,                     \
+                                                  int C_out,                    \
+                                                  int K,                        \
+                                                  float alpha,                  \
+                                                  int groups,                   \
+                                                  int identity_offset,          \
+                                                  cudaStream_t stream) {        \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
+    using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, float, MW>;        \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});          \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                        \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                  \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                  \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
+    size_t smem = Kernel::SharedStorageSize;                                    \
+    if (smem > 48 * 1024)                                                       \
+      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,     \
+                               smem) != cudaSuccess)                            \
+        return -1;                                                              \
+    production_mask_kernel_entry<Kernel>                                        \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
+                                                             (const ElemIn *)b, \
+                                                             (float *)d,        \
+                                                             pt,                \
+                                                             pm,                \
+                                                             ms,                \
+                                                             N_in,              \
+                                                             N_out,             \
+                                                             C_in,              \
+                                                             C_out,             \
+                                                             K,                 \
+                                                             alpha,             \
+                                                             C_in * groups,     \
+                                                             C_out * groups,    \
+                                                             identity_offset);  \
+    return 0;                                                                   \
+  }
+
+INST_FWD_F32OUT_MW(cutlass::half_t, 2)
+INST_FWD_F32OUT_MW(cutlass::half_t, 4)
+INST_FWD_F32OUT_MW(cutlass::half_t, 8)
+INST_FWD_F32OUT_MW(cutlass::half_t, 12)
+INST_FWD_F32OUT_MW(cutlass::bfloat16_t, 2)
+INST_FWD_F32OUT_MW(cutlass::bfloat16_t, 4)
+INST_FWD_F32OUT_MW(cutlass::bfloat16_t, 8)
+INST_FWD_F32OUT_MW(cutlass::bfloat16_t, 12)
+#undef INST_FWD_F32OUT_MW
+
+template <typename ElemIn, int MaskWords>
+int launch_production_fwd_f32out_sb_mw(const void *a,
+                                       const void *b,
+                                       void *d,
+                                       const int *pt,
+                                       const uint32_t *pm,
+                                       const int *ms,
+                                       int N_in,
+                                       int N_out,
+                                       int C_in,
+                                       int C_out,
+                                       int K,
+                                       float alpha,
+                                       int groups = 1,
+                                       int identity_offset = -1,
+                                       cudaStream_t stream = 0);
+
+#define INST_FWD_F32OUT_SB_MW(ElemIn, MW)                                          \
+  template <>                                                                      \
+  int launch_production_fwd_f32out_sb_mw<ElemIn, MW>(const void *a,                \
+                                                     const void *b,                \
+                                                     void *d,                      \
+                                                     const int *pt,                \
+                                                     const uint32_t *pm,           \
+                                                     const int *ms,                \
+                                                     int N_in,                     \
+                                                     int N_out,                    \
+                                                     int C_in,                     \
+                                                     int C_out,                    \
+                                                     int K,                        \
+                                                     float alpha,                  \
+                                                     int groups,                   \
+                                                     int identity_offset,          \
+                                                     cudaStream_t stream) {        \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                     \
+    using Kernel = MaskGemm_forward_64x64x32_1s_flat_direpi_sb<Config, float, MW>; \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
+    size_t smem = Kernel::SharedStorageSize;                                       \
+    if (smem > 48 * 1024)                                                          \
+      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,               \
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,        \
+                               smem) != cudaSuccess)                               \
+        return -1;                                                                 \
+    production_mask_kernel_entry<Kernel>                                           \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
+                                                             (const ElemIn *)b,    \
+                                                             (float *)d,           \
+                                                             pt,                   \
+                                                             pm,                   \
+                                                             ms,                   \
+                                                             N_in,                 \
+                                                             N_out,                \
+                                                             C_in,                 \
+                                                             C_out,                \
+                                                             K,                    \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
+    return 0;                                                                      \
+  }
+
+INST_FWD_F32OUT_SB_MW(cutlass::half_t, 2)
+INST_FWD_F32OUT_SB_MW(cutlass::half_t, 4)
+INST_FWD_F32OUT_SB_MW(cutlass::half_t, 8)
+INST_FWD_F32OUT_SB_MW(cutlass::half_t, 12)
+INST_FWD_F32OUT_SB_MW(cutlass::bfloat16_t, 2)
+INST_FWD_F32OUT_SB_MW(cutlass::bfloat16_t, 4)
+INST_FWD_F32OUT_SB_MW(cutlass::bfloat16_t, 8)
+INST_FWD_F32OUT_SB_MW(cutlass::bfloat16_t, 12)
+#undef INST_FWD_F32OUT_SB_MW
+
+// =============================================================================
+// Forward vectorized MW>1 launch functions — tiles 42 (F16Acc 64x128 fused),
+// 43 (64x128 3s), 44 (128x64 fused). Separate launch functions to avoid
+// template key clash with the MW=1 INSTANTIATE_PROD_FWD specializations.
+// =============================================================================
+
+// Tile 42: 64x128 F16Accum fused (half-only)
+template <int MW>
+int launch_production_fwd_64x128_f16acc_mw(const void *a,
+                                           const void *b,
+                                           void *d,
+                                           const int *pt,
+                                           const uint32_t *pm,
+                                           const int *ms,
+                                           int N_in,
+                                           int N_out,
+                                           int C_in,
+                                           int C_out,
+                                           int K,
+                                           float alpha,
+                                           int groups = 1,
+                                           int identity_offset = -1,
+                                           cudaStream_t stream = 0);
+
+#define INST_FWD_64x128_F16ACC_MW(MW)                                              \
+  template <>                                                                      \
+  int launch_production_fwd_64x128_f16acc_mw<MW>(const void *a,                    \
+                                                 const void *b,                    \
+                                                 void *d,                          \
+                                                 const int *pt,                    \
+                                                 const uint32_t *pm,               \
+                                                 const int *ms,                    \
+                                                 int N_in,                         \
+                                                 int N_out,                        \
+                                                 int C_in,                         \
+                                                 int C_out,                        \
+                                                 int K,                            \
+                                                 float alpha,                      \
+                                                 int groups,                       \
+                                                 int identity_offset,              \
+                                                 cudaStream_t stream) {            \
+    using ElemIn = cutlass::half_t;                                                \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x128x32_F16Accum>;           \
+    using Kernel = MaskGemm_forward_64x128x32_2s_fused<Config, ElemIn, MW>;        \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
+    size_t smem = Kernel::SharedStorageSize;                                       \
+    if (smem > 48 * 1024) {                                                        \
+      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
+                                      smem);                                       \
+      if (err != cudaSuccess) return -1;                                           \
+    }                                                                              \
+    production_mask_kernel_entry<Kernel>                                           \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
+                                                             (const ElemIn *)b,    \
+                                                             (ElemIn *)d,          \
+                                                             pt,                   \
+                                                             pm,                   \
+                                                             ms,                   \
+                                                             N_in,                 \
+                                                             N_out,                \
+                                                             C_in,                 \
+                                                             C_out,                \
+                                                             K,                    \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
+    return 0;                                                                      \
+  }
+
+INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC_MW(8)
+    INST_FWD_64x128_F16ACC_MW(12)
+#undef INST_FWD_64x128_F16ACC_MW
+
+    // Tile 43: 64x128 3-stage (half + bfloat16)
+    template <typename ElemIn, int MW>
+    int launch_production_fwd_64x128_3s_mw(const void *a,
+                                           const void *b,
+                                           void *d,
+                                           const int *pt,
+                                           const uint32_t *pm,
+                                           const int *ms,
+                                           int N_in,
+                                           int N_out,
+                                           int C_in,
+                                           int C_out,
+                                           int K,
+                                           float alpha,
+                                           int groups = 1,
+                                           int identity_offset = -1,
+                                           cudaStream_t stream = 0);
+
+#define INST_FWD_64x128_3S_MW(ElemIn, MW)                                          \
+  template <>                                                                      \
+  int launch_production_fwd_64x128_3s_mw<ElemIn, MW>(const void *a,                \
+                                                     const void *b,                \
+                                                     void *d,                      \
+                                                     const int *pt,                \
+                                                     const uint32_t *pm,           \
+                                                     const int *ms,                \
+                                                     int N_in,                     \
+                                                     int N_out,                    \
+                                                     int C_in,                     \
+                                                     int C_out,                    \
+                                                     int K,                        \
+                                                     float alpha,                  \
+                                                     int groups,                   \
+                                                     int identity_offset,          \
+                                                     cudaStream_t stream) {        \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x128x32>;                    \
+    using Kernel = MaskGemm_forward_64x128x32_3s<Config, ElemIn, MW>;              \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
+    size_t smem = Kernel::SharedStorageSize;                                       \
+    if (smem > 48 * 1024) {                                                        \
+      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
+                                      smem);                                       \
+      if (err != cudaSuccess) return -1;                                           \
+    }                                                                              \
+    production_mask_kernel_entry<Kernel>                                           \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
+                                                             (const ElemIn *)b,    \
+                                                             (ElemIn *)d,          \
+                                                             pt,                   \
+                                                             pm,                   \
+                                                             ms,                   \
+                                                             N_in,                 \
+                                                             N_out,                \
+                                                             C_in,                 \
+                                                             C_out,                \
+                                                             K,                    \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
+    return 0;                                                                      \
+  }
+
+INST_FWD_64x128_3S_MW(cutlass::half_t, 2) INST_FWD_64x128_3S_MW(cutlass::half_t, 4)
+    INST_FWD_64x128_3S_MW(cutlass::half_t, 8) INST_FWD_64x128_3S_MW(cutlass::half_t, 12)
+        INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 2) INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 4)
+            INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 8)
+                INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 12)
+#undef INST_FWD_64x128_3S_MW
+
+    // Tile 44: 128x64 fused (half + bfloat16)
+    template <typename ElemIn, int MW>
+    int launch_production_fwd_128x64_mw(const void *a,
+                                        const void *b,
+                                        void *d,
+                                        const int *pt,
+                                        const uint32_t *pm,
+                                        const int *ms,
+                                        int N_in,
+                                        int N_out,
+                                        int C_in,
+                                        int C_out,
+                                        int K,
+                                        float alpha,
+                                        int groups = 1,
+                                        int identity_offset = -1,
+                                        cudaStream_t stream = 0);
+
+#define INST_FWD_128x64_MW(ElemIn, MW)                                             \
+  template <>                                                                      \
+  int launch_production_fwd_128x64_mw<ElemIn, MW>(const void *a,                   \
+                                                  const void *b,                   \
+                                                  void *d,                         \
+                                                  const int *pt,                   \
+                                                  const uint32_t *pm,              \
+                                                  const int *ms,                   \
+                                                  int N_in,                        \
+                                                  int N_out,                       \
+                                                  int C_in,                        \
+                                                  int C_out,                       \
+                                                  int K,                           \
+                                                  float alpha,                     \
+                                                  int groups,                      \
+                                                  int identity_offset,             \
+                                                  cudaStream_t stream) {           \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile128x64x32>;                    \
+    using Kernel = MaskGemm_forward_128x64x32_2s_fused<Config, ElemIn, MW>;        \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
+    size_t smem = Kernel::SharedStorageSize;                                       \
+    if (smem > 48 * 1024) {                                                        \
+      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
+                                      smem);                                       \
+      if (err != cudaSuccess) return -1;                                           \
+    }                                                                              \
+    production_mask_kernel_entry<Kernel>                                           \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
+                                                             (const ElemIn *)b,    \
+                                                             (ElemIn *)d,          \
+                                                             pt,                   \
+                                                             pm,                   \
+                                                             ms,                   \
+                                                             N_in,                 \
+                                                             N_out,                \
+                                                             C_in,                 \
+                                                             C_out,                \
+                                                             K,                    \
+                                                             alpha,                \
+                                                             C_in * groups,        \
+                                                             C_out * groups,       \
+                                                             identity_offset);     \
+    return 0;                                                                      \
+  }
+
+INST_FWD_128x64_MW(cutlass::half_t, 2) INST_FWD_128x64_MW(cutlass::half_t, 4)
+    INST_FWD_128x64_MW(cutlass::half_t, 8) INST_FWD_128x64_MW(cutlass::half_t, 12)
+        INST_FWD_128x64_MW(cutlass::bfloat16_t, 2) INST_FWD_128x64_MW(cutlass::bfloat16_t, 4)
+            INST_FWD_128x64_MW(cutlass::bfloat16_t, 8) INST_FWD_128x64_MW(cutlass::bfloat16_t, 12)
+#undef INST_FWD_128x64_MW
+
+// =============================================================================
 // Scalar variant launch functions (separate from generic template to avoid
 // duplicate specializations — all use Tile64x64x32 config)
 // =============================================================================
@@ -590,23 +979,23 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
     return 0;                                                                      \
   }
 
-// Declare scalar launch function templates
-template <typename ElemIn, typename ElemOut>
-int launch_scalar_fwd_sab_se(const void *,
-                             const void *,
-                             void *,
-                             const int *,
-                             const uint32_t *,
-                             const int *,
-                             int,
-                             int,
-                             int,
-                             int,
-                             int,
-                             float,
-                             int groups = 1,
-                             int identity_offset = -1,
-                             cudaStream_t = 0);
+    // Declare scalar launch function templates
+    template <typename ElemIn, typename ElemOut>
+    int launch_scalar_fwd_sab_se(const void *,
+                                 const void *,
+                                 void *,
+                                 const int *,
+                                 const uint32_t *,
+                                 const int *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 float,
+                                 int groups = 1,
+                                 int identity_offset = -1,
+                                 cudaStream_t = 0);
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_fwd_sa(const void *,
                          const void *,
@@ -811,26 +1200,190 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
     return 0;                                                                      \
   }
 
-// Forward scalar SAB_SE with MW=2,4
+// Forward scalar SAB_SE with MW=2,4,8,12
 DEFINE_SCALAR_LAUNCH_MW(
     fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 2)
 DEFINE_SCALAR_LAUNCH_MW(
     fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 4)
 DEFINE_SCALAR_LAUNCH_MW(
+    fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 8)
+DEFINE_SCALAR_LAUNCH_MW(
+    fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 12)
+DEFINE_SCALAR_LAUNCH_MW(
     fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 2)
 DEFINE_SCALAR_LAUNCH_MW(
     fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 4)
+DEFINE_SCALAR_LAUNCH_MW(
+    fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 8)
+DEFINE_SCALAR_LAUNCH_MW(
+    fwd, MaskGemm_forward_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 12)
 
-// Dgrad scalar SAB_SE with MW=2,4
+// Dgrad scalar SAB_SE with MW=2,4,8,12
 DEFINE_SCALAR_LAUNCH_MW(
     dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 2)
 DEFINE_SCALAR_LAUNCH_MW(
     dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 4)
 DEFINE_SCALAR_LAUNCH_MW(
+    dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 8)
+DEFINE_SCALAR_LAUNCH_MW(
+    dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::half_t, cutlass::half_t, 12)
+DEFINE_SCALAR_LAUNCH_MW(
     dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 2)
 DEFINE_SCALAR_LAUNCH_MW(
     dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 4)
+DEFINE_SCALAR_LAUNCH_MW(
+    dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 8)
+DEFINE_SCALAR_LAUNCH_MW(
+    dgrad, MaskGemm_dgrad_64x64x32_1s_flat_sab_se, cutlass::bfloat16_t, cutlass::bfloat16_t, 12)
 #undef DEFINE_SCALAR_LAUNCH_MW
+
+// =============================================================================
+// Scalar SA / SB_SE MW>1 launch functions (tiles 71/72)
+// Separate template family per suffix to avoid clashing with MW=1 specializations.
+// =============================================================================
+
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_fwd_sa_mw(const void *,
+                            const void *,
+                            void *,
+                            const int *,
+                            const uint32_t *,
+                            const int *,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            float,
+                            int groups = 1,
+                            int identity_offset = -1,
+                            cudaStream_t = 0);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_fwd_sb_se_mw(const void *,
+                               const void *,
+                               void *,
+                               const int *,
+                               const uint32_t *,
+                               const int *,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               float,
+                               int groups = 1,
+                               int identity_offset = -1,
+                               cudaStream_t = 0);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_dgrad_sa_mw(const void *,
+                              const void *,
+                              void *,
+                              const int *,
+                              const uint32_t *,
+                              const int *,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              float,
+                              int groups = 1,
+                              int identity_offset = -1,
+                              cudaStream_t = 0);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_dgrad_sb_se_mw(const void *,
+                                 const void *,
+                                 void *,
+                                 const int *,
+                                 const uint32_t *,
+                                 const int *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 float,
+                                 int groups = 1,
+                                 int identity_offset = -1,
+                                 cudaStream_t = 0);
+
+#define DEFINE_SCALAR_LAUNCH_SA_SB_MW(OP, SUFFIX, KernelClass, ElemIn, ElemOut, MW)  \
+  template <>                                                                        \
+  int launch_scalar_##OP##_##SUFFIX##_mw<ElemIn, ElemOut, MW>(const void *a,         \
+                                                              const void *b,         \
+                                                              void *d,               \
+                                                              const int *pt,         \
+                                                              const uint32_t *pm,    \
+                                                              const int *ms,         \
+                                                              int N_in,              \
+                                                              int N_out,             \
+                                                              int C_in,              \
+                                                              int C_out,             \
+                                                              int K,                 \
+                                                              float alpha,           \
+                                                              int groups,            \
+                                                              int identity_offset,   \
+                                                              cudaStream_t stream) { \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                       \
+    using Kernel = KernelClass<Config, ElemOut, MW>;                                 \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});               \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});               \
+    bool is_fwd = (std::string(#OP) == "fwd");                                       \
+    int out_rows = is_fwd ? N_out : N_in;                                            \
+    int out_cols = is_fwd ? C_out : C_in;                                            \
+    int stride_a = (is_fwd ? C_in : C_out) * groups;                                 \
+    int stride_d = (is_fwd ? C_out : C_in) * groups;                                 \
+    if (out_rows == 0 || C_in == 0 || C_out == 0) return 0;                          \
+    int m_tiles = (out_rows + TileM - 1) / TileM;                                    \
+    int n_tiles = (out_cols + TileN - 1) / TileN;                                    \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                          \
+    size_t smem = Kernel::SharedStorageSize;                                         \
+    if (smem > 48 * 1024) {                                                          \
+      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,          \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,   \
+                                      smem);                                         \
+      if (err != cudaSuccess) return -1;                                             \
+    }                                                                                \
+    production_mask_kernel_entry<Kernel>                                             \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,      \
+                                                             (const ElemIn *)b,      \
+                                                             (ElemOut *)d,           \
+                                                             pt,                     \
+                                                             pm,                     \
+                                                             ms,                     \
+                                                             N_in,                   \
+                                                             N_out,                  \
+                                                             C_in,                   \
+                                                             C_out,                  \
+                                                             K,                      \
+                                                             alpha,                  \
+                                                             stride_a,               \
+                                                             stride_d,               \
+                                                             identity_offset);       \
+    return 0;                                                                        \
+  }
+
+#define INST_ALL_MW_SA_SB(OP, SUFFIX, KernelClass)                                             \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(OP, SUFFIX, KernelClass, cutlass::half_t, cutlass::half_t, 2)  \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(OP, SUFFIX, KernelClass, cutlass::half_t, cutlass::half_t, 4)  \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(OP, SUFFIX, KernelClass, cutlass::half_t, cutlass::half_t, 8)  \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(OP, SUFFIX, KernelClass, cutlass::half_t, cutlass::half_t, 12) \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(                                                               \
+      OP, SUFFIX, KernelClass, cutlass::bfloat16_t, cutlass::bfloat16_t, 2)                    \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(                                                               \
+      OP, SUFFIX, KernelClass, cutlass::bfloat16_t, cutlass::bfloat16_t, 4)                    \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(                                                               \
+      OP, SUFFIX, KernelClass, cutlass::bfloat16_t, cutlass::bfloat16_t, 8)                    \
+  DEFINE_SCALAR_LAUNCH_SA_SB_MW(                                                               \
+      OP, SUFFIX, KernelClass, cutlass::bfloat16_t, cutlass::bfloat16_t, 12)
+
+INST_ALL_MW_SA_SB(fwd, sa, MaskGemm_forward_64x64x32_1s_flat_sa)
+INST_ALL_MW_SA_SB(fwd, sb_se, MaskGemm_forward_64x64x32_1s_flat_sb_se)
+INST_ALL_MW_SA_SB(dgrad, sa, MaskGemm_dgrad_64x64x32_1s_flat_sa)
+INST_ALL_MW_SA_SB(dgrad, sb_se, MaskGemm_dgrad_64x64x32_1s_flat_sb_se)
+
+#undef INST_ALL_MW_SA_SB
+#undef DEFINE_SCALAR_LAUNCH_SA_SB_MW
 
 // =============================================================================
 // Dgrad instantiations
@@ -1105,6 +1658,87 @@ int launch_production_dgrad_f32out(const void *a,
 INST_DGRAD_F32OUT(cutlass::half_t)
 INST_DGRAD_F32OUT(cutlass::bfloat16_t)
 #undef INST_DGRAD_F32OUT
+
+// =============================================================================
+// Dgrad f32-output MaskWords>1 launch function (tile 81)
+// =============================================================================
+
+template <typename ElemIn, int MaskWords>
+int launch_production_dgrad_f32out_mw(const void *a,
+                                      const void *b,
+                                      void *d,
+                                      const int *pt,
+                                      const uint32_t *pm,
+                                      const int *ms,
+                                      int N_in,
+                                      int N_out,
+                                      int C_in,
+                                      int C_out,
+                                      int K,
+                                      float alpha,
+                                      int groups = 1,
+                                      int identity_offset = -1,
+                                      cudaStream_t stream = 0);
+
+#define INST_DGRAD_F32OUT_MW(ElemIn, MW)                                         \
+  template <>                                                                    \
+  int launch_production_dgrad_f32out_mw<ElemIn, MW>(const void *a,               \
+                                                    const void *b,               \
+                                                    void *d,                     \
+                                                    const int *pt,               \
+                                                    const uint32_t *pm,          \
+                                                    const int *ms,               \
+                                                    int N_in,                    \
+                                                    int N_out,                   \
+                                                    int C_in,                    \
+                                                    int C_out,                   \
+                                                    int K,                       \
+                                                    float alpha,                 \
+                                                    int groups,                  \
+                                                    int identity_offset,         \
+                                                    cudaStream_t stream) {       \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                   \
+    using Kernel = MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb<Config, float, MW>; \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});           \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});           \
+    if (N_in == 0 || C_in == 0 || C_out == 0) return 0;                          \
+    int m_tiles = (N_in + TileM - 1) / TileM;                                    \
+    int n_tiles = (C_in + TileN - 1) / TileN;                                    \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                      \
+    size_t smem = Kernel::SharedStorageSize;                                     \
+    if (smem > 48 * 1024)                                                        \
+      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,             \
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,      \
+                               smem) != cudaSuccess)                             \
+        return -1;                                                               \
+    production_mask_kernel_entry<Kernel>                                         \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,  \
+                                                             (const ElemIn *)b,  \
+                                                             (float *)d,         \
+                                                             pt,                 \
+                                                             pm,                 \
+                                                             ms,                 \
+                                                             N_in,               \
+                                                             N_out,              \
+                                                             C_in,               \
+                                                             C_out,              \
+                                                             K,                  \
+                                                             alpha,              \
+                                                             C_out * groups,     \
+                                                             C_in * groups,      \
+                                                             identity_offset);   \
+    return 0;                                                                    \
+  }
+
+INST_DGRAD_F32OUT_MW(cutlass::half_t, 2)
+INST_DGRAD_F32OUT_MW(cutlass::half_t, 4)
+INST_DGRAD_F32OUT_MW(cutlass::half_t, 8)
+INST_DGRAD_F32OUT_MW(cutlass::half_t, 12)
+INST_DGRAD_F32OUT_MW(cutlass::bfloat16_t, 2)
+INST_DGRAD_F32OUT_MW(cutlass::bfloat16_t, 4)
+INST_DGRAD_F32OUT_MW(cutlass::bfloat16_t, 8)
+INST_DGRAD_F32OUT_MW(cutlass::bfloat16_t, 12)
+#undef INST_DGRAD_F32OUT_MW
 
 // =============================================================================
 // Dgrad MaskWords>1 launch functions (K>32 support)
