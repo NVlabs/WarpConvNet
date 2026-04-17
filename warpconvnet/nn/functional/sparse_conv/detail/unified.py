@@ -123,6 +123,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 C_out,
                 kv,
                 num_in_coords=in_features.shape[0],
+                use_fp16_accum=use_fp16_accum,
             )
         else:
             adaptive_fwd_params = _get_adaptive_AB_params(
@@ -131,6 +132,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 kv,
                 num_in_coords=in_features.shape[0],
                 voxel_size=voxel_size,
+                use_fp16_accum=use_fp16_accum,
             )
 
         config = SpatiallySparseConvConfig(
@@ -389,12 +391,14 @@ class UnifiedSpatiallySparseConvFunction(Function):
         wgrad_filter = _normalize_algo(initial_wgrad_algo)
 
         # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
+        use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
         if dgrad_filter == "trimmed":
             dgrad_adaptive = _get_trimmed_AB_params(
                 C_out_bwd,
                 C_in_bwd,
                 kv_bwd,
                 num_in_coords=N_in_bwd,
+                use_fp16_accum=use_fp16_accum,
             )
         else:
             dgrad_adaptive = _get_adaptive_AB_params(
@@ -402,19 +406,25 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 C_in_bwd,
                 kv_bwd,
                 num_in_coords=N_in_bwd,
+                use_fp16_accum=use_fp16_accum,
             )
         # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose).
-        # F32Acc only — F16Acc dgrad tiles degrade gradient precision the same way
-        # forward F16Acc tiles do (see _AB_PRODUCTION_F16ACC).
-        from .algo_params import _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC
+        # F32Acc always included; F16Acc added when use_fp16_accum=True.
+        from .algo_params import (
+            _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC,
+            _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC,
+        )
 
         dgrad_adaptive = list(dgrad_adaptive) + list(_AB_PRODUCTION_FWD_AS_DGRAD_F32ACC)
+        if use_fp16_accum:
+            dgrad_adaptive += list(_AB_PRODUCTION_FWD_AS_DGRAD_F16ACC)
         if wgrad_filter == "trimmed":
             wgrad_adaptive = _get_trimmed_AtB_params(
                 C_in_bwd,
                 C_out_bwd,
                 kv_bwd,
                 num_in_coords=N_in_bwd,
+                use_fp16_accum=use_fp16_accum,
             )
         else:
             wgrad_adaptive = _get_adaptive_AtB_params(
@@ -422,6 +432,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 C_out_bwd,
                 kv_bwd,
                 num_in_coords=N_in_bwd,
+                use_fp16_accum=use_fp16_accum,
             )
         filtered_dgrad_params = _filter_benchmark_params_by_env_config(
             dgrad_adaptive, dgrad_filter, is_forward=True
