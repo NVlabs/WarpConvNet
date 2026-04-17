@@ -871,3 +871,137 @@ def test_sparse_conv2d_kernel_map_uses_cuhash():
     assert kernel_map.offsets.shape[0] == 3 * 3 + 1  # K=9, offsets has K+1 entries
     # Verify _pair_table was set (only happens on cuhash path)
     assert hasattr(kernel_map, "_pair_table") and kernel_map._pair_table is not None
+
+
+# ── Multi-word mask tests (K>32, K=125 for 5x5x5) ──────────────────────
+# These catch silent zero-output bugs when a tile without MaskWords>1
+# support is selected. Tiles 80/82 (f32out) and 71/72 (partial scalar)
+# are MW=1-only; for K=125 (mask_words=4) they must not be dispatched.
+
+
+def _make_voxels_k125(N=3000, C=3, device="cuda"):
+    """Build voxels with enough density for K=125 kernel to have non-empty pairs."""
+    torch.manual_seed(1234)
+    coords = [(torch.rand(N, 3) * 20).int()]  # 20^3 = 8000 cells, N=3000 is dense
+    feats = [torch.randn(N, C)]
+    return Voxels(coords, feats, device=device).unique()
+
+
+@pytest.mark.parametrize(
+    "C_in, C_out",
+    [
+        (3, 32),  # conv0 pattern (MinkUNet18): unaligned C_in, aligned C_out
+        (8, 16),  # both aligned
+        (16, 3),  # aligned C_in, unaligned C_out
+        (3, 3),  # both unaligned
+    ],
+)
+def test_k125_forward_correctness(C_in, C_out):
+    """K=125 (5x5x5, mask_words=4) fwd: production matches explicit_gemm."""
+    voxels = _make_voxels_k125(N=3000, C=C_in)
+    torch.manual_seed(42)
+    weight = torch.randn(125, C_in, C_out, device="cuda") * 0.05
+
+    # Run explicit_gemm first to avoid any autotune-cached kernel_map state carrying over.
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out_e = spatially_sparse_conv(
+            voxels, weight, kernel_size=(5, 5, 5), fwd_algo="explicit_gemm"
+        ).feature_tensor.float()
+        out_p = spatially_sparse_conv(
+            voxels, weight, kernel_size=(5, 5, 5), fwd_algo="production"
+        ).feature_tensor.float()
+
+    # Every channel must have non-zero variance (catches zero-output bug)
+    per_chan_std = out_p.std(dim=0)
+    assert (per_chan_std > 1e-4).all(), (
+        f"C_in={C_in} C_out={C_out}: production produced near-constant output "
+        f"per_chan_std={per_chan_std.tolist()}"
+    )
+
+    # Production must match explicit_gemm reference
+    rdiff = (out_p - out_e).abs().mean() / (out_e.abs().mean() + 1e-8)
+    assert rdiff < 0.02, f"C_in={C_in} C_out={C_out}: rel_diff={rdiff:.5f}"
+
+
+@pytest.mark.parametrize("compute_dtype", [None, torch.float16, torch.float32])
+def test_k125_compute_dtype(compute_dtype):
+    """K=125 forward under fp16 AMP with varied compute_dtype overrides.
+
+    With compute_dtype=fp32 under fp16 autocast, the dispatcher previously
+    chose tile 82 (f32out_sb) which silently returned zeros for mask_words>1.
+    The fix falls back to an MW-supporting tile.
+    """
+    voxels = _make_voxels_k125(N=3000, C=3)
+    torch.manual_seed(42)
+    conv = SparseConv3d(3, 32, kernel_size=5, bias=True, compute_dtype=compute_dtype).cuda()
+
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out = conv(voxels).feature_tensor.float()
+
+    # Per-channel std must be non-zero (bias-only output = zero kernel contribution)
+    per_chan_std = out.std(dim=0)
+    assert (
+        per_chan_std > 1e-4
+    ).all(), f"compute_dtype={compute_dtype}: per-channel std = {per_chan_std.tolist()}"
+
+
+def test_k125_backward_correctness():
+    """K=125 full fwd+bwd: production matches explicit_gemm for grad_input and grad_weight."""
+    C_in, C_out = 3, 32
+    voxels = _make_voxels_k125(N=3000, C=C_in)
+
+    def run(algo):
+        torch.manual_seed(42)
+        feat = voxels.feature_tensor.clone().detach().requires_grad_(True)
+        weight = (
+            (torch.randn(125, C_in, C_out, device="cuda") * 0.05).detach().requires_grad_(True)
+        )
+        v_copy = voxels.replace(batched_features=feat)
+        with torch.amp.autocast("cuda", dtype=torch.float16):
+            out = spatially_sparse_conv(
+                v_copy,
+                weight,
+                kernel_size=(5, 5, 5),
+                fwd_algo=algo,
+                dgrad_algo=algo,
+                wgrad_algo=algo,
+            )
+        out.feature_tensor.sum().backward()
+        return feat.grad.float(), weight.grad.float()
+
+    # Run explicit_gemm first to avoid caching issues with autotune
+    gi_e, gw_e = run("explicit_gemm")
+    gi_p, gw_p = run("production")
+
+    gi_rdiff = (gi_p - gi_e).abs().mean() / (gi_e.abs().mean() + 1e-8)
+    gw_rdiff = (gw_p - gw_e).abs().mean() / (gw_e.abs().mean() + 1e-8)
+
+    assert not torch.isnan(gi_p).any(), "production dgrad produced NaN"
+    assert not torch.isnan(gw_p).any(), "production wgrad produced NaN"
+    assert gi_rdiff < 0.02, f"K=125 dgrad rel_diff={gi_rdiff:.5f}"
+    assert gw_rdiff < 0.02, f"K=125 wgrad rel_diff={gw_rdiff:.5f}"
+
+
+def test_k125_batchnorm_downstream():
+    """K=125 fwd through BatchNorm: regression test for the zero-output bug
+    that caused all BN layers downstream of a broken conv to see zero variance.
+    """
+    import torch.nn as nn
+
+    voxels = _make_voxels_k125(N=3000, C=3)
+    torch.manual_seed(42)
+    conv = SparseConv3d(3, 32, kernel_size=5, bias=True, compute_dtype=torch.float32).cuda()
+    bn = nn.BatchNorm1d(32).cuda()
+    bn.train()
+
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out = conv(voxels).feature_tensor
+        bn_out = bn(out.float())
+
+    # BN output should normalize to std≈1 per channel (if conv output had variance)
+    assert not torch.isnan(bn_out).any(), "BN output has NaN"
+    std = bn_out.std(dim=0)
+    # Under train-mode BN, output std ≈ 1 for each channel (gamma=1, beta=0)
+    assert (
+        std > 0.5
+    ).all(), f"BN output per-channel std too low (conv output was near-constant): {std.tolist()}"
