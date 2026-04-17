@@ -77,8 +77,37 @@ struct MaskGemm_dgrad_128x64x32_2s_pipelined {
                                                   ? sizeof(SharedStorage)
                                                   : EpilogueSmemSize;
 
+  // ============================================================================
+  // INTEGRATOR CONTRACT — read this before calling.
+  // ============================================================================
+  //
+  // Pass weight in its NATIVE layout [K, G, C_in, C_out]. Do NOT transpose.
+  //
+  //   ✓ correct:    weight = torch.randn(K, G, C_in, C_out)
+  //                 _C.mask_gemm_dgrad(grad_output, weight.contiguous(), ...)
+  //
+  //   ✗ wrong:      weight_T = weight.transpose(-2, -1).contiguous()
+  //                 _C.mask_gemm_dgrad(grad_output, weight_T, ...)
+  //
+  // The wrong call gives output of the right MAGNITUDE but ~zero correlation
+  // with the true gradient (rdiff ~1.4 in practice). The kernel header field
+  // `BIsTransposed = true` describes the SMEM layout, not the gmem layout
+  // expected from the caller — the loader (_load_B_tile) walks K_dim=C_out
+  // and treats N_dim=C_in as the row index, which matches the un-transposed
+  // [K, G, C_in, C_out] memory layout exactly.
+  //
+  // History: this contract was previously stated only in a single inline
+  // parameter comment ("weight [K, G, C_in, C_out] — NOT transposed") which
+  // an integrator missed. The result was a numerical regression that broke
+  // ScanNet training (warpconvnet val/miou collapse from 53% to 5%, run
+  // y26vckgf). Fixed in warpconvnet commit 0e98dd7d. See
+  // notes/2026_04_17_DGRAD_NUMERICAL_BUG.md and
+  // tests/test_dgrad_correctness.py for the regression guard.
+  //
+  // ============================================================================
   __device__ void operator()(
       const ElementInput *ptr_A_base,  // grad_output [N_out, C_out_total]
+      // PASS WEIGHT UN-TRANSPOSED — see contract above.
       const ElementInput *ptr_B_base,  // weight [K, G, C_in, C_out] — NOT transposed
       ElementOutput *ptr_D_base,       // grad_input [N_in, C_in_total]
       const int *pair_table,           // reverse_pair_table [K * N_in]
@@ -516,6 +545,29 @@ private:
   static constexpr bool BIsTransposed = true;
 
   // _load_B_tile: K-contiguous B load for dgrad.
+  //
+  // INTEGRATOR CONTRACT — B layout for dgrad
+  // ----------------------------------------
+  // Despite the name "B is transposed" (BIsTransposed = true above), the
+  // weight tensor must be passed UN-TRANSPOSED in its native layout
+  //
+  //     weight: [K, G, C_in, C_out]   row-major
+  //
+  // i.e. each per-K plane is a [C_in, C_out] matrix (rows of length C_out
+  // indexed by C_in). Do NOT call weight.transpose(1, 2) before launch.
+  //
+  // The address arithmetic below — gmem_row_base + (n_start + n_local) *
+  // K_dim — walks rows of length K_dim with K_dim = C_out. Concretely it
+  // reads B[n_local, k_local] = weight[k_offset, c_in=n_local, c_out=k_local],
+  // which is what the GEMM accum[in_idx, c_in] += A[in_idx, c_out] *
+  // B[c_out_axis, c_in_axis] needs (with the K axis = C_out and the N axis
+  // = C_in, which is dgrad's per-tile MMA convention).
+  //
+  // Passing transposed weight gives output of the right magnitude but with
+  // ~zero correlation to the true gradient (rdiff ~1.4 in practice). This
+  // bug broke ScanNet training in warpconvnet — see warpconvnet commit
+  // 0e98dd7d and notes/2026_04_17_DGRAD_NUMERICAL_BUG.md.
+  //
   // Optimized: precompute smem base address once, use compile-time offsets
   // for each wave to minimize instruction count.
   template <class SmemTensor, class GmemThrCopyB>
