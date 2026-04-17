@@ -6,6 +6,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <cassert>
+
 // clang-format off
 #include "cute/tensor.hpp"
 #include "cute/algorithm/copy.hpp"
@@ -18,6 +20,26 @@
 
 namespace warpconvnet {
 namespace cute_gemm {
+
+// Debug-only entry-gate: in debug builds, block if K exceeds the MaskWords
+// capacity — this is the silent-zero condition from the 2026-04-17 SILENT_ZERO
+// bug (see notes/2026_04_17_SILENT_ZERO_BUG_STORY.md). One thread per launch
+// prints. Zero cost in release builds (compiles to ((void)0)).
+// Guarded because every generated header emits this block; without the guard
+// we'd get redefinition warnings when a .cu includes multiple kernel headers.
+#ifndef WARPGEMM_MW_ASSERT_ENTRY
+#if !defined(NDEBUG)
+#define WARPGEMM_MW_ASSERT_ENTRY(K_runtime_)                                         \
+  do {                                                                               \
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { \
+      assert((K_runtime_) <= int(MaskWords) * 32 &&                                  \
+             "K exceeds MaskWords*32 - kernel will silently skip offsets");          \
+    }                                                                                \
+  } while (0)
+#else
+#define WARPGEMM_MW_ASSERT_ENTRY(K_runtime_) ((void)0)
+#endif
+#endif  // WARPGEMM_MW_ASSERT_ENTRY
 
 // Dgrad kernel: dX[j,:] = sum_k dY[rev_pt[k,j],:] @ W[k,:,:]^T
 // C_in, C_out in CONV semantics. Contraction over C_out, output dim C_in.
@@ -124,6 +146,9 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_sa {
       int /*identity_offset*/,  // unused in dgrad (shared launch wrapper with fwd)
       char *smem_buf) const {
     using namespace cute;
+    // Entry-gate: in debug builds, assert K fits in MaskWords*32.
+    // Release: no-op (see templates.py WARPGEMM_MW_ASSERT_ENTRY macro).
+    WARPGEMM_MW_ASSERT_ENTRY(K);
     // Group conv: blockIdx.z selects group, offset A/B/D pointers
     int group_id = int(blockIdx.z);
     const ElementInput *ptr_A = ptr_A_base + group_id * C_out;
@@ -534,27 +559,44 @@ private:
                      "n"(16));
       }
     } else {
-      // Partial tile: per-element bounds checking with partial cp.async
+      // Partial tile: fall back to per-element scalar load + st.shared.v4.b32.
+      //
+      // Why NOT partial cp.async (earlier buggy implementation):
+      //   cp.async with cp-size=16 requires a 16-byte-aligned source even when
+      //   src-size<16. For dgrad B with K_dim=C_out not a multiple of kVec=8,
+      //   the source address `ptr_Bk + n_global * K_dim` is only 2*K_dim-byte
+      //   aligned. For odd n_global at small C_out (3,4,5,7) this is <8-byte
+      //   aligned → unaligned cp.async yields garbage / replicated data for
+      //   odd n-rows. Observed as silent corruption at the last C_in column
+      //   (only the c_in=63 slot failed; odd c_in positions silently dropped
+      //   their weight contribution and spilled into adjacent even c_in).
+      //   See notes/2026_04_17_codegen_drift_audit.md for the analogue on the
+      //   A-loader side.
+      //
+      // Scalar fallback: per-element ld.global (no alignment requirement),
+      // pack into int4 register, then st.shared.v4.b32. Same pattern used by
+      // gathered_a_warp_raked / gathered_a_precomputed / gathered_a_iterator.
       CUTLASS_PRAGMA_UNROLL
       for (int wave = 0; wave < num_waves; ++wave) {
         int n_local = wave * n_per_wave + n_tid;
         if (n_local < tN) {
           int n_global = n_start + n_local;
           uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_stage(n_local, k_local));
+          int4 frag = make_int4(0, 0, 0, 0);
           if (n_global < N_dim && k_valid_n > 0) {
-            const void *src = gmem_row_base + (int64_t)n_global * K_dim;
-            asm volatile(
-                "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
-                "l"(src),
-                "n"(16),
-                "r"(k_src_bytes));
-          } else {
-            asm volatile(
-                "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
-                "l"(ptr_Bk),
-                "n"(16),
-                "r"(0));
+            const ElementInput *row_ptr = ptr_Bk + (int64_t)n_global * K_dim;
+            ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
+            CUTLASS_PRAGMA_UNROLL
+            for (int v = 0; v < kVec; ++v) {
+              int k = k_global + v;
+              if (k < K_dim) dst[v] = row_ptr[k];
+            }
           }
+          asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                       "r"(frag.x),
+                       "r"(frag.y),
+                       "r"(frag.z),
+                       "r"(frag.w));
         }
       }
     }
@@ -819,7 +861,11 @@ private:
         }
       }
     } else if constexpr (sizeof(ElementOutput) == 2) {
-      // Direct half2 epilogue (no smem staging — lower overhead for small tiles)
+      // Direct half2 epilogue (no smem staging — lower overhead for small tiles).
+      // Half2 stores require 4-byte alignment: both the column index (n_global)
+      // and the row stride (stride_out) must be even. Otherwise the second row's
+      // starting byte is not 4-byte aligned, so we fall back to scalar writes.
+      bool stride_aligned = (stride_out & 1) == 0;
       CUTE_UNROLL
       for (int frag = 0; frag < size(accum); frag += 4) {
 #pragma unroll
@@ -828,7 +874,7 @@ private:
           auto coord = tCrC(base);
           int sorted_row = m_start + get<0>(coord);
           int n_global = n_start + get<1>(coord);
-          if (sorted_row < N_in && n_global + 1 < C_in) {
+          if (sorted_row < N_in && n_global + 1 < C_in && stride_aligned && ((n_global & 1) == 0)) {
             int out_row = mask_argsort[sorted_row];
             float v0 = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
             float v1 = (alpha == 1.0f) ? float(accum(base + 1)) : alpha * float(accum(base + 1));
@@ -840,10 +886,19 @@ private:
             char *base_ptr = reinterpret_cast<char *>(ptr_D);
             *reinterpret_cast<uint32_t *>(base_ptr +
                                           ((size_t)out_row * stride_out + n_global) * 2) = packed;
-          } else if (sorted_row < N_in && n_global < C_in) {
+          } else if (sorted_row < N_in) {
+            // Scalar fallback: either the write would straddle C (n_global+1 >= C)
+            // or the half2 store would be misaligned (stride or col odd).
             int out_row = mask_argsort[sorted_row];
-            float val = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
-            ptr_D[out_row * stride_out + n_global] = static_cast<ElementOutput>(val);
+            if (n_global < C_in) {
+              float val = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
+              ptr_D[out_row * stride_out + n_global] = static_cast<ElementOutput>(val);
+            }
+            if (n_global + 1 < C_in) {
+              float val1 =
+                  (alpha == 1.0f) ? float(accum(base + 1)) : alpha * float(accum(base + 1));
+              ptr_D[out_row * stride_out + n_global + 1] = static_cast<ElementOutput>(val1);
+            }
           }
         }
       }

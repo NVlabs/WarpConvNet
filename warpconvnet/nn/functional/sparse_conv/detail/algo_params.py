@@ -203,29 +203,63 @@ try:
 except ImportError:
     pass
 
-_AB_PRODUCTION = (
+# F32-accumulator tiles: fp32 accumulation over C_in partial products.
+# Measured rd ~2e-5 against explicit_gemm, constant across C_in (8..256).
+_AB_PRODUCTION_F32ACC = (
     [
-        ("production", {"tile_id": 40}),  # Prod 32x32 F16Acc (fp16 only, C<=48)
-        ("production", {"tile_id": 41}),  # Prod 64x64
-        ("production", {"tile_id": 42}),  # Prod 64x128 F16Acc (fp16 only, C>=128)
-        ("production", {"tile_id": 43}),  # Prod 64x128 3-stage
-        ("production", {"tile_id": 44}),  # Prod 128x64
+        ("production", {"tile_id": 41}),  # 64x64
+        ("production", {"tile_id": 43}),  # 64x128 3-stage
+        ("production", {"tile_id": 44}),  # 128x64
     ]
     if _HAS_PRODUCTION
     else []
 )
 
-# Dgrad via forward kernel (explicit weight transpose, reuses fwd tiles)
-_AB_PRODUCTION_FWD_AS_DGRAD = (
+# F16-accumulator tiles: fp16 accumulation, faster but rd scales with C_in.
+# Measured rd: 1.4e-5 @ C=8, 2.4e-4 @ C=32, 5.3e-4 @ C=128, 7.5e-4 @ C=256 —
+# 10-35x worse than F32Acc tiles at the same shape. Excluded from the
+# auto/trimmed pools because autotune picks them for speed, then the lossy
+# gradient accumulation slows training convergence over many epochs (observed
+# on MinkUNet18 ScanNet AMP training: tile 40 picked for ci>=64 deep layers,
+# loss curve trails v1.7.0 REF by measurable margin). Kept available under
+# WARPCONVNET_AB_ALGO_MODE=all for inference benchmarks where speed dominates.
+_AB_PRODUCTION_F16ACC = (
     [
-        ("production_fwd_as_dgrad", {"tile_id": 40}),
+        ("production", {"tile_id": 40}),  # 32x32 F16Acc
+        ("production", {"tile_id": 42}),  # 64x128 F16Acc
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
+
+# Full production pool (F32Acc + F16Acc). Referenced by _AB_PARAMS_AUTO so
+# that env-var overrides like WARPCONVNET_AB_ALGO_MODE=["production"] can
+# still opt into F16Acc tiles.
+_AB_PRODUCTION = _AB_PRODUCTION_F32ACC + _AB_PRODUCTION_F16ACC
+
+# Dgrad via forward kernel (explicit weight transpose, reuses fwd tiles).
+# Same F32Acc / F16Acc split as forward above — F16Acc tiles gated by mode.
+_AB_PRODUCTION_FWD_AS_DGRAD_F32ACC = (
+    [
         ("production_fwd_as_dgrad", {"tile_id": 41}),
-        ("production_fwd_as_dgrad", {"tile_id": 42}),
         ("production_fwd_as_dgrad", {"tile_id": 43}),
         ("production_fwd_as_dgrad", {"tile_id": 44}),
     ]
     if _HAS_PRODUCTION
     else []
+)
+
+_AB_PRODUCTION_FWD_AS_DGRAD_F16ACC = (
+    [
+        ("production_fwd_as_dgrad", {"tile_id": 40}),
+        ("production_fwd_as_dgrad", {"tile_id": 42}),
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
+
+_AB_PRODUCTION_FWD_AS_DGRAD = (
+    _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC + _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC
 )
 
 _ATB_PRODUCTION = (
@@ -286,7 +320,10 @@ def _get_adaptive_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    _ab_prod = _AB_PRODUCTION
+    # F32Acc only — F16Acc tiles 40/42 would be faster here but their
+    # fp16-accumulated gradients degrade training convergence (see
+    # _AB_PRODUCTION_F16ACC docstring).
+    _ab_prod = _AB_PRODUCTION_F32ACC
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []
@@ -341,7 +378,8 @@ def _get_trimmed_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    _ab_prod = _AB_PRODUCTION
+    # F32Acc only — see note in _get_adaptive_AB_params.
+    _ab_prod = _AB_PRODUCTION_F32ACC
 
     if kernel_volume >= 64:
         params: List[Tuple[str, Dict[str, Any]]] = []

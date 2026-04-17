@@ -403,10 +403,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 kv_bwd,
                 num_in_coords=N_in_bwd,
             )
-        # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose)
-        from .algo_params import _AB_PRODUCTION_FWD_AS_DGRAD
+        # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose).
+        # F32Acc only — F16Acc dgrad tiles degrade gradient precision the same way
+        # forward F16Acc tiles do (see _AB_PRODUCTION_F16ACC).
+        from .algo_params import _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC
 
-        dgrad_adaptive = list(dgrad_adaptive) + list(_AB_PRODUCTION_FWD_AS_DGRAD)
+        dgrad_adaptive = list(dgrad_adaptive) + list(_AB_PRODUCTION_FWD_AS_DGRAD_F32ACC)
         if wgrad_filter == "trimmed":
             wgrad_adaptive = _get_trimmed_AtB_params(
                 C_in_bwd,

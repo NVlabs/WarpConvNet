@@ -6,6 +6,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <cassert>
+
 // clang-format off
 #include "cute/tensor.hpp"
 #include "cute/algorithm/copy.hpp"
@@ -18,6 +20,26 @@
 
 namespace warpconvnet {
 namespace cute_gemm {
+
+// Debug-only entry-gate: in debug builds, block if K exceeds the MaskWords
+// capacity — this is the silent-zero condition from the 2026-04-17 SILENT_ZERO
+// bug (see notes/2026_04_17_SILENT_ZERO_BUG_STORY.md). One thread per launch
+// prints. Zero cost in release builds (compiles to ((void)0)).
+// Guarded because every generated header emits this block; without the guard
+// we'd get redefinition warnings when a .cu includes multiple kernel headers.
+#ifndef WARPGEMM_MW_ASSERT_ENTRY
+#if !defined(NDEBUG)
+#define WARPGEMM_MW_ASSERT_ENTRY(K_runtime_)                                         \
+  do {                                                                               \
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { \
+      assert((K_runtime_) <= int(MaskWords) * 32 &&                                  \
+             "K exceeds MaskWords*32 - kernel will silently skip offsets");          \
+    }                                                                                \
+  } while (0)
+#else
+#define WARPGEMM_MW_ASSERT_ENTRY(K_runtime_) ((void)0)
+#endif
+#endif  // WARPGEMM_MW_ASSERT_ENTRY
 
 // Wgrad kernel: dW[k] = Gather_k(X)^T @ dY_sorted
 // Grid: (C_in_tiles * C_out_tiles, K, split_k)
