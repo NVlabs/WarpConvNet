@@ -6,6 +6,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <cassert>
+
 // clang-format off
 #include "cute/tensor.hpp"
 #include "cute/algorithm/copy.hpp"
@@ -18,6 +20,26 @@
 
 namespace warpconvnet {
 namespace cute_gemm {
+
+// Debug-only entry-gate: in debug builds, block if K exceeds the MaskWords
+// capacity — this is the silent-zero condition from the 2026-04-17 SILENT_ZERO
+// bug (see notes/2026_04_17_SILENT_ZERO_BUG_STORY.md). One thread per launch
+// prints. Zero cost in release builds (compiles to ((void)0)).
+// Guarded because every generated header emits this block; without the guard
+// we'd get redefinition warnings when a .cu includes multiple kernel headers.
+#ifndef WARPGEMM_MW_ASSERT_ENTRY
+#if !defined(NDEBUG)
+#define WARPGEMM_MW_ASSERT_ENTRY(K_runtime_)                                         \
+  do {                                                                               \
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { \
+      assert((K_runtime_) <= int(MaskWords) * 32 &&                                  \
+             "K exceeds MaskWords*32 - kernel will silently skip offsets");          \
+    }                                                                                \
+  } while (0)
+#else
+#define WARPGEMM_MW_ASSERT_ENTRY(K_runtime_) ((void)0)
+#endif
+#endif  // WARPGEMM_MW_ASSERT_ENTRY
 
 // Wgrad kernel: dW[k] = Gather_k(X)^T @ dY_sorted
 // Grid: (C_in_tiles * C_out_tiles, K, split_k)
@@ -216,6 +238,11 @@ struct MaskGemm_wgrad_64x128x32_2s_f32_atomic {
       cute::cp_async_fence();
       cute::cp_async_wait<0>();
       __syncthreads();
+      // Advance past the prolog tile. For strided split-K, this shard's
+      // next tile is split_k away (shard i owns tiles i, i+split_k, i+2*split_k, ...);
+      // plain ++vt would drift into the next shard's territory and
+      // double-count one tile per shard — producing high-correlation but
+      // high-magnitude output (corr ~0.98, rdiff ~0.91 in practice).
       ++vt;
 
       // Main loop (vt already advanced past prolog tile)
