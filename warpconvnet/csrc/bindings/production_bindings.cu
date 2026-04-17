@@ -267,6 +267,38 @@ int launch_scalar_fwd_sab_se_mw(const void *,
                                 int,
                                 cudaStream_t);
 template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_fwd_sa_mw(const void *,
+                            const void *,
+                            void *,
+                            const int *,
+                            const uint32_t *,
+                            const int *,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            float,
+                            int,
+                            int,
+                            cudaStream_t);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_fwd_sb_se_mw(const void *,
+                               const void *,
+                               void *,
+                               const int *,
+                               const uint32_t *,
+                               const int *,
+                               int,
+                               int,
+                               int,
+                               int,
+                               int,
+                               float,
+                               int,
+                               int,
+                               cudaStream_t);
+template <typename ElemIn, typename ElemOut, int MW>
 int launch_scalar_dgrad_sab_se_mw(const void *,
                                   const void *,
                                   void *,
@@ -282,6 +314,38 @@ int launch_scalar_dgrad_sab_se_mw(const void *,
                                   int,
                                   int,
                                   cudaStream_t);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_dgrad_sa_mw(const void *,
+                              const void *,
+                              void *,
+                              const int *,
+                              const uint32_t *,
+                              const int *,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              float,
+                              int,
+                              int,
+                              cudaStream_t);
+template <typename ElemIn, typename ElemOut, int MW>
+int launch_scalar_dgrad_sb_se_mw(const void *,
+                                 const void *,
+                                 void *,
+                                 const int *,
+                                 const uint32_t *,
+                                 const int *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 float,
+                                 int,
+                                 int,
+                                 cudaStream_t);
 
 // fp32 output launch functions
 template <typename ElemIn>
@@ -332,6 +396,106 @@ int launch_production_dgrad_f32out(const void *,
                                    int,
                                    int,
                                    cudaStream_t);
+
+// fp32 output MW>1 launch functions (tiles 80, 81, 82)
+template <typename ElemIn, int MW>
+int launch_production_fwd_f32out_mw(const void *,
+                                    const void *,
+                                    void *,
+                                    const int *,
+                                    const uint32_t *,
+                                    const int *,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    float,
+                                    int,
+                                    int,
+                                    cudaStream_t);
+template <typename ElemIn, int MW>
+int launch_production_fwd_f32out_sb_mw(const void *,
+                                       const void *,
+                                       void *,
+                                       const int *,
+                                       const uint32_t *,
+                                       const int *,
+                                       int,
+                                       int,
+                                       int,
+                                       int,
+                                       int,
+                                       float,
+                                       int,
+                                       int,
+                                       cudaStream_t);
+template <typename ElemIn, int MW>
+int launch_production_dgrad_f32out_mw(const void *,
+                                      const void *,
+                                      void *,
+                                      const int *,
+                                      const uint32_t *,
+                                      const int *,
+                                      int,
+                                      int,
+                                      int,
+                                      int,
+                                      int,
+                                      float,
+                                      int,
+                                      int,
+                                      cudaStream_t);
+
+// Vectorized MW>1 forward launch functions (tiles 42/43/44)
+template <int MW>
+int launch_production_fwd_64x128_f16acc_mw(const void *,
+                                           const void *,
+                                           void *,
+                                           const int *,
+                                           const uint32_t *,
+                                           const int *,
+                                           int,
+                                           int,
+                                           int,
+                                           int,
+                                           int,
+                                           float,
+                                           int,
+                                           int,
+                                           cudaStream_t);
+template <typename ElemIn, int MW>
+int launch_production_fwd_64x128_3s_mw(const void *,
+                                       const void *,
+                                       void *,
+                                       const int *,
+                                       const uint32_t *,
+                                       const int *,
+                                       int,
+                                       int,
+                                       int,
+                                       int,
+                                       int,
+                                       float,
+                                       int,
+                                       int,
+                                       cudaStream_t);
+template <typename ElemIn, int MW>
+int launch_production_fwd_128x64_mw(const void *,
+                                    const void *,
+                                    void *,
+                                    const int *,
+                                    const uint32_t *,
+                                    const int *,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    float,
+                                    int,
+                                    int,
+                                    cudaStream_t);
 
 // Atomic wgrad launch functions
 template <typename ElemIn, typename ElemOut>
@@ -500,66 +664,98 @@ int production_fwd(torch::Tensor input,
   } while (0)
 
   // fp32 output tiles (fp16/bf16 input, f32 output — for non-AMP)
+  // Tile 80 (f32out aligned) and 82 (f32out scalar B) support MW>1 via dispatch.
+#define FWD_F32OUT_MW(In)                                                                       \
+  DISPATCH_MW(                                                                                  \
+      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_f32out<In>(a...); }, \
+                 args),                                                                         \
+      std::apply(                                                                               \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 2>(a...); },  \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 4>(a...); },  \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 8>(a...); },  \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 12>(a...); }, \
+          args))
+
+#define FWD_F32OUT_SB_MW(In)                                                                       \
+  DISPATCH_MW(                                                                                     \
+      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb<In>(a...); }, \
+                 args),                                                                            \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 2>(a...); },  \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 4>(a...); },  \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 8>(a...); },  \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 12>(a...); }, \
+          args))
+
   if (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out ||
       tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out_sb) {
     bool use_sb = (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out_sb);
     if (si == torch::kFloat16) {
       if (use_sb)
-        return std::apply(
-            [](auto &&...a) {
-              return cute_gemm::launch_production_fwd_f32out_sb<cutlass::half_t>(a...);
-            },
-            args);
+        FWD_F32OUT_SB_MW(cutlass::half_t);
       else
-        return std::apply(
-            [](auto &&...a) {
-              return cute_gemm::launch_production_fwd_f32out<cutlass::half_t>(a...);
-            },
-            args);
+        FWD_F32OUT_MW(cutlass::half_t);
     }
 #ifndef DISABLE_BFLOAT16
     if (si == torch::kBFloat16) {
       if (use_sb)
-        return std::apply(
-            [](auto &&...a) {
-              return cute_gemm::launch_production_fwd_f32out_sb<cutlass::bfloat16_t>(a...);
-            },
-            args);
+        FWD_F32OUT_SB_MW(cutlass::bfloat16_t);
       else
-        return std::apply(
-            [](auto &&...a) {
-              return cute_gemm::launch_production_fwd_f32out<cutlass::bfloat16_t>(a...);
-            },
-            args);
+        FWD_F32OUT_MW(cutlass::bfloat16_t);
     }
 #endif
   }
+#undef FWD_F32OUT_MW
+#undef FWD_F32OUT_SB_MW
 
   // Scalar tiles — work with any dtype and any C alignment.
-  // SAB_SE supports MW>1 for K>32; SA/SB_SE are MW=1 only (K>32 not common with partial unalign).
-#define SCALAR_FWD_SAB_SE_MW(In, Out)                                                           \
-  DISPATCH_MW(                                                                                  \
-      std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sab_se, In, Out, a...); }, args),   \
-      std::apply(                                                                               \
-          [](auto &&...a) { return cute_gemm::launch_scalar_fwd_sab_se_mw<In, Out, 2>(a...); }, \
-          args),                                                                                \
-      std::apply(                                                                               \
-          [](auto &&...a) { return cute_gemm::launch_scalar_fwd_sab_se_mw<In, Out, 4>(a...); }, \
-          args),                                                                                \
-      -2 /* MW>4 unsupported for scalar path */,                                                \
-      -2)
+  // SAB_SE / SA / SB_SE all support MW=1,2,4,8,12 via dispatched launchers.
+#define SCALAR_FWD_MW(SUFFIX, In, Out)                                                        \
+  DISPATCH_MW(                                                                                \
+      std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(SUFFIX, In, Out, a...); }, args), \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_scalar_fwd_##SUFFIX##_mw<In, Out, 2>(a...);              \
+          },                                                                                  \
+          args),                                                                              \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_scalar_fwd_##SUFFIX##_mw<In, Out, 4>(a...);              \
+          },                                                                                  \
+          args),                                                                              \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_scalar_fwd_##SUFFIX##_mw<In, Out, 8>(a...);              \
+          },                                                                                  \
+          args),                                                                              \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_scalar_fwd_##SUFFIX##_mw<In, Out, 12>(a...);             \
+          },                                                                                  \
+          args))
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        SCALAR_FWD_SAB_SE_MW(In, Out);
+        SCALAR_FWD_MW(sab_se, In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sa, In, Out, a...); }, args);
+        SCALAR_FWD_MW(sa, In, Out);
       case gemm::MMATile::Prod_Scalar_SB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sb_se, In, Out, a...); },
-                          args);
+        SCALAR_FWD_MW(sb_se, In, Out);
       default:
         break;
     }
@@ -570,21 +766,20 @@ int production_fwd(torch::Tensor input,
     using Out = cutlass::bfloat16_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        SCALAR_FWD_SAB_SE_MW(In, Out);
+        SCALAR_FWD_MW(sab_se, In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sa, In, Out, a...); }, args);
+        SCALAR_FWD_MW(sa, In, Out);
       case gemm::MMATile::Prod_Scalar_SB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_FWD(sb_se, In, Out, a...); },
-                          args);
+        SCALAR_FWD_MW(sb_se, In, Out);
       default:
         break;
     }
   }
 #endif
-#undef SCALAR_FWD_SAB_SE_MW
+#undef SCALAR_FWD_MW
 
   // Vectorized fp16 dispatch (includes F16Accum tiles)
-  // For MW>1 (K>32) with aligned C, the 64x64 flat tile is used via launch_production_fwd_mw.
+  // For MW>1 (K>32) with aligned C, each tile has MW-parameterized launchers.
 #define FWD_64x64_MW(ElemIn)                                                                       \
   DISPATCH_MW(                                                                                     \
       std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile64x64x32, ElemIn, a...); },       \
@@ -599,6 +794,70 @@ int production_fwd(torch::Tensor input,
           [](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 12>(a...); },       \
           args))
 
+#define FWD_64x128_F16ACC_MW_DISP()                                                                \
+  DISPATCH_MW(                                                                                     \
+      std::apply(                                                                                  \
+          [](auto &&...a) {                                                                        \
+            return LAUNCH_FWD(cutlass::half_t, Tile64x128x32_F16Accum, cutlass::half_t, a...);     \
+          },                                                                                       \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<2>(a...); },  \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<4>(a...); },  \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<8>(a...); },  \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<12>(a...); }, \
+          args))
+
+#define FWD_64x128_3S_MW(ElemIn)                                                              \
+  DISPATCH_MW(                                                                                \
+      std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile64x128x32, ElemIn, a...); }, \
+                 args),                                                                       \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 2>(a...);            \
+          },                                                                                  \
+          args),                                                                              \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 4>(a...);            \
+          },                                                                                  \
+          args),                                                                              \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 8>(a...);            \
+          },                                                                                  \
+          args),                                                                              \
+      std::apply(                                                                             \
+          [](auto &&...a) {                                                                   \
+            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 12>(a...);           \
+          },                                                                                  \
+          args))
+
+#define FWD_128x64_MW(ElemIn)                                                                      \
+  DISPATCH_MW(                                                                                     \
+      std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile128x64x32, ElemIn, a...); },      \
+                 args),                                                                            \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 2>(a...); }, \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 4>(a...); }, \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) { return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 8>(a...); }, \
+          args),                                                                                   \
+      std::apply(                                                                                  \
+          [](auto &&...a) {                                                                        \
+            return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 12>(a...);                   \
+          },                                                                                       \
+          args))
+
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
@@ -609,14 +868,11 @@ int production_fwd(torch::Tensor input,
       case gemm::MMATile::Prod_Fwd_64x64x32:
         FWD_64x64_MW(In);
       case gemm::MMATile::Prod_Fwd_64x128x32_F16Acc:
-        return std::apply(
-            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_F16Accum, Out, a...); }, args);
+        FWD_64x128_F16ACC_MW_DISP();
       case gemm::MMATile::Prod_Fwd_64x128x32_3s:
-        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32, Out, a...); },
-                          args);
+        FWD_64x128_3S_MW(In);
       case gemm::MMATile::Prod_Fwd_128x64x32:
-        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile128x64x32, Out, a...); },
-                          args);
+        FWD_128x64_MW(In);
       default:
         break;
     }
@@ -629,17 +885,18 @@ int production_fwd(torch::Tensor input,
       case gemm::MMATile::Prod_Fwd_64x64x32:
         FWD_64x64_MW(In);
       case gemm::MMATile::Prod_Fwd_64x128x32_3s:
-        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32, Out, a...); },
-                          args);
+        FWD_64x128_3S_MW(In);
       case gemm::MMATile::Prod_Fwd_128x64x32:
-        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile128x64x32, Out, a...); },
-                          args);
+        FWD_128x64_MW(In);
       default:
         break;
     }
   }
 #endif
 #undef FWD_64x64_MW
+#undef FWD_64x128_F16ACC_MW_DISP
+#undef FWD_64x128_3S_MW
+#undef FWD_128x64_MW
   TORCH_CHECK(false, "Unsupported tile_id/dtype for production_fwd: tile=", tile_id);
   return -1;
 }
@@ -692,48 +949,67 @@ int production_dgrad(torch::Tensor grad_output,
                               identity_offset,
                               stream);
 
-  // fp32 output dgrad tile
+  // fp32 output dgrad tile (supports MW=1,2,4,8,12)
+#define DGRAD_F32OUT_MW(In)                                                                       \
+  DISPATCH_MW(                                                                                    \
+      std::apply([](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out<In>(a...); }, \
+                 args),                                                                           \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 2>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 4>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 8>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 12>(a...); }, \
+          args))
+
   if (tile == gemm::MMATile::Prod_Dgrad_64x64x32_f32out) {
-    if (si == torch::kFloat16)
-      return std::apply(
-          [](auto &&...a) {
-            return cute_gemm::launch_production_dgrad_f32out<cutlass::half_t>(a...);
-          },
-          args);
+    if (si == torch::kFloat16) DGRAD_F32OUT_MW(cutlass::half_t);
 #ifndef DISABLE_BFLOAT16
-    if (si == torch::kBFloat16)
-      return std::apply(
-          [](auto &&...a) {
-            return cute_gemm::launch_production_dgrad_f32out<cutlass::bfloat16_t>(a...);
-          },
-          args);
+    if (si == torch::kBFloat16) DGRAD_F32OUT_MW(cutlass::bfloat16_t);
 #endif
   }
+#undef DGRAD_F32OUT_MW
 
-  // Scalar dgrad tiles — any dtype, SAB_SE supports MW>1
-#define SCALAR_DGRAD_SAB_SE_MW(In, Out)                                                           \
-  DISPATCH_MW(                                                                                    \
-      std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sab_se, In, Out, a...); }, args),   \
-      std::apply(                                                                                 \
-          [](auto &&...a) { return cute_gemm::launch_scalar_dgrad_sab_se_mw<In, Out, 2>(a...); }, \
-          args),                                                                                  \
-      std::apply(                                                                                 \
-          [](auto &&...a) { return cute_gemm::launch_scalar_dgrad_sab_se_mw<In, Out, 4>(a...); }, \
-          args),                                                                                  \
-      -2 /* MW>4 unsupported for scalar path */,                                                  \
-      -2)
+  // Scalar dgrad tiles — any dtype; SAB_SE / SA / SB_SE all support MW=1,2,4,8,12
+#define SCALAR_DGRAD_MW(SUFFIX, In, Out)                                                        \
+  DISPATCH_MW(                                                                                  \
+      std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(SUFFIX, In, Out, a...); }, args), \
+      std::apply(                                                                               \
+          [](auto &&...a) {                                                                     \
+            return cute_gemm::launch_scalar_dgrad_##SUFFIX##_mw<In, Out, 2>(a...);              \
+          },                                                                                    \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) {                                                                     \
+            return cute_gemm::launch_scalar_dgrad_##SUFFIX##_mw<In, Out, 4>(a...);              \
+          },                                                                                    \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) {                                                                     \
+            return cute_gemm::launch_scalar_dgrad_##SUFFIX##_mw<In, Out, 8>(a...);              \
+          },                                                                                    \
+          args),                                                                                \
+      std::apply(                                                                               \
+          [](auto &&...a) {                                                                     \
+            return cute_gemm::launch_scalar_dgrad_##SUFFIX##_mw<In, Out, 12>(a...);             \
+          },                                                                                    \
+          args))
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        SCALAR_DGRAD_SAB_SE_MW(In, Out);
+        SCALAR_DGRAD_MW(sab_se, In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sa, In, Out, a...); }, args);
+        SCALAR_DGRAD_MW(sa, In, Out);
       case gemm::MMATile::Prod_Scalar_SB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sb_se, In, Out, a...); },
-                          args);
+        SCALAR_DGRAD_MW(sb_se, In, Out);
       default:
         break;
     }
@@ -744,18 +1020,17 @@ int production_dgrad(torch::Tensor grad_output,
     using Out = cutlass::bfloat16_t;
     switch (tile) {
       case gemm::MMATile::Prod_Scalar_SAB_SE:
-        SCALAR_DGRAD_SAB_SE_MW(In, Out);
+        SCALAR_DGRAD_MW(sab_se, In, Out);
       case gemm::MMATile::Prod_Scalar_SA:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sa, In, Out, a...); }, args);
+        SCALAR_DGRAD_MW(sa, In, Out);
       case gemm::MMATile::Prod_Scalar_SB_SE:
-        return std::apply([](auto &&...a) { return LAUNCH_SCALAR_DGRAD(sb_se, In, Out, a...); },
-                          args);
+        SCALAR_DGRAD_MW(sb_se, In, Out);
       default:
         break;
     }
   }
 #endif
-#undef SCALAR_DGRAD_SAB_SE_MW
+#undef SCALAR_DGRAD_MW
 
   // Vectorized dgrad tiles — 64x64 supports MW>1
 #define DGRAD_64x64_MW(ElemIn)                                                                 \
