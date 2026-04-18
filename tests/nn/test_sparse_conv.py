@@ -1005,3 +1005,76 @@ def test_k125_batchnorm_downstream():
     assert (
         std > 0.5
     ).all(), f"BN output per-channel std too low (conv output was near-constant): {std.tolist()}"
+
+
+def _make_voxels_k343(N=4000, C=3, device="cuda"):
+    """Build voxels dense enough for K=343 (7x7x7) to have non-empty pairs."""
+    torch.manual_seed(1234)
+    coords = [(torch.rand(N, 3) * 15).int()]  # 15^3 = 3375 cells, N=4000 keeps density high
+    feats = [torch.randn(N, C)]
+    return Voxels(coords, feats, device=device).unique()
+
+
+@pytest.mark.parametrize("C_in, C_out", [(8, 32), (16, 32)])
+def test_k343_forward_correctness(C_in, C_out):
+    """K=343 (7x7x7, MW=11 rounds to DISPATCH_MW=12) fwd: production matches explicit_gemm.
+
+    MW=12 template instantiation is warpconvnet-side only (warpgemm ships MW<=4);
+    this test is the primary correctness gate for that binding-layer extension.
+    """
+    voxels = _make_voxels_k343(N=4000, C=C_in)
+    torch.manual_seed(42)
+    weight = torch.randn(343, C_in, C_out, device="cuda") * 0.02
+
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        out_e = spatially_sparse_conv(
+            voxels, weight, kernel_size=(7, 7, 7), fwd_algo="explicit_gemm"
+        ).feature_tensor.float()
+        out_p = spatially_sparse_conv(
+            voxels, weight, kernel_size=(7, 7, 7), fwd_algo="production"
+        ).feature_tensor.float()
+
+    per_chan_std = out_p.std(dim=0)
+    assert (per_chan_std > 1e-4).all(), (
+        f"C_in={C_in} C_out={C_out}: production K=343 produced near-constant output "
+        f"per_chan_std={per_chan_std.tolist()}"
+    )
+
+    rdiff = (out_p - out_e).abs().mean() / (out_e.abs().mean() + 1e-8)
+    assert rdiff < 0.02, f"K=343 C_in={C_in} C_out={C_out}: rel_diff={rdiff:.5f}"
+
+
+def test_k343_backward_correctness():
+    """K=343 full fwd+bwd via MW=12 path: production matches explicit_gemm."""
+    C_in, C_out = 8, 32
+    voxels = _make_voxels_k343(N=4000, C=C_in)
+
+    def run(algo):
+        torch.manual_seed(42)
+        feat = voxels.feature_tensor.clone().detach().requires_grad_(True)
+        weight = (
+            (torch.randn(343, C_in, C_out, device="cuda") * 0.02).detach().requires_grad_(True)
+        )
+        v_copy = voxels.replace(batched_features=feat)
+        with torch.amp.autocast("cuda", dtype=torch.float16):
+            out = spatially_sparse_conv(
+                v_copy,
+                weight,
+                kernel_size=(7, 7, 7),
+                fwd_algo=algo,
+                dgrad_algo=algo,
+                wgrad_algo=algo,
+            )
+        out.feature_tensor.sum().backward()
+        return feat.grad.float(), weight.grad.float()
+
+    gi_e, gw_e = run("explicit_gemm")
+    gi_p, gw_p = run("production")
+
+    gi_rdiff = (gi_p - gi_e).abs().mean() / (gi_e.abs().mean() + 1e-8)
+    gw_rdiff = (gw_p - gw_e).abs().mean() / (gw_e.abs().mean() + 1e-8)
+
+    assert not torch.isnan(gi_p).any(), "production K=343 dgrad produced NaN"
+    assert not torch.isnan(gw_p).any(), "production K=343 wgrad produced NaN"
+    assert gi_rdiff < 0.02, f"K=343 dgrad rel_diff={gi_rdiff:.5f}"
+    assert gw_rdiff < 0.02, f"K=343 wgrad rel_diff={gw_rdiff:.5f}"
