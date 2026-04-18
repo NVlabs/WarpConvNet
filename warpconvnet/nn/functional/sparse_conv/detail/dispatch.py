@@ -556,6 +556,13 @@ def _execute_backward(
                         dgrad_tile = 71
                     else:
                         dgrad_tile = 72
+                elif mask_words > 1:
+                    # Native dgrad pipelined tiles (50-57) only have MW=1
+                    # instantiations in warpconvnet bindings. Route MW>1 to
+                    # scalar tile 70 (SAB_SE MW) which supports up to MW=12.
+                    # For better perf at MW>1 aligned shapes, prefer the
+                    # production_fwd_as_dgrad algo in the pool.
+                    dgrad_tile = 70
                 elif use_f32_out_tile:
                     dgrad_tile = 81
                 else:
