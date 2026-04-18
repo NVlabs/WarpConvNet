@@ -355,6 +355,11 @@ private:
                                  int stride_B) const {
     constexpr int n_vecs = tN / kVec;
     constexpr int total_vecs = tK * n_vecs;
+    // Group-conv alignment: cp.async.v4 needs 16-byte aligned source.
+    // Misaligned when groups>1 with per-group C_out not multiple of kVec.
+    bool ptr_B_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)(stride_B * (int)sizeof(ElementInput))) &
+         15u) == 0;
     CUTLASS_PRAGMA_UNROLL
     for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
       int pair_local = idx / n_vecs;

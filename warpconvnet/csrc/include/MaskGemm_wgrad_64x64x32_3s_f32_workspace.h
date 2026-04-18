@@ -45,9 +45,9 @@ namespace cute_gemm {
 // Grid: (C_in_tiles * C_out_tiles, K, split_k)
 // Contraction: over N_out (voxel dimension) in tK-sized chunks
 // Accumulator: f32
-// Epilogue: direct
+// Epilogue: workspace
 template <class TileConfig, typename ElementOutput_ = float>
-struct MaskGemm_wgrad_64x64x32_2s_f32 {
+struct MaskGemm_wgrad_64x64x32_3s_f32_workspace {
   using TileShape = typename TileConfig::TileShape;
   using TiledMma = typename TileConfig::TiledMma;
   using ElementInput = typename TileConfig::ElementInput;
@@ -65,7 +65,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
   static constexpr int tM = cute::size<0>(TileShape{});  // C_in tile
   static constexpr int tN = cute::size<1>(TileShape{});  // C_out tile
   static constexpr int tK = cute::size<2>(TileShape{});  // N_out tile (voxel contraction)
-  static constexpr int NumStages = 2;
+  static constexpr int NumStages = 3;
   static constexpr int NumWarps = MaxThreadsPerBlock / 32;
   static constexpr int kVec = 16 / sizeof(ElementInput);
   static constexpr int kMmaK = cute::size<2>(typename TiledMma::AtomShape_MNK{});
@@ -281,6 +281,12 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
 
       // D layout: [K, G, C_in, C_out] — stride along K = groups * C_in * C_out
       ElementOutput *out_ptr = ptr_D + ((size_t)k_off * groups + group_id) * C_in * C_out;
+
+      if (split_k > 1) {
+        // Workspace: [split_k, K, G, C_in, C_out]
+        out_ptr = ptr_D + ((size_t)split_idx * K * groups + (size_t)k_off * groups + group_id) *
+                              C_in * C_out;
+      }
 
       CUTE_UNROLL
       for (int i = 0; i < size(accum); ++i) {

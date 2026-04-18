@@ -313,6 +313,14 @@ private:
                                  int stride_A) const {
     constexpr int m_vecs = tM / kVec;
     constexpr int total_work = tK * m_vecs;
+    // Group-conv alignment: cp.async.v4 needs 16-byte aligned source.
+    // Misaligned when groups>1 with per-group C_in not multiple of kVec.
+    // Mirrors the ptr_B_aligned guard in _load_B_cached (c1de741); its
+    // absence here was the residual wgrad illegal-address class flagged
+    // in notes/2026_04_18_GROUP_CONV_WGRAD_ILLEGAL_ADDRESS.md.
+    bool ptr_A_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_A) | (uintptr_t)(stride_A * (int)sizeof(ElementInput))) &
+         15u) == 0;
     CUTLASS_PRAGMA_UNROLL
     for (int idx = threadIdx.x; idx < total_work; idx += MaxThreadsPerBlock) {
       int pair_local = idx / m_vecs;
@@ -322,11 +330,27 @@ private:
       int in_row = storage.cached_in_rows[pair_local];
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(m_local, pair_local));
       bool valid = (in_row >= 0) && (in_row < N_in) && (m_global + kVec <= C_in);
-      if (valid) {
+      if (valid && ptr_A_aligned) {
         const void *src = &ptr_A[in_row * stride_A + m_global];
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                      "l"(src),
                      "n"(16));
+      } else if (valid) {
+        // Scalar fallback for misaligned source (group-conv with per-group
+        // C_in * sizeof(half) not multiple of 16B — e.g. C_in_g=20, g_id=1).
+        int4 frag = make_int4(0, 0, 0, 0);
+        const ElementInput *row_ptr = &ptr_A[in_row * stride_A];
+        ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
+        CUTLASS_PRAGMA_UNROLL
+        for (int v = 0; v < kVec; ++v) {
+          int m = m_global + v;
+          if (m < C_in) dst[v] = row_ptr[m];
+        }
+        asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                     "r"(frag.x),
+                     "r"(frag.y),
+                     "r"(frag.z),
+                     "r"(frag.w));
       } else {
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                      "l"(ptr_A),
@@ -346,6 +370,11 @@ private:
                                  int stride_B) const {
     constexpr int n_vecs = tN / kVec;
     constexpr int total_vecs = tK * n_vecs;
+    // Group-conv alignment: cp.async.v4 needs 16-byte aligned source.
+    // Misaligned when groups>1 with per-group C_out not multiple of kVec.
+    bool ptr_B_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)(stride_B * (int)sizeof(ElementInput))) &
+         15u) == 0;
     CUTLASS_PRAGMA_UNROLL
     for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
       int pair_local = idx / n_vecs;
@@ -355,11 +384,27 @@ private:
       int real_row = storage.cached_real_rows[pair_local];
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, pair_local));
       bool valid = (real_row >= 0) && (n_global + kVec <= C_out);
-      if (valid) {
+      if (valid && ptr_B_aligned) {
         const void *src = &ptr_B[real_row * stride_B + n_global];
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                      "l"(src),
                      "n"(16));
+      } else if (valid) {
+        // Scalar fallback for misaligned source (group-conv with per-group
+        // C_out not multiple of kVec elements).
+        int4 frag = make_int4(0, 0, 0, 0);
+        const ElementInput *row_ptr = &ptr_B[real_row * stride_B];
+        ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
+        CUTLASS_PRAGMA_UNROLL
+        for (int v = 0; v < kVec; ++v) {
+          int n = n_global + v;
+          if (n < C_out) dst[v] = row_ptr[n];
+        }
+        asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                     "r"(frag.x),
+                     "r"(frag.y),
+                     "r"(frag.z),
+                     "r"(frag.w));
       } else {
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                      "l"(ptr_B),
