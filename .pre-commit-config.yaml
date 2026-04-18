@@ -130,6 +130,7 @@ repos:
           - mdformat-gfm
           - mdformat-tables
           - mdformat_frontmatter
+          - mdformat-dollarmath
           - linkify-it-py
 
   # word spelling linter

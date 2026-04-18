@@ -1,5 +1,8 @@
 # Troubleshooting
 
+**Created**: 2026-04-15 14:00:00
+**Edited**: 2026-04-18 16:35:57
+
 ## cuBLAS Version Mismatch: `CUBLAS_STATUS_INVALID_VALUE` with fp16/bf16
 
 ## Symptom
@@ -90,3 +93,43 @@ pip install torch --index-url https://download.pytorch.org/whl/cu129
 - **Affected ops**: Any fp16 or bf16 matmul (`torch.matmul`, `torch.mm`, `F.linear`, etc.)
 - **Not affected**: float32 matmul, custom CUTLASS/CuTe kernels (they don't use cuBLAS)
 - **Observed with**: torch 2.10.0+cu128 + system CUDA 12.9, but applies to any version mismatch
+
+## AMP fp16 NaN on Large-Kernel Group Convolutions
+
+## Symptom
+
+Training a network that wraps a large-`K` group convolution (e.g. `kernel_size=7`, `groups=1` with wide channels) under `precision=16-mixed` (AMP fp16) shows:
+
+- Loss value starts at a reasonable number on the first forward pass (~2.2).
+- Gradients overflow on the very first backward pass — `torch.amp.GradScaler` skips the optimizer step.
+- The training loop continues but parameters never update; loss stays pinned at its initial value for many steps.
+
+Switching the same run to `precision=32-true` (fp32) is stable and loss descends normally.
+
+## Root Cause
+
+This is **not** a kernel-dispatch bug. The forward pass produces numerically correct outputs (measured relative error 1.6e-4 vs `explicit_gemm` at `K=343`, `C=16` — correct within fp16 precision).
+
+The issue is that a single kxkxk group convolution with a large kernel and wide fan-in (e.g. `K=343`, `C=16-128`) produces per-output gradient magnitudes that can saturate fp16 during the AMP backward, especially on the very first step before the gradient scaler has had a chance to adapt. This is a general AMP model-recipe problem rather than anything specific to sparse vs dense convolutions.
+
+## Workarounds
+
+Pick whichever works for your recipe:
+
+1. **Train in fp32** — `precision=32-true`. Simplest option if the loss of throughput is acceptable.
+2. **Tighter `GradScaler`** — lower initial scale, longer `growth_interval`, or explicit `init_scale` tuning:
+   ```python
+   scaler = torch.amp.GradScaler("cuda", init_scale=2**10, growth_interval=2000)
+   ```
+3. **Force fp32 compute on the wide group conv only** — autocast-exempt the offending layer:
+   ```python
+   with torch.amp.autocast("cuda", enabled=False):
+       x_fp32 = x.float()
+       x_fp32 = wide_group_conv(x_fp32)
+       x = x_fp32.to(dtype)
+   ```
+4. **Gradient clipping** — add `torch.nn.utils.clip_grad_norm_` before the optimizer step so that overflow-adjacent gradients do not propagate.
+
+## Scope
+
+This affects **very wide per-group fan-in** in fp16 autocast and is not unique to any kernel backend. Narrower kernels (e.g. `K=27` with standard channel widths) train fine under AMP fp16. There is no warpconvnet-side fix planned because the root cause is in the model's gradient magnitudes, not the GEMM kernel.

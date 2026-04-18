@@ -1,120 +1,246 @@
-# Sparse Convolutions
+# Spatially Sparse Convolutions
 
-WarpConvNet implements spatially sparse convolutions on voxel grids using multiple CUDA backends with automatic algorithm selection.
+**Created**: 2026-04-18 17:02:44
+**Edited**: 2026-04-18 17:02:44
 
-## Overview
+WarpConvNet implements **spatially sparse convolutions** on voxel grids. This
+page defines what "spatially sparse" means, gives the mathematical
+formulation, describes convolution variants (standard, group, depthwise),
+and enumerates the three math kernels that make up a training step. The
+per-shape algorithm-selection system is described on its own page
+([Auto-Tuning](./autotune.md)).
 
-WarpConvNet provides two types of sparse convolutions:
+## Spatial, feature, and weight sparsity
 
-- **Regular Sparse Convolution**: General-purpose convolution for feature learning
-- **Depthwise Sparse Convolution**: Channel-wise convolution for efficient feature processing
+"Sparsity" in neural networks is an overloaded term. Three distinct flavors
+show up in 3D work and they have completely different implications:
 
-Both include a **unified auto-tuning system** that benchmarks algorithm candidates at runtime and caches the best configuration per problem shape.
+| Kind                 | What is sparse                                                             | Typical source                                                   | How WarpConvNet handles it                                                         |
+| -------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Spatial sparsity** | Most grid coordinates are empty; only occupied coordinates carry features. | Native to 3D point clouds, LiDAR, voxel grids, occupancy fields. | Primary target. All convolutions on `Voxels` operate only on occupied coordinates. |
+| **Feature sparsity** | Individual feature-channel values are zero (e.g. post-ReLU).               | Activation sparsity, gated MoE, quantization.                    | Orthogonal; not exploited by the conv kernels here.                                |
+| **Weight sparsity**  | Pruned kernel weights are structurally zero.                               | Pruning for model compression.                                   | Orthogonal; compatible but not exploited.                                          |
 
-## Two GEMM Operations
+The distinction between *spatial* and *weight* sparsity (and the motivation
+to study them jointly) is the subject of [1]. This page is about **spatial
+sparsity** — only the first row of that table.
 
-A sparse convolution backward pass decomposes into two mathematically distinct GEMM operations:
+## Mathematical formulation
 
-| Operation             | Math                          | Used By        | Cache Namespace     |
-| --------------------- | ----------------------------- | -------------- | ------------------- |
-| **AB gather-scatter** | `D[scatter] = A[gather] @ B`  | Forward, dgrad | `AB_gather_scatter` |
-| **AtB gather-gather** | `D = A[gather]^T @ B[gather]` | Wgrad          | `AtB_gather_gather` |
+Let $\mathcal{C}^{\text{in}}, \mathcal{C}^{\text{out}} \subset \mathbb{Z}^D$
+be the input and output coordinate sets on a $D$-dimensional integer grid
+(typically $D = 2$ or $D = 3$). Let $\mathcal{K} \subset \mathbb{Z}^D$ be
+the set of kernel offsets (e.g. the 27 offsets of a $3 \times 3 \times 3$
+kernel in $D = 3$). The **generalized sparse convolution** [2] is:
 
-Forward and dgrad share the same kernel (gather input, dense weight, scatter to output). Wgrad uses a reduction kernel (gather both operands, dense output per offset). Each operation is auto-tuned independently.
+$$
+\mathbf{y}_{\mathbf{u}} = \sum_{\mathbf{i} \in \mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}})} \mathbf{W}_{\mathbf{i}} \, \mathbf{x}_{\mathbf{u} + \mathbf{i}}
+\qquad \text{for } \mathbf{u} \in \mathcal{C}^{\text{out}}
+$$
 
-## Convolution Kernel Backends
+with the active-offset set
 
-### Per-Offset Backends
+$$
+\mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}}) = \{\, \mathbf{i} \in \mathcal{K} : \mathbf{u} + \mathbf{i} \in \mathcal{C}^{\text{in}} \,\}.
+$$
 
-These backends process each kernel offset as a separate GEMM call:
+Here $\mathbf{x}_{\mathbf{u}} \in \mathbb{R}^{C_{\text{in}}}$ and
+$\mathbf{y}_{\mathbf{u}} \in \mathbb{R}^{C_{\text{out}}}$ are per-coordinate
+feature vectors, and $\mathbf{W}_{\mathbf{i}} \in \mathbb{R}^{C_{\text{out}} \times C_{\text{in}}}$
+is the weight matrix associated with kernel offset $\mathbf{i}$.
 
-| Backend                 | Implementation                                                              | Strengths                                                                      |
-| ----------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `explicit_gemm`         | Gather features into a dense buffer, call `torch.mm`, scatter-add results   | Simple, reliable fallback. No CUDA alignment requirements.                     |
-| `implicit_gemm`         | Custom CUDA kernel that fuses gather, GEMM, and scatter-add into one launch | Best at small channels (C \<= 64) where launch overhead matters less.          |
-| `cutlass_implicit_gemm` | CUTLASS fused gather-GEMM-scatter kernel                                    | High throughput at large channels. Auto-pads unaligned channels internally.    |
-| `cute_implicit_gemm`    | CuTe 3.x fused gather-GEMM-scatter kernel                                   | Vectorized A-operand loads (`cp.async`). Competitive at small-medium channels. |
+The cost is proportional to $\sum_{\mathbf{u} \in \mathcal{C}^{\text{out}}} |\mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}})|$
+rather than $|\mathcal{C}^{\text{out}}| \cdot |\mathcal{K}|$, which is the
+entire point of spatial sparsity: work scales with occupied neighbor pairs,
+not with the dense grid volume.
 
-### Fused Multi-Offset Backends
+### How $\mathcal{C}^{\text{out}}$ is chosen
 
-These backends process multiple (or all) kernel offsets in a single launch:
+The output coordinate set is controlled by three flags on
+`SparseConv3d` / `spatially_sparse_conv`: `stride`, `transposed`, and
+`generative`.
 
-| Backend                  | Implementation                                                                         | Strengths                                                                        |
-| ------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch           | Dominant wgrad winner (64%). Amortizes launch overhead at medium-large channels. |
-| `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets                      | Strong at large N with medium-large channels.                                    |
-| `production`             | Mask-based fused kernel — iterates all K offsets per output row using bitmask skipping | **Dominant AB winner (56% fwd, 74% dgrad)**. No atomicAdd. CuTe tensor core MMA. |
+| Regime                    | Flags                         | $\mathcal{C}^{\text{out}}$                                                                                                                        | Notes                                                                           |
+| ------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **stride=1**              | `stride=1`                    | $\mathcal{C}^{\text{out}} = \mathcal{C}^{\text{in}}$                                                                                              | Preserves coordinate set. Pioneered as *submanifold sparse convolution* in [3]. |
+| **Downsampling**          | `stride>1`                    | Downsampled coordinates (one per stride cell).                                                                                                    | Standard pooling/strided convolution.                                           |
+| **Transposed**            | `transposed=True`, `stride>1` | Upsampled coordinates by factor `stride` over $\mathcal{C}^{\text{in}}$.                                                                          | Deconvolution / learned upsampling.                                             |
+| **Generative (stride=1)** | `generative=True`, `stride=1` | $\mathcal{C}^{\text{in}}$ **expanded by the kernel support** — every grid point reachable from any input coordinate via a kernel offset is added. | Densification: the coordinate set *grows*.                                      |
+| **Generative (stride>1)** | `generative=True`, `stride>1` | Stride (or upsample, if `transposed=True`) the input coordinates first, then expand by the kernel support.                                        | Used in generative decoders / diffusion models that produce new occupied cells. |
 
-### How `production` Works
+The stride-1 case — convolving over exactly the occupied coordinates
+without introducing new output sites — was introduced by Graham and
+van der Maaten [3] as *submanifold sparse convolution*. WarpConvNet uses
+the stride-based terminology internally (see `SparseConv3d(stride=1)`) but
+the idea is the one from [3]. The generalized form with arbitrary strides
+and coordinate sets follows Choy, Gwak, Savarese [2].
 
-Unlike per-offset and grouped backends that launch separate work per offset, the mask kernel processes **all K offsets in a single launch**. For each output row:
+**Generative convolution** (`generative=True`) is the only regime that
+**adds** new coordinates rather than reducing or preserving them. For
+each input coordinate $\mathbf{u}$, every grid point $\mathbf{u} + \mathbf{i}$
+for $\mathbf{i} \in \mathcal{K}$ is added to $\mathcal{C}^{\text{out}}$
+(deduplicated). This is the standard tool for occupancy densification
+and generative sparse decoders — outputs can only appear within the
+kernel reach of existing inputs, so successive generative layers
+progressively fill the occupied region.
 
-1. Look up which offsets are active via a bitmask (`pair_mask`)
-2. For each active offset, gather from input and accumulate with the offset's weight
-3. Write output directly — no atomicAdd needed since each output row is exclusive
+```python
+# Generative, stride=1: expand the occupied set by the kernel support.
+# Output has more coordinates than input.
+conv_gen = SparseConv3d(64, 128, kernel_size=3, stride=1, generative=True)
 
-For dgrad, a reverse pair_table is constructed so the same forward kernel can be reused with swapped dimensions, avoiding atomicAdd entirely (~2x speedup over the old atomicAdd dgrad).
-
-## Auto-Tuning System
-
-### How It Works
-
-On the first forward (or backward) pass for a new problem shape, WarpConvNet:
-
-1. Selects a set of **candidate algorithms** based on the convolution dimensions (N, C_in, C_out, K)
-2. Runs each candidate with warmup + timed iterations
-3. Picks the fastest and caches the result keyed by `(log10(N_in), log10(N_out), C_in, C_out, K, dtype, SM)`
-4. Subsequent calls with the same shape hit the cache instantly
-
-Results are persisted to `~/.cache/warpconvnet/benchmark_cache_generic.msgpack` and survive across Python sessions.
-
-### Adaptive Candidate Selection
-
-The candidate set adapts to the problem dimensions. Based on benchmark analysis of 148 configs (SM 8.9, cuBLAS 12.9.1.4):
-
-**AB gather-scatter (forward + dgrad)** — 7-11 candidates:
-
-| N range           | ch \<= 256                   | ch > 256                       |
-| ----------------- | ---------------------------- | ------------------------------ |
-| Small (N \<= 10K) | mask (92-100%)               | cute_grouped (58%), mask (25%) |
-| Medium (10K-100K) | mask (69%), cutlass (27%)    | cutlass_grouped (67%)          |
-| Large (N > 100K)  | mask/cutlass_grouped/cutlass | cutlass (100%)                 |
-
-**AtB gather-gather (wgrad)** — 5-8 candidates:
-
-| N range           | ch \<= 64                                     | ch > 64             |
-| ----------------- | --------------------------------------------- | ------------------- |
-| Small (N \<= 10K) | cute_grouped (57%), implicit_gemm (36%)       | cute_grouped (100%) |
-| Medium (10K-100K) | cute_grouped (57%), explicit_grouped (43%)    | cute_grouped (77%)  |
-| Large (N > 100K)  | cutlass_grouped (57%), explicit_grouped (36%) | cute_grouped (100%) |
-
-### Algorithm Modes
-
-| Mode             |   AB Candidates | AtB Candidates | Use Case                                      |
-| ---------------- | --------------: | -------------: | --------------------------------------------- |
-| `auto` (default) | 7-11 (adaptive) | 5-8 (adaptive) | Normal usage. Covers all winning algorithms.  |
-| `trimmed`        |              11 |             27 | Broader search, excludes known dead-weight.   |
-| `all`            |              23 |             35 | Exhaustive. For benchmarking or new hardware. |
-
-```bash
-# Default: adaptive reduced set (recommended)
-export WARPCONVNET_FWD_ALGO_MODE=auto
-
-# Exhaustive: benchmark every algorithm variant
-export WARPCONVNET_FWD_ALGO_MODE=all
-
-# Specific algorithm (no benchmarking, just use it)
-export WARPCONVNET_FWD_ALGO_MODE=production
-
-# Algorithm list (benchmark only these)
-export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
+# Generative, transposed, stride=2: upsample input by 2x, then expand.
+# Used in the decoder side of a sparse U-Net for generative tasks.
+up_gen = SparseConv3d(64, 128, kernel_size=3, stride=2,
+                      transposed=True, generative=True)
 ```
 
-The same options apply to `WARPCONVNET_BWD_ALGO_MODE` (controls wgrad AtB algorithm).
+## Convolution variants
+
+### Standard convolution
+
+The default. `SparseConv3d(C_in, C_out, kernel_size=K, stride=s)` with
+weight tensor $\mathbf{W} \in \mathbb{R}^{K \times C_{\text{in}} \times C_{\text{out}}}$
+implements the equation above exactly.
+
+```python
+from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+
+# stride=1, preserves C_out = C_in coordinate set (the stride-1 regime above)
+conv = SparseConv3d(64, 128, kernel_size=3, stride=1)
+
+# stride=2, downsampling convolution
+down = SparseConv3d(64, 128, kernel_size=3, stride=2)
+```
+
+### Group convolution
+
+Partitions input and output channels into $G$ groups, each processed
+independently. The weight tensor is reshaped to $\mathbf{W} \in \mathbb{R}^{K \times G \times C_{\text{in}}/G \times C_{\text{out}}/G}$
+and the sum in the equation above is restricted per-group: group $g$ of
+the output attends only to group $g$ of the input. Compute and parameter
+count both drop by $G$; spatial connectivity (the coordinate set and
+kernel support) is unchanged.
+
+```python
+# G=4: weight is [27, 4, 16, 32]
+conv_g4 = SparseConv3d(64, 128, kernel_size=3, groups=4)
+```
+
+**Constraints:**
+
+- `C_in` and `C_out` must be divisible by `groups`.
+- Forward / dgrad pad per-group channel counts up to a multiple of
+  `kVec=8` internally. Per-group C >= 8 for vectorized fp16 loads.
+- Wgrad requires per-group channel counts to be **exactly** divisible by
+  `kVec=8` (no padding fallback). Pick per-group C as a multiple of 8.
+- Kernel-map state (pair_table, pair_mask) is spatial and is built once
+  per layer call, then reused across groups.
+
+**Tested matrix** (RTX 6000 Ada, SM 8.9, AMP fp16, WideGroupUNet smoke):
+forward + backward correctness validated end-to-end for
+
+- `kernel_size` ∈ {3, 5, 7}
+- `groups` ∈ {1, 2, 4}
+
+spanning all 9 combinations. `kernel_size=7` exercises the $K=343$ /
+`mask_words=12` dispatch path end-to-end.
+
+### Depthwise convolution
+
+Group convolution with $G = C_{\text{in}} = C_{\text{out}}$. Weight tensor
+is $\mathbf{W} \in \mathbb{R}^{K \times C \times 1 \times 1}$; each channel
+is convolved independently.
+
+```python
+# Depthwise: each of 64 channels convolved independently
+conv_dw = SparseConv3d(64, 64, kernel_size=3, groups=64)
+```
+
+A dedicated depthwise path lives under
+`warpconvnet.nn.functional.spatially_sparse_depthwise_conv` with its own
+algorithm modes (`WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` /
+`WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE`).
+
+## Three math kernels per layer
+
+A complete training step through one spatially sparse convolution layer
+requires **three mathematically distinct GEMM operations**:
+
+| Pass                                            | Math                                           | WarpConvNet GEMM class | Cache namespace     |
+| ----------------------------------------------- | ---------------------------------------------- | ---------------------- | ------------------- |
+| Forward                                         | $\mathbf{Y} = \mathbf{A},\mathbf{W}$           | **AB** gather-scatter  | `AB_gather_scatter` |
+| Backward $\partial/\partial \mathbf{X}$ (dgrad) | $\mathbf{dX} = \mathbf{dY},\mathbf{W}^{!\top}$ | **AB** gather-scatter  | `AB_gather_scatter` |
+| Backward $\partial/\partial \mathbf{W}$ (wgrad) | $\mathbf{dW} = \mathbf{A}^{!\top},\mathbf{dY}$ | **AtB** gather-gather  | `AtB_gather_gather` |
+
+- **AB gather-scatter**: gather rows of $\mathbf{A}$ by the input-side
+  kernel map, multiply by the dense per-offset weight matrix $\mathbf{W}$,
+  scatter-add into the output buffer. Forward and dgrad share the same
+  kernel class with the roles of source/target swapped (warpconvnet builds
+  a reverse pair_table so the forward-path mask kernel can run dgrad with
+  no atomics). Each output row is written by a single thread block → no
+  atomicAdd needed.
+- **AtB gather-gather**: gather rows of both operands by the input and
+  output kernel maps, compute a reduction of outer products into the
+  per-offset weight-gradient buffer. No scatter step; one dense output
+  tile per kernel offset. Shape and reuse pattern are different enough
+  from AB that the optimal algorithm differs per shape.
+
+This split matters because **the three ops need three independent
+autotune searches**: there is no single algorithm that wins for all of
+forward, dgrad, and wgrad simultaneously, and the AtB gather-gather
+pattern has different arithmetic intensity from AB gather-scatter even at
+the same $(N, C_{\text{in}}, C_{\text{out}}, K)$ shape.
+
+## Algorithms (overview)
+
+Each math kernel class above has multiple CUDA backend implementations.
+A short taxonomy:
+
+### AB backends (forward + dgrad)
+
+| Backend                  | Implementation                                                                          | Strengths                                                               |
+| ------------------------ | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `explicit_gemm`          | Gather to dense buffer, `torch.mm`, scatter-add.                                        | Reliable fallback. No alignment requirements.                           |
+| `implicit_gemm`          | Fused CUDA kernel; SIMT gather + GEMM + scatter-add in one launch.                      | Small channels (C ≤ 64).                                                |
+| `cutlass_implicit_gemm`  | CUTLASS fused gather-GEMM-scatter.                                                      | Tensor-core throughput at large channels. Auto-pads unaligned channels. |
+| `cute_implicit_gemm`     | CuTe 3.x fused kernel with `cp.async` vectorized A-loads.                               | Competitive at small-medium channels.                                   |
+| `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch.           | Small-N medium-channel; winner for C > 256 at small N.                  |
+| `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets.                      | Strong at large N + medium-large channels.                              |
+| `production`             | Mask-based fused kernel — iterates all $K$ offsets per output row via bitmask skipping. | Dominant AB winner on most shapes. No atomicAdd. CuTe tensor core MMA.  |
+
+### AtB backends (wgrad)
+
+Same name list as above, but implementing the
+$\mathbf{A}^{!\top},\mathbf{dY}$ gather-gather pattern. `cute_grouped`
+wins the majority of wgrad shapes empirically.
+
+### How `production` works
+
+Unlike per-offset and grouped backends that launch separate work per
+offset, the `production` kernel processes **all K offsets in a single
+launch**. For each output row:
+
+1. Look up which offsets are active via a bitmask (`pair_mask`).
+2. For each active offset, gather from input and accumulate with the
+   offset's weight.
+3. Write output directly — no atomicAdd needed since each output row is
+   exclusive.
+
+For dgrad, a reverse pair_table is constructed so the same forward
+kernel can be reused with swapped dimensions, avoiding atomicAdd entirely
+(~2x speedup over the old atomicAdd dgrad).
+
+### Picking an algorithm
+
+Empirically, no single backend wins across all shapes. Picking by hand is
+infeasible. **WarpConvNet auto-tunes per problem shape** — see the
+[Auto-Tuning](./autotune.md) page for candidate selection, modes,
+environment variables, and how to specify algorithms explicitly.
 
 ## Usage
 
-### Basic Usage
+### Basic
 
 ```python
 from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
@@ -128,7 +254,7 @@ conv = SpatiallySparseConv(
 output = conv(input_voxels)
 ```
 
-### Functional API
+### Functional
 
 ```python
 from warpconvnet.nn.functional import spatially_sparse_conv
@@ -140,29 +266,7 @@ output = spatially_sparse_conv(
 )
 ```
 
-### Specifying Algorithms
-
-Forward, dgrad, and wgrad can each be controlled independently:
-
-```python
-# Different algorithms for each operation
-output = spatially_sparse_conv(
-    input_voxels, weight, kernel_size=3,
-    fwd_algo="production",       # AB gather-scatter for forward
-    dgrad_algo="production",     # AB gather-scatter for dgrad
-    wgrad_algo="cute_grouped",           # AtB gather-gather for wgrad
-)
-
-# Algorithm list -- benchmarks only these
-output = spatially_sparse_conv(
-    input_voxels, weight, kernel_size=3,
-    fwd_algo=["production", "cutlass_implicit_gemm"],
-    dgrad_algo=["production", "cute_grouped"],
-    wgrad_algo=["cute_grouped", "cutlass_grouped_hybrid"],
-)
-```
-
-### Depthwise Convolution
+### Depthwise
 
 ```python
 from warpconvnet.nn.functional import spatially_sparse_depthwise_conv
@@ -175,123 +279,42 @@ output = spatially_sparse_depthwise_conv(
 )
 ```
 
-Depthwise convolution has its own algorithm modes (`explicit_gemm`, `implicit_gemm`, `auto`) controlled by:
+For algorithm control (`fwd_algo`, `dgrad_algo`, `wgrad_algo`), env
+variables, and the strict algorithm-name filter, see
+[Auto-Tuning](./autotune.md).
 
-```bash
-export WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE=auto
-export WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE=auto
-```
+## See also
 
-### Group Convolution
+- [Auto-Tuning](./autotune.md) — per-shape algorithm selection, caching,
+  env variables.
+- [Accumulator Precision](./accumulator_precision.md) — fp32 vs fp16
+  accumulator in the mask GEMM.
+- [Adaptive GEMM Grouping](./adaptive_gemm_grouping.md) — how small
+  kernel offsets are batched into grouped GEMMs.
+- [Inspect Benchmark Cache](./inspect_benchmark_cache.md) — dump cached
+  autotune results.
+- [Pre-Populate Benchmark Cache](./populate_benchmark_cache.md) — fill
+  the cache ahead of production workloads.
 
-Group convolution partitions input and output channels into `G` groups, each processed independently. This reduces parameters and compute by a factor of `G` while maintaining spatial connectivity.
+## Source files
 
-```python
-from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+| File                                                              | Contents                                                           |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `warpconvnet/nn/functional/sparse_conv/detail/unified.py`         | Top-level dispatch, config construction.                           |
+| `warpconvnet/nn/functional/sparse_conv/detail/algo_params.py`     | Adaptive candidate selection, algorithm enums, F16Acc pool gating. |
+| `warpconvnet/nn/functional/sparse_conv/detail/autotune.py`        | Benchmark runners, cache init/merge.                               |
+| `warpconvnet/nn/functional/sparse_conv/detail/dispatch.py`        | Algorithm execution dispatch.                                      |
+| `warpconvnet/nn/functional/sparse_conv/detail/mask_gemm.py`       | Mask-based fused kernel dispatch, reverse pair_table.              |
+| `warpconvnet/nn/functional/sparse_conv/detail/cute_grouped.py`    | CuTe grouped GEMM (AB + AtB).                                      |
+| `warpconvnet/nn/functional/sparse_conv/detail/cutlass.py`         | CUTLASS per-offset gather-scatter.                                 |
+| `warpconvnet/nn/functional/sparse_conv/detail/explicit.py`        | Explicit GEMM via cuBLAS.                                          |
+| `warpconvnet/nn/functional/sparse_conv/detail/implicit_direct.py` | SIMT implicit GEMM.                                                |
+| `warpconvnet/utils/benchmark_cache.py`                            | Generic benchmark cache with persistence.                          |
+| `warpconvnet/constants.py`                                        | Environment variable parsing.                                      |
 
-# Standard convolution: weight [K, C_in, C_out]
-conv = SparseConv3d(64, 128, kernel_size=3)
+## References
 
-# Group convolution (G=4): weight [K, G, C_in/G, C_out/G] = [27, 4, 16, 32]
-conv_g4 = SparseConv3d(64, 128, kernel_size=3, groups=4)
-
-# Depthwise-separable via groups=C_in (each channel independent)
-conv_dw = SparseConv3d(64, 64, kernel_size=3, groups=64)  # weight [27, 64, 1, 1]
-```
-
-**Requirements:**
-
-- `in_channels` and `out_channels` must be divisible by `groups`
-- Per-group channels must be >= 8 (minimum for fp16 vectorized loads)
-- Uses production kernel backend (auto-selected when algo is `auto` or `production`)
-- Mask data (pair_table, pair_mask) is spatial and shared across all groups
-
-**How it works:** For each group `g`, the dispatch slices the input features `[:, g*C_in_g:(g+1)*C_in_g]` and weight `[K, g]`, runs the production kernel with per-group contiguous data, and concatenates outputs. The kernel map computation is done once and reused across groups since group convolution only affects channels, not spatial connectivity.
-
-## Environment Variables
-
-### Algorithm Selection
-
-```bash
-# AB gather-scatter algorithm for forward and dgrad (default: auto)
-export WARPCONVNET_FWD_ALGO_MODE=auto
-
-# AtB gather-gather algorithm for wgrad (default: auto)
-export WARPCONVNET_BWD_ALGO_MODE=auto
-```
-
-Accepted values: `auto`, `all`, `trimmed`, any single algorithm name, or a bracket list like `[algo1,algo2]`.
-
-Valid algorithm names: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`, `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`, `production`.
-
-### Cache and Logging
-
-```bash
-# Cache directory (default: ~/.cache/warpconvnet)
-export WARPCONVNET_BENCHMARK_CACHE_DIR=~/.cache/warpconvnet
-
-# Suppress auto-tuning logs (default: true)
-export WARPCONVNET_AUTOTUNE_LOG=false
-```
-
-### Inspecting the Cache
-
-Use `scripts/inspect_benchmark_cache.py` to view cached results:
-
-```bash
-python scripts/inspect_benchmark_cache.py
-python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter --best-only
-```
-
-Use `scripts/analyze_autotune_cache.py` to generate statistical analysis of algorithm win rates:
-
-```bash
-python scripts/analyze_autotune_cache.py --markdown --output analysis.md
-```
-
-See [Inspecting the Benchmark Cache](./inspect_benchmark_cache.md) for details.
-
-## Performance Characteristics
-
-### When Each Backend Wins
-
-Based on empirical analysis on RTX 6000 Ada with cuBLAS 12.9.1.4:
-
-| Condition                  | Best AB Backend         | Best AtB Backend                      |
-| -------------------------- | ----------------------- | ------------------------------------- |
-| ch \<= 256, any N          | `production`            | `cute_grouped`                        |
-| ch > 256, small N          | `cute_grouped`          | `cute_grouped`                        |
-| ch > 256, large N          | `cutlass_implicit_gemm` | `cute_grouped`                        |
-| ch \<= 64, small N (wgrad) | —                       | `implicit_gemm` or `explicit_grouped` |
-
-## Troubleshooting
-
-**Slow first run**: Normal — auto-tuning benchmarks candidates. Subsequent runs use the cache. Use `auto` mode (not `all`) to minimize tuning time. To skip auto-tuning entirely, [pre-populate the cache](./populate_benchmark_cache.md) before your first run.
-
-**Clear cache when switching GPUs**:
-
-```bash
-rm -rf ~/.cache/warpconvnet/
-```
-
-**CUTLASS not available**: Some backends require specific GPU compute capability. Fall back to:
-
-```bash
-export WARPCONVNET_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm,production]"
-```
-
-## Source Files
-
-| File                                                              | Contents                                             |
-| ----------------------------------------------------------------- | ---------------------------------------------------- |
-| `warpconvnet/nn/functional/sparse_conv/detail/unified.py`         | Auto-tuning dispatch, config construction            |
-| `warpconvnet/nn/functional/sparse_conv/detail/algo_params.py`     | Adaptive candidate selection, algorithm enums        |
-| `warpconvnet/nn/functional/sparse_conv/detail/autotune.py`        | Benchmark runners, cache init/merge                  |
-| `warpconvnet/nn/functional/sparse_conv/detail/dispatch.py`        | Algorithm execution dispatch                         |
-| `warpconvnet/nn/functional/sparse_conv/detail/mask_gemm.py`       | Mask-based fused kernel dispatch, reverse pair_table |
-| `warpconvnet/nn/functional/sparse_conv/detail/cute_grouped.py`    | CuTe grouped GEMM (AB + TrAB)                        |
-| `warpconvnet/nn/functional/sparse_conv/detail/cutlass.py`         | CUTLASS per-offset gather-scatter                    |
-| `warpconvnet/nn/functional/sparse_conv/detail/explicit.py`        | Explicit GEMM via cuBLAS                             |
-| `warpconvnet/nn/functional/sparse_conv/detail/implicit_direct.py` | SIMT implicit GEMM                                   |
-| `warpconvnet/utils/benchmark_cache.py`                            | Generic benchmark cache with persistence             |
-| `warpconvnet/constants.py`                                        | Environment variable parsing                         |
+1. Lee, J., Choy, C., Park, J. *Putting 3D Spatially Sparse Networks on a Diet.* arXiv:2112.01316, 2021. [[arxiv]](https://arxiv.org/abs/2112.01316)
+2. Choy, C., Gwak, J., Savarese, S. *4D Spatio-Temporal ConvNets: Minkowski Convolutional Neural Networks.* CVPR 2019. arXiv:1904.08755. [[arxiv]](https://arxiv.org/abs/1904.08755)
+3. Graham, B., van der Maaten, L. *Submanifold Sparse Convolutional Networks.* arXiv:1706.01307, 2017. [[arxiv]](https://arxiv.org/abs/1706.01307)
+   See also Graham, Engelcke, van der Maaten. *3D Semantic Segmentation with Submanifold Sparse Convolutional Networks.* CVPR 2018. arXiv:1711.10275. [[arxiv]](https://arxiv.org/abs/1711.10275)
