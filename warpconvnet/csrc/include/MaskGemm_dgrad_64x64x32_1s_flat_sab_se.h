@@ -757,12 +757,20 @@ private:
       int row_in_iter = threadIdx.x / COLS_PER_THREAD;
       int col_start = col_group * VEC;
 
+      // Group-conv alignment: uint64 stores need 8-byte alignment of the
+      // target. ptr_D = ptr_D_base + group_id * C_per_group; if that shift
+      // (plus stride_out*2) isn't 8-byte aligned, uint64 stores misalign.
+      // Fall back to scalar writes in that case.
+      bool epi_aligned = ((reinterpret_cast<uintptr_t>(ptr_D) |
+                           (uintptr_t)(stride_out * (int)sizeof(ElementOutput))) &
+                          7u) == 0;
+
 #pragma unroll
       for (int iter = 0; iter < tM; iter += ROWS_PER_ITER) {
         int row = iter + row_in_iter;
         if (row < tM) {
           int sorted_row = m_start + row;
-          if (sorted_row < N_in && col_start + n_start + VEC <= C_in) {
+          if (sorted_row < N_in && col_start + n_start + VEC <= C_in && epi_aligned) {
             int out_row = mask_argsort[sorted_row];
             uint64_t packed;
             memcpy(&packed, &epi_smem[row * EPL_STRIDE + col_start], sizeof(uint64_t));
@@ -783,9 +791,10 @@ private:
       }
     } else if constexpr (sizeof(ElementOutput) == 2) {
       // Direct half2 epilogue (no smem staging — lower overhead for small tiles).
-      // Half2 stores require 4-byte alignment: both the column index (n_global)
-      // and the row stride (stride_out) must be even. Otherwise the second row's
-      // starting byte is not 4-byte aligned, so we fall back to scalar writes.
+      // Half2 stores require 4-byte alignment: ptr_D (after per-group shift),
+      // the column index (n_global), and the row stride (stride_out) must all
+      // yield 4-byte-aligned target addresses.
+      bool ptr_D_aligned = (reinterpret_cast<uintptr_t>(ptr_D) & 3u) == 0;
       bool stride_aligned = (stride_out & 1) == 0;
       CUTE_UNROLL
       for (int frag = 0; frag < size(accum); frag += 4) {
@@ -795,7 +804,8 @@ private:
           auto coord = tCrC(base);
           int sorted_row = m_start + get<0>(coord);
           int n_global = n_start + get<1>(coord);
-          if (sorted_row < N_in && n_global + 1 < C_in && stride_aligned && ((n_global & 1) == 0)) {
+          if (sorted_row < N_in && n_global + 1 < C_in && stride_aligned && ptr_D_aligned &&
+              ((n_global & 1) == 0)) {
             int out_row = mask_argsort[sorted_row];
             float v0 = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
             float v1 = (alpha == 1.0f) ? float(accum(base + 1)) : alpha * float(accum(base + 1));

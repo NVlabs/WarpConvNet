@@ -480,14 +480,14 @@ private:
                                        SmemTensor smem_tile,
                                        int k_start,
                                        int C_in,
-                                       int /*stride_A*/ = 0) const {
-    _load_A_kblock<SmemTensor, 0>(ptr_A, state, smem_tile, k_start, C_in);
+                                       int stride_A = 0) const {
+    _load_A_kblock<SmemTensor, 0>(ptr_A, state, smem_tile, k_start, C_in, stride_A);
     if constexpr (K_BLOCK_MAX_STATIC > 1)
-      _load_A_kblock<SmemTensor, 1>(ptr_A, state, smem_tile, k_start, C_in);
+      _load_A_kblock<SmemTensor, 1>(ptr_A, state, smem_tile, k_start, C_in, stride_A);
     if constexpr (K_BLOCK_MAX_STATIC > 2)
-      _load_A_kblock<SmemTensor, 2>(ptr_A, state, smem_tile, k_start, C_in);
+      _load_A_kblock<SmemTensor, 2>(ptr_A, state, smem_tile, k_start, C_in, stride_A);
     if constexpr (K_BLOCK_MAX_STATIC > 3)
-      _load_A_kblock<SmemTensor, 3>(ptr_A, state, smem_tile, k_start, C_in);
+      _load_A_kblock<SmemTensor, 3>(ptr_A, state, smem_tile, k_start, C_in, stride_A);
   }
 
   /// Per-kblock A load with pre-computed thread positions.
@@ -498,9 +498,14 @@ private:
                                  SmemTensor smem_tile,
                                  int k_start,
                                  int C_in,
-                                 int /*stride_A*/ = 0) const {
+                                 int stride_A = 0) const {
     const char *base_ptr = reinterpret_cast<const char *>(ptr_A);
     int k_start_bytes = k_start * sizeof(ElementInput);
+    // Group-conv alignment: cp.async.v4 needs 16-byte aligned source.
+    // Misaligned when groups>1 AND per-group C not multiple of kVec.
+    int stride_bytes = (stride_A ? stride_A : C_in) * (int)sizeof(ElementInput);
+    bool ptr_A_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_A) | (uintptr_t)stride_bytes) & 15u) == 0;
     constexpr int iters_per_kb = (kItersPerThread + K_BLOCK_MAX_STATIC - 1) / K_BLOCK_MAX_STATIC;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < iters_per_kb; ++i) {
@@ -511,15 +516,17 @@ private:
         int k_global = k_start + k_local;
         uint32_t sa = cute::cast_smem_ptr_to_uint(&smem_tile(m, k_local));
         bool k_full = (k_global + kVec <= C_in);
-        if (state.valid[r] && k_full) {
+        if (state.valid[r] && k_full && ptr_A_aligned) {
           const void *src =
               base_ptr + state.gmem_byte_offsets[r] + k_start_bytes + state.k_byte_offset[r];
           asm volatile(
               "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(sa), "l"(src), "n"(16));
         } else {
-          // Scalar fallback for invalid row OR C_in < kVec OR k-tail.
+          // Scalar fallback for invalid row OR C_in < kVec OR k-tail OR
+          // misaligned (group_id * C_in not multiple of kVec elements).
           // Mirrors _load_A_identity (generate_fwd.py). Fixes the
-          // silent-zero class that bit tile 42 at C_in=3.
+          // silent-zero class that bit tile 42 at C_in=3, and the group-conv
+          // misalignment class when groups>1.
           int4 frag = make_int4(0, 0, 0, 0);
           if (state.valid[r]) {
             const ElementInput *row_ptr =
@@ -565,6 +572,12 @@ private:
     int inc_strided_bytes = n_stride * sizeof(ElementInput);
 
     const char *gptr = reinterpret_cast<const char *>(&ptr_Bk[k_global * C_out + n_global]);
+    // Group-conv alignment: cp.async.v4 needs 16-byte source. Misaligned when
+    // ptr_Bk or C_out * sizeof(half) isn't 16-byte aligned (e.g. groups>1
+    // with per-group C_out not multiple of kVec).
+    bool b_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_Bk) | (uintptr_t)(C_out * (int)sizeof(ElementInput))) &
+         15u) == 0;
 
     CUTLASS_PRAGMA_UNROLL
     for (int s = 0; s < num_iters; ++s) {
@@ -573,15 +586,32 @@ private:
       bool ok =
           (n_cur + kVec <= n_start + tN) && (n_cur + kVec <= C_out) && (k_global + kVec <= C_in);
 
-      if (ok) {
+      if (ok && b_aligned) {
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(sa),
                      "l"(gptr + s * inc_strided_bytes),
                      "n"(16));
-      } else {
+      } else if (b_aligned) {
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(sa),
                      "l"(gptr),
                      "n"(16),
                      "r"(0));
+      } else {
+        // Scalar fallback for misaligned source.
+        int4 frag = make_int4(0, 0, 0, 0);
+        if ((n_cur < C_out) && (k_global < C_in)) {
+          const ElementInput *row_ptr = &ptr_Bk[k_global * C_out];
+          ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < kVec; ++v) {
+            int n = n_cur + v;
+            if (n < C_out) dst[v] = row_ptr[n];
+          }
+        }
+        asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(sa),
+                     "r"(frag.x),
+                     "r"(frag.y),
+                     "r"(frag.z),
+                     "r"(frag.w));
       }
     }
   }
@@ -600,7 +630,13 @@ private:
                                bool n_full_tile) const {
     using namespace cute;
     bool k_full_tile = (k_start + tK <= C_in);
-    if (n_full_tile && k_full_tile && sizeof(ElementInput) <= 2) {
+    // Group-conv alignment for cp.async.v4: need ptr_Bk and C_out * sizeof(half)
+    // both 16-byte aligned, otherwise &ptr_Bk[k*C_out + n] is misaligned.
+    // Fall back to scalar B load when any group shift breaks alignment.
+    bool b_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_Bk) | (uintptr_t)(C_out * (int)sizeof(ElementInput))) &
+         15u) == 0;
+    if (n_full_tile && k_full_tile && sizeof(ElementInput) <= 2 && b_aligned) {
       // Full tile: use CuTe TiledCopy (fp16/bf16 only — fp32 uses cpasync fallback)
       Tensor gB_tile = make_tensor(make_gmem_ptr(ptr_Bk + n_start + k_start * C_out),
                                    make_shape(Int<tN>{}, Int<tK>{}),
@@ -611,9 +647,10 @@ private:
       for (int k = 0; k < size<2>(thr_src_B); ++k) {
         copy(GmemTiledCopyB{}, thr_src_B(_, _, k), thr_dst_B(_, _, k));
       }
-    } else {
-      // Partial tile: use per-element cp.async with explicit bounds checking.
-      // Write 16B (kVec elements) per thread along the N-contiguous dimension.
+    } else if (b_aligned) {
+      // Partial tile but 16B-aligned source: use per-element cp.async with
+      // src_bytes bounds. cp.async still requires 16B source alignment even
+      // when src_bytes<16, so this branch is valid only when b_aligned.
       static_assert(tN % kVec == 0);
       constexpr int n_vecs = tN / kVec;
       constexpr int total_vecs = tK * n_vecs;
@@ -642,6 +679,37 @@ private:
                        "n"(16),
                        "r"(0));
         }
+      }
+    } else {
+      // Misaligned source (group-conv with per-group C % kVec != 0):
+      // per-element ld.global + st.shared.v4. No alignment requirement.
+      // Mirrors dense_b_transposed fallback and gathered_a_* scalar paths.
+      static_assert(tN % kVec == 0);
+      constexpr int n_vecs = tN / kVec;
+      constexpr int total_vecs = tK * n_vecs;
+      CUTLASS_PRAGMA_UNROLL
+      for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
+        int k_local = idx / n_vecs;
+        int nv = idx % n_vecs;
+        int n_local = nv * kVec;
+        int n_global = n_start + n_local;
+        int k_global = k_start + k_local;
+        uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_stage(n_local, k_local));
+        int4 frag = make_int4(0, 0, 0, 0);
+        if (k_global < C_in) {
+          const ElementInput *row_ptr = &ptr_Bk[k_global * C_out];
+          ElementInput *dst = reinterpret_cast<ElementInput *>(&frag);
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < kVec; ++v) {
+            int n = n_global + v;
+            if (n < C_out) dst[v] = row_ptr[n];
+          }
+        }
+        asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                     "r"(frag.x),
+                     "r"(frag.y),
+                     "r"(frag.z),
+                     "r"(frag.w));
       }
     }
   }
@@ -883,6 +951,11 @@ private:
     }
     // Simplified: reuse the exact same iteration as gathered_a but with in_row = real_rows[m]
     {
+      // Group-conv alignment: cp.async.v4 needs 16-byte aligned source.
+      // Misaligned when groups>1 AND per-group C_in not multiple of kVec.
+      int _stride_bytes = stride_A * (int)sizeof(ElementInput);
+      bool ptr_A_aligned =
+          ((reinterpret_cast<uintptr_t>(ptr_A) | (uintptr_t)_stride_bytes) & 15u) == 0;
       constexpr int kItersPerThread =
           (tK / kVec * tM + MaxThreadsPerBlock - 1) / MaxThreadsPerBlock;
       CUTLASS_PRAGMA_UNROLL
@@ -896,9 +969,10 @@ private:
         int in_row = real_rows[pair_local];
         uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(pair_local, k_local));
         // Vectorized fast path needs C_in >= kVec AND (k_global + kVec) <= C_in.
-        // Unaligned tail or C_in < kVec: per-element scalar load with bounds check.
+        // Unaligned tail, C_in < kVec, or group-conv misaligned base:
+        // per-element scalar load with bounds check.
         bool row_valid = (in_row >= 0) && (in_row < N_in);
-        if (row_valid && (k_global + kVec <= C_in)) {
+        if (row_valid && (k_global + kVec <= C_in) && ptr_A_aligned) {
           const void *src = &ptr_A[in_row * stride_A + k_global];
           asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                        "l"(src),
@@ -962,12 +1036,20 @@ private:
       int row_in_iter = threadIdx.x / COLS_PER_THREAD;
       int col_start = col_group * VEC;
 
+      // Group-conv alignment: uint64 stores need 8-byte alignment of the
+      // target. ptr_D = ptr_D_base + group_id * C_per_group; if that shift
+      // (plus stride_out*2) isn't 8-byte aligned, uint64 stores misalign.
+      // Fall back to scalar writes in that case.
+      bool epi_aligned = ((reinterpret_cast<uintptr_t>(ptr_D) |
+                           (uintptr_t)(stride_out * (int)sizeof(ElementOutput))) &
+                          7u) == 0;
+
 #pragma unroll
       for (int iter = 0; iter < tM; iter += ROWS_PER_ITER) {
         int row = iter + row_in_iter;
         if (row < tM) {
           int sorted_row = m_start + row;
-          if (sorted_row < N_out && col_start + n_start + VEC <= C_out) {
+          if (sorted_row < N_out && col_start + n_start + VEC <= C_out && epi_aligned) {
             int out_row = mask_argsort[sorted_row];
             uint64_t packed;
             memcpy(&packed, &epi_smem[row * EPL_STRIDE + col_start], sizeof(uint64_t));
@@ -988,9 +1070,10 @@ private:
       }
     } else if constexpr (sizeof(ElementOutput) == 2) {
       // Direct half2 epilogue (no smem staging — lower overhead for small tiles).
-      // Half2 stores require 4-byte alignment: both the column index (n_global)
-      // and the row stride (stride_out) must be even. Otherwise the second row's
-      // starting byte is not 4-byte aligned, so we fall back to scalar writes.
+      // Half2 stores require 4-byte alignment: ptr_D (after per-group shift),
+      // the column index (n_global), and the row stride (stride_out) must all
+      // yield 4-byte-aligned target addresses.
+      bool ptr_D_aligned = (reinterpret_cast<uintptr_t>(ptr_D) & 3u) == 0;
       bool stride_aligned = (stride_out & 1) == 0;
       CUTE_UNROLL
       for (int frag = 0; frag < size(accum); frag += 4) {
@@ -1000,7 +1083,7 @@ private:
           auto coord = tCrC(base);
           int sorted_row = m_start + get<0>(coord);
           int n_global = n_start + get<1>(coord);
-          if (sorted_row < N_out && n_global + 1 < C_out && stride_aligned &&
+          if (sorted_row < N_out && n_global + 1 < C_out && stride_aligned && ptr_D_aligned &&
               ((n_global & 1) == 0)) {
             int out_row = mask_argsort[sorted_row];
             float v0 = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
