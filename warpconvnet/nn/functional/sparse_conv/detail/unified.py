@@ -180,6 +180,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             num_out_coords,
                             compute_dtype,
                             custom_params=filtered_params,
+                            groups=groups,
                         )
                         _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
                         # Save a serialized copy (algo as string) to the generic cache
@@ -211,6 +212,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 num_out_coords,
                 compute_dtype,
                 custom_params=filtered_params,
+                groups=groups,
             )
             _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
             # Persist a serialized copy to generic cache
@@ -459,6 +461,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 device,
                 custom_params=params_for_direction,
                 needs_input_grad=needs_grad_tuple,
+                groups=groups,
             )
             cache_dict[cfg] = results[0]
             generic_benchmark_update_entry(
