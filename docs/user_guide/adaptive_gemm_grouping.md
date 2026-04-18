@@ -18,7 +18,7 @@ Each kernel offset k has M_k coordinate pairs. Offsets are classified as:
 Small offsets are sorted by pair count and greedily merged into buckets. A new offset is added to the current bucket only if the padding waste stays below a threshold:
 
 $$
-\\text{redundancy} = \\frac{M\_{\\max} \\times B - \\sum M_k}{\\sum M_k} \\leq \\text{threshold}
+\text{redundancy} = \frac{M_{\max} \times B - \sum M_k}{\sum M_k} \leq \text{threshold}
 $$
 
 where B is the bucket size and M_max is the largest pair count in the bucket. The default threshold is 10%, meaning at most 10% of the padded computation is wasted.

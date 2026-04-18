@@ -9,17 +9,19 @@ Defined in `warpconvnet/constants.py`.
 
 ### Algorithm selection
 
-| Variable                                   | Default | Description                                                                                                                                                                                                        |
-| ------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `WARPCONVNET_FWD_ALGO_MODE`                | `auto`  | Forward convolution algorithm. `auto` benchmarks a reduced candidate set. `all` benchmarks every algorithm. Can also be a single name (e.g., `implicit_gemm`) or a list (`[implicit_gemm,cutlass_implicit_gemm]`). |
-| `WARPCONVNET_BWD_ALGO_MODE`                | `auto`  | Backward convolution algorithm. Same format as forward.                                                                                                                                                            |
-| `WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` | `auto`  | Depthwise forward algorithm (`explicit_gemm`, `implicit_gemm`, or `auto`).                                                                                                                                         |
-| `WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE` | `auto`  | Depthwise backward algorithm.                                                                                                                                                                                      |
+| Variable                                   | Default | Description                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`                | `auto`  | Forward convolution algorithm. `auto` benchmarks a reduced candidate set. `all` benchmarks every algorithm. Can also be a single name (e.g., `implicit_gemm`) or a list (`[implicit_gemm,cutlass_implicit_gemm]`).                                                                                              |
+| `WARPCONVNET_BWD_ALGO_MODE`                | `auto`  | Backward convolution algorithm. Same format as forward.                                                                                                                                                                                                                                                         |
+| `WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` | `auto`  | Depthwise forward algorithm (`explicit_gemm`, `implicit_gemm`, or `auto`).                                                                                                                                                                                                                                      |
+| `WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE` | `auto`  | Depthwise backward algorithm.                                                                                                                                                                                                                                                                                   |
+| `WARPCONVNET_USE_FP16_ACCUM`               | `false` | Global default for the fp16 accumulator flag. When `true`, the production F16Acc tiles (40/42) enter the autotune pool and CUTLASS entries are rewritten to `accumulator_type=torch.float16`. Per-module `use_fp16_accum=` overrides this. See [Accumulator Precision](../user_guide/accumulator_precision.md). |
 
 Valid algorithm names: `explicit_gemm`, `implicit_gemm`,
 `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`,
 `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`,
-`production`, `production`, `auto`, `all`, `trimmed`.
+`production`, `auto`, `all`, `trimmed`. Unknown names raise `ValueError`
+when passed via `fwd_algo`/`dgrad_algo`/`wgrad_algo`.
 
 ### Benchmark cache
 
