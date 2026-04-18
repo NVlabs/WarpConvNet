@@ -193,6 +193,7 @@ def _run_forward_benchmarks(
     warmup_iters: int = _BENCHMARK_NUM_WARMUP,
     benchmark_iters: int = _BENCHMARK_NUM_ITERS,
     custom_params: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    groups: int = 1,
 ) -> List[Tuple[str, Dict[str, Any], float]]:
     """Benchmark different forward algorithms and return sorted results (best first)."""
     warmup_iters = max(warmup_iters, 1)
@@ -318,6 +319,7 @@ def _run_forward_benchmarks(
                 num_out_coords,
                 compute_dtype,
                 None,  # fwd_block_size
+                groups=groups,
             )
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
@@ -439,6 +441,7 @@ def _run_backward_benchmarks(
     benchmark_iters: int = _BENCHMARK_NUM_ITERS,
     custom_params: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
     needs_input_grad: Tuple[bool, bool] = (True, True),
+    groups: int = 1,
 ) -> List[Tuple[str, Dict[str, Any], float]]:
     """Benchmark different backward algorithms and return sorted results (best first).
 
@@ -590,6 +593,7 @@ def _run_backward_benchmarks(
                 compute_dtype,
                 device,
                 needs_input_grad=needs_input_grad,
+                groups=groups,
             )
         else:
             raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
