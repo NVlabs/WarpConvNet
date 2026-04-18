@@ -204,7 +204,9 @@ def _execute_forward(
         from .mask_gemm import _get_mask_data
 
         K = len(kernel_map)
-        mask_words = (K + 31) // 32
+        from .mask_gemm import _dispatched_mask_words
+
+        mask_words = _dispatched_mask_words(K)
 
         # Submanifold identity shortcut: center offset maps each voxel to itself
         # Enable when stride=1 (N_in == N_out) and K is odd
@@ -464,7 +466,9 @@ def _execute_backward(
         use_fwd_for_dgrad = algo == "production_fwd_as_dgrad"
 
         K = weight.shape[0]
-        mask_words = (K + 31) // 32
+        from .mask_gemm import _dispatched_mask_words
+
+        mask_words = _dispatched_mask_words(K)
 
         tile_id = params.get("tile_id", 60)
         split_k = params.get("split_k", 64)

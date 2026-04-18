@@ -43,6 +43,26 @@ def _build_pair_table(
     return pair_table
 
 
+def _dispatched_mask_words(K: int) -> int:
+    """Round mask_words up to the next DISPATCH_MW template boundary.
+
+    production_bindings.cu's DISPATCH_MW macro picks templates at MW=1, 2,
+    4, 8, 12. Kernel templates use their compile-time MW as the stride
+    when indexing ``pair_mask[row * MW + word]``. If the caller allocates
+    pair_mask with a smaller stride than the dispatched MW, the kernel
+    reads past the allocation (or into the wrong row) → illegal address
+    and silent-wrong output.
+
+    Ensure the pair_mask stride matches what the kernel will use:
+    pad to the next template MW.
+    """
+    mw_rt = (K + 31) // 32
+    for mw in (1, 2, 4, 8, 12):
+        if mw_rt <= mw:
+            return mw
+    return mw_rt  # K > 384: template doesn't cover this, caller must reject
+
+
 def _build_mask_and_argsort(
     pair_table: Tensor,
     N: int,
@@ -52,11 +72,13 @@ def _build_mask_and_argsort(
     """Build pair_mask and mask_argsort from a pair_table [K * N].
 
     For K <= 32: pair_mask is [N] int32 (single uint32 bitmask per voxel).
-    For K > 32: pair_mask is [N * mask_words] int32, interleaved as
-                pair_mask[voxel_i * mask_words + word_w].
+    For K > 32: pair_mask is [N * mask_words_padded] int32, interleaved as
+                pair_mask[voxel_i * mask_words_padded + word_w].
+                mask_words_padded is the next DISPATCH_MW template boundary
+                so the kernel's stride matches what the caller allocates.
     mask_argsort is always [N] int32 (voxel permutation).
     """
-    mask_words = (K + 31) // 32
+    mask_words = _dispatched_mask_words(K)
     pair_mask = torch.zeros(N * mask_words, dtype=torch.int32, device=device)
     _C.gemm.build_pair_mask_cuda(pair_table, pair_mask, K, mask_words)
     if mask_words == 1:
