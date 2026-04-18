@@ -53,8 +53,10 @@ def _dispatched_mask_words(K: int) -> int:
     reads past the allocation (or into the wrong row) → illegal address
     and silent-wrong output.
 
-    Ensure the pair_mask stride matches what the kernel will use:
-    pad to the next template MW.
+    The set is intentionally hardcoded here: it mirrors DISPATCH_MW in the
+    binding, which is a warpconvnet-side decision independent of per-tile
+    warpgemm metadata. Warpgemm's TileMetadata.mask_words reports a tile's
+    canonical compiled MW, not the macro-level dispatch ladder.
     """
     mw_rt = (K + 31) // 32
     for mw in (1, 2, 4, 8, 12):

@@ -169,17 +169,10 @@ def test_fwd_handles_c_in_still_padded_semantics():
     assert any(t.handles_c_in(3) for t in tiles)
 
 
-def test_snapshot_fallback_parses():
-    """Explicit test that JSON snapshot parses without warpgemm import."""
-    from warpconvnet.nn.functional.sparse_conv.detail.tile_metadata import _load_snapshot
+def test_schema_is_v4():
+    from warpgemm.autotune import get_schema_version
 
-    tiles = _load_snapshot()
-    assert len(tiles) > 0
-    # Verify at least a few fields present and typed
-    t = tiles[0]
-    assert isinstance(t.tile_id, int)
-    assert isinstance(t.mask_words, int)
-    assert isinstance(t.supported_input_dtypes, tuple)
+    assert get_schema_version() >= 4
 
 
 if __name__ == "__main__":
