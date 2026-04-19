@@ -9,7 +9,8 @@ import torch
 from warpconvnet.constants import (
     WARPCONVNET_SKIP_SYMMETRIC_KERNEL_MAP,
     WARPCONVNET_FWD_ALGO_MODE,
-    WARPCONVNET_BWD_ALGO_MODE,
+    WARPCONVNET_DGRAD_ALGO_MODE,
+    WARPCONVNET_WGRAD_ALGO_MODE,
     get_fp16_accum,
     set_fp16_accum,
 )

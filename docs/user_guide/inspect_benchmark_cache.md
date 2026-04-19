@@ -8,8 +8,9 @@ WarpConvNet benchmarks sparse convolution algorithms at runtime and caches the r
 ### What the cache contains
 
 - **Namespaces**: Logical groups of cached results:
-  - `AB_gather_scatter` -- AB (gather-scatter) algorithm selection for forward and dgrad
-  - `AtB_gather_gather` -- AtB (gather-gather) algorithm selection for wgrad
+  - `AB_gather_scatter` -- AB (gather-scatter) algorithm selection for forward (Y = A B)
+  - `ABt_gather_scatter` -- ABt (gather-scatter) algorithm selection for dgrad (dX = dY W^T)
+  - `AtB_gather_gather` -- AtB (gather-gather) algorithm selection for wgrad (dW = A^T dY)
   - `implicit_gemm_AD_gather_scatter` / `cute_gemm_AD_gather_scatter` -- MMA tile + split-K tuning for per-offset kernels
   - `implicit_gemm_trAB_gather` / `cute_gemm_trAB_gather` -- MMA tile + split-K tuning for TrAB kernels
 - **Per-configuration results**: For each input configuration (log10(N), channels, kernel volume, dtype, SM), the cache stores all benchmarked algorithms sorted by time.
@@ -163,8 +164,9 @@ This generates:
 
 The cache reflects runs filtered by your environment variable settings in `warpconvnet/constants.py`:
 
-- `WARPCONVNET_FWD_ALGO_MODE`: `auto` (adaptive reduced set), `all` (exhaustive), single algorithm, or bracket list
-- `WARPCONVNET_BWD_ALGO_MODE`: same options
+- `WARPCONVNET_FWD_ALGO_MODE`: `auto` (adaptive reduced set), `all` (exhaustive), single algorithm, or bracket list — filters forward (AB) pool
+- `WARPCONVNET_DGRAD_ALGO_MODE`: same options — filters dgrad (ABt) pool
+- `WARPCONVNET_WGRAD_ALGO_MODE`: same options — filters wgrad (AtB) pool
 
 When set to `auto` (default), the system uses an adaptive candidate set that varies by channel size. See [Sparse Convolutions](./sparse_convolutions.md) for details on `auto` vs `all` mode.
 

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Tests for sparse conv autotune algorithm mode filtering.
 
 Verifies that "auto", "all", single-algo, and list-of-algo modes
@@ -29,6 +31,7 @@ def _import():
         _ALL_BENCHMARK_FORWARD_PARAMS,
         _ALL_BENCHMARK_BACKWARD_PARAMS,
     )
+
     return dict(
         _filter=_filter_benchmark_params_by_env_config,
         _adaptive_fwd=_get_adaptive_forward_params,
@@ -47,6 +50,7 @@ def _import():
 # Candidate set sizes
 # ---------------------------------------------------------------------------
 
+
 class TestCandidateSetSizes:
     """Verify reduced vs full candidate counts."""
 
@@ -62,7 +66,10 @@ class TestCandidateSetSizes:
         m = _import()
         all_set = {(a, tuple(sorted(p.items()))) for a, p in m["_all_fwd"]}
         for algo, params in m["_base_fwd"]:
-            assert (algo, tuple(sorted(params.items()))) in all_set, (
+            assert (
+                algo,
+                tuple(sorted(params.items())),
+            ) in all_set, (
                 f"Base fwd candidate ({algo}, {params}) not in _ALL_BENCHMARK_FORWARD_PARAMS"
             )
 
@@ -70,7 +77,10 @@ class TestCandidateSetSizes:
         m = _import()
         all_set = {(a, tuple(sorted(p.items()))) for a, p in m["_all_bwd"]}
         for algo, params in m["_reduced_bwd"]:
-            assert (algo, tuple(sorted(params.items()))) in all_set, (
+            assert (
+                algo,
+                tuple(sorted(params.items())),
+            ) in all_set, (
                 f"Reduced bwd candidate ({algo}, {params}) not in _ALL_BENCHMARK_BACKWARD_PARAMS"
             )
 
@@ -88,6 +98,7 @@ class TestCandidateSetSizes:
 # ---------------------------------------------------------------------------
 # Adaptive forward params (channel-dependent)
 # ---------------------------------------------------------------------------
+
 
 class TestAdaptiveForwardParams:
     """Verify channel-dependent candidate selection."""
@@ -141,6 +152,7 @@ class TestAdaptiveForwardParams:
 # _filter_benchmark_params_by_env_config
 # ---------------------------------------------------------------------------
 
+
 class TestFilterByEnvConfig:
     """Test the filter function for auto/all/single/list modes."""
 
@@ -174,9 +186,7 @@ class TestFilterByEnvConfig:
     def test_list_of_algos_filters(self):
         m = _import()
         params = list(m["_all_fwd"])
-        result = m["_filter"](
-            params, ["cutlass_implicit_gemm", "cute_grouped"], is_forward=True
-        )
+        result = m["_filter"](params, ["cutlass_implicit_gemm", "cute_grouped"], is_forward=True)
         algo_names = {a for a, _ in result}
         assert algo_names <= {"cutlass_implicit_gemm", "cute_grouped"}
         assert len(result) >= 2  # at least one of each
@@ -198,6 +208,7 @@ class TestFilterByEnvConfig:
 # ---------------------------------------------------------------------------
 # _get_filtered_forward_params / _get_filtered_backward_params
 # ---------------------------------------------------------------------------
+
 
 class TestGetFilteredParams:
     """Test the top-level filtered param getters (use env default = 'auto')."""
@@ -227,6 +238,7 @@ class TestGetFilteredParams:
 # Algorithm name consistency
 # ---------------------------------------------------------------------------
 
+
 class TestAlgoNameConsistency:
     """Ensure all algo names in reduced sets appear in the full sets."""
 
@@ -248,9 +260,7 @@ class TestAlgoNameConsistency:
         for c_in, c_out in [(32, 32), (256, 256)]:
             params = m["_adaptive_fwd"](c_in, c_out, 27)
             keys = [(a, tuple(sorted(p.items()))) for a, p in params]
-            assert len(keys) == len(set(keys)), (
-                f"Duplicate candidates in adaptive({c_in},{c_out})"
-            )
+            assert len(keys) == len(set(keys)), f"Duplicate candidates in adaptive({c_in},{c_out})"
 
     def test_no_duplicate_candidates_in_reduced_bwd(self):
         m = _import()
@@ -272,6 +282,7 @@ class TestAlgoNameConsistency:
 # Enum consistency
 # ---------------------------------------------------------------------------
 
+
 class TestEnumConsistency:
     """Verify enum values match the algo names used in param lists."""
 
@@ -279,6 +290,7 @@ class TestEnumConsistency:
         from warpconvnet.nn.functional.sparse_conv.detail.unified import (
             SPARSE_CONV_FWD_ALGO_MODE,
         )
+
         m = _import()
         enum_values = {e.value for e in SPARSE_CONV_FWD_ALGO_MODE}
         all_algo_names = {a for a, _ in m["_all_fwd"]}
@@ -290,6 +302,7 @@ class TestEnumConsistency:
         from warpconvnet.nn.functional.sparse_conv.detail.unified import (
             SPARSE_CONV_BWD_ALGO_MODE,
         )
+
         m = _import()
         enum_values = {e.value for e in SPARSE_CONV_BWD_ALGO_MODE}
         all_algo_names = {a for a, _ in m["_all_bwd"]}
@@ -300,6 +313,7 @@ class TestEnumConsistency:
         from warpconvnet.nn.functional.sparse_conv.detail.unified import (
             SPARSE_CONV_FWD_ALGO_MODE,
         )
+
         assert SPARSE_CONV_FWD_ALGO_MODE.AUTO.value == "auto"
         assert SPARSE_CONV_FWD_ALGO_MODE.ALL.value == "all"
 
@@ -307,6 +321,7 @@ class TestEnumConsistency:
         from warpconvnet.nn.functional.sparse_conv.detail.unified import (
             SPARSE_CONV_BWD_ALGO_MODE,
         )
+
         assert SPARSE_CONV_BWD_ALGO_MODE.AUTO.value == "auto"
         assert SPARSE_CONV_BWD_ALGO_MODE.ALL.value == "all"
 
@@ -315,22 +330,32 @@ class TestEnumConsistency:
 # constants.py validation
 # ---------------------------------------------------------------------------
 
+
 class TestConstants:
     """Verify constants.py VALID_ALGOS includes auto and all."""
 
     def test_valid_algos_has_auto(self):
         from warpconvnet.constants import VALID_ALGOS
+
         assert "auto" in VALID_ALGOS
 
     def test_valid_algos_has_all(self):
         from warpconvnet.constants import VALID_ALGOS
+
         assert "all" in VALID_ALGOS
 
     def test_default_fwd_mode_is_auto(self):
         from warpconvnet.constants import WARPCONVNET_FWD_ALGO_MODE
+
         # Default (no env var) should be "auto"
         assert WARPCONVNET_FWD_ALGO_MODE == "auto"
 
-    def test_default_bwd_mode_is_auto(self):
-        from warpconvnet.constants import WARPCONVNET_BWD_ALGO_MODE
-        assert WARPCONVNET_BWD_ALGO_MODE == "auto"
+    def test_default_dgrad_mode_is_auto(self):
+        from warpconvnet.constants import WARPCONVNET_DGRAD_ALGO_MODE
+
+        assert WARPCONVNET_DGRAD_ALGO_MODE == "auto"
+
+    def test_default_wgrad_mode_is_auto(self):
+        from warpconvnet.constants import WARPCONVNET_WGRAD_ALGO_MODE
+
+        assert WARPCONVNET_WGRAD_ALGO_MODE == "auto"
