@@ -12,18 +12,23 @@ GPU. This page describes how WarpConvNet chooses.
 ## Why auto-tune
 
 A single sparse-conv layer runs **three math kernels** per training step
-(forward, dgrad, wgrad — see
+(forward = AB, dgrad = ABt, wgrad = AtB — see
 [Three math kernels per layer](./sparse_convolutions.md#three-math-kernels-per-layer)),
 each with its own optimal algorithm:
 
 - Relative winners shift dramatically with channel count (e.g. 64 vs 256).
 - Small-$N$ shapes favor mask-based fused kernels; large-$N$ shapes
   favor CUTLASS.
-- Wgrad (AtB gather-gather) has different arithmetic intensity than AB
-  and picks differently from forward at the same shape.
+- Wgrad (AtB gather-gather) has different arithmetic intensity than
+  AB/ABt and picks differently from forward at the same shape.
+- Dgrad (ABt) picks differently from fwd (AB) because the
+  $C_\text{in} \leftrightarrow C_\text{out}$ swap changes the optimal
+  tile shape and split-K factor.
 
 Picking by hand is infeasible. WarpConvNet benchmarks the candidate set
-at the runtime shape on first use and caches the winner.
+at the runtime shape on first use and caches the winner, per op, in
+three independent cache namespaces (`AB_gather_scatter`,
+`ABt_gather_scatter`, `AtB_gather_gather`).
 
 ## How it works
 
@@ -35,7 +40,7 @@ WarpConvNet:
 2. Runs each candidate with `warmup=2`, `iters=5` and records median time
    via CUDA events.
 3. Picks the fastest and caches the result keyed by
-   $(\lceil\log_{10} N_{\text{in}}\rceil, \lceil\log_{10} N_{\text{out}}\rceil, C_{\text{in}}, C_{\text{out}}, K, \text{dtype}, \text{SM})$.
+   $(\lceil\log_{10} N_{\text{in}}\rceil, \lceil\log_{10} N_{\text{out}}\rceil, C_{\text{in}}, C_{\text{out}}, K, G, \text{use\_fp16\_accum}, \text{dtype}, \text{SM})$.
 4. Subsequent calls with the same shape hit the cache instantly.
 
 Results are persisted to
@@ -48,7 +53,9 @@ that rank 0's autotune pass populates every rank.
 The candidate set adapts to the problem dimensions. Based on benchmark
 analysis of 148 configs on SM 8.9 with cuBLAS 12.9.1.4:
 
-**AB gather-scatter (forward + dgrad)** — 7-11 candidates:
+**AB gather-scatter (forward)** and **ABt gather-scatter (dgrad)** share
+the same candidate pool — 7-11 candidates per op; each op is tuned
+independently against its own cache namespace:
 
 | $N$ range                             | $ch \le 256$                                      | $ch > 256$                               |
 | ------------------------------------- | ------------------------------------------------- | ---------------------------------------- |
@@ -88,8 +95,8 @@ export WARPCONVNET_FWD_ALGO_MODE=production
 export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
 ```
 
-The same options apply to `WARPCONVNET_BWD_ALGO_MODE` (wgrad AtB
-algorithm).
+The same options apply to `WARPCONVNET_DGRAD_ALGO_MODE` (dgrad ABt
+algorithm) and `WARPCONVNET_WGRAD_ALGO_MODE` (wgrad AtB algorithm).
 
 ## Specifying algorithms
 
@@ -134,15 +141,16 @@ mode.
 
 ## Environment variables
 
-| Variable                                   | Default                | Description                                                                                            |
-| ------------------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------ |
-| `WARPCONVNET_FWD_ALGO_MODE`                | `auto`                 | AB gather-scatter algorithm for forward and dgrad.                                                     |
-| `WARPCONVNET_BWD_ALGO_MODE`                | `auto`                 | AtB gather-gather algorithm for wgrad.                                                                 |
-| `WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` | `auto`                 | Depthwise forward algorithm.                                                                           |
-| `WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE` | `auto`                 | Depthwise backward algorithm.                                                                          |
-| `WARPCONVNET_USE_FP16_ACCUM`               | `false`                | Global default for the fp16 accumulator flag. See [Accumulator Precision](./accumulator_precision.md). |
-| `WARPCONVNET_BENCHMARK_CACHE_DIR`          | `~/.cache/warpconvnet` | Cache directory.                                                                                       |
-| `WARPCONVNET_AUTOTUNE_LOG`                 | `true`                 | Set to `false` to suppress auto-tuning log messages.                                                   |
+| Variable                                   | Default                | Description                                                                                               |
+| ------------------------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`                | `auto`                 | AB gather-scatter algorithm for forward. Shared candidate pool with dgrad.                                |
+| `WARPCONVNET_DGRAD_ALGO_MODE`              | `auto`                 | ABt gather-scatter algorithm for dgrad. Shared candidate pool with forward; tuned + cached independently. |
+| `WARPCONVNET_WGRAD_ALGO_MODE`              | `auto`                 | AtB gather-gather algorithm for wgrad.                                                                    |
+| `WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` | `auto`                 | Depthwise forward algorithm.                                                                              |
+| `WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE` | `auto`                 | Depthwise backward algorithm.                                                                             |
+| `WARPCONVNET_USE_FP16_ACCUM`               | `false`                | Global default for the fp16 accumulator flag. See [Accumulator Precision](./accumulator_precision.md).    |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR`          | `~/.cache/warpconvnet` | Cache directory.                                                                                          |
+| `WARPCONVNET_AUTOTUNE_LOG`                 | `true`                 | Set to `false` to suppress auto-tuning log messages.                                                      |
 
 Accepted values for the mode variables: `auto`, `all`, `trimmed`, a
 single algorithm name, or a bracket list like `[algo1,algo2]`.
@@ -163,7 +171,9 @@ rm -rf ~/.cache/warpconvnet/
 
 # Inspect cached entries
 python scripts/inspect_benchmark_cache.py
-python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter --best-only
+python scripts/inspect_benchmark_cache.py namespace=AB_gather_scatter --best-only   # forward
+python scripts/inspect_benchmark_cache.py namespace=ABt_gather_scatter --best-only  # dgrad
+python scripts/inspect_benchmark_cache.py namespace=AtB_gather_gather --best-only   # wgrad
 
 # Analyze win rates and margins across all configs
 python scripts/analyze_autotune_cache.py --markdown --output analysis.md

@@ -37,6 +37,7 @@ from .algo_params import (
 )
 from .autotune import (
     _BENCHMARK_AB_RESULTS,
+    _BENCHMARK_ABT_RESULTS,
     _BENCHMARK_ATB_RESULTS,
     _serialize_benchmark_results,
     _run_forward_benchmarks,
@@ -142,6 +143,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             out_channels=C_out,
             kernel_volume=kv,
             in_dtype=in_features.dtype,
+            groups=groups,
+            use_fp16_accum=use_fp16_accum,
         )
 
         # Step 3: Check cache first
@@ -362,7 +365,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
         N_in_bwd = config_params["num_in_coords"]
         N_out_bwd = config_params["num_out_coords"]
 
-        # Dgrad config: swapped perspective — the AB kernel iterates N_in rows,
+        use_fp16_accum_bwd = getattr(ctx, "use_fp16_accum", False)
+        # Dgrad config: swapped perspective — the ABt kernel iterates N_in rows,
         # gathers from N_out, reduces over C_out, outputs C_in.
         dgrad_config = SpatiallySparseConvConfig(
             num_in_coords=N_out_bwd,
@@ -371,6 +375,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             out_channels=C_in_bwd,
             kernel_volume=kv_bwd,
             in_dtype=grad_output.dtype,
+            groups=groups,
+            use_fp16_accum=use_fp16_accum_bwd,
         )
         # Wgrad config: reduction over gathered pairs, no swap needed.
         wgrad_config = SpatiallySparseConvConfig(
@@ -380,6 +386,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             out_channels=C_out_bwd,
             kernel_volume=kv_bwd,
             in_dtype=grad_output.dtype,
+            groups=groups,
+            use_fp16_accum=use_fp16_accum_bwd,
         )
 
         def _normalize_algo(algo):
@@ -501,8 +509,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
 
         if ctx.needs_input_grad[0]:
             dgrad_algo, dgrad_params = _autotune_one_direction(
-                _BENCHMARK_AB_RESULTS,
-                "AB_gather_scatter",
+                _BENCHMARK_ABT_RESULTS,
+                "ABt_gather_scatter",
                 (True, False),
                 filtered_dgrad_params,
                 dgrad_config,
@@ -529,7 +537,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"DGRAD '{dgrad_algo}' failed: {e}. Falling back.")
-                _BENCHMARK_AB_RESULTS.pop(dgrad_config, None)
+                _BENCHMARK_ABT_RESULTS.pop(dgrad_config, None)
                 grad_in_features, _ = _execute_backward(
                     "explicit_gemm",
                     {},

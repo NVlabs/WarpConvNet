@@ -98,7 +98,8 @@ Or via environment variables:
 
 ```bash
 export WARPCONVNET_FWD_ALGO_MODE=cutlass_grouped_hybrid
-export WARPCONVNET_BWD_ALGO_MODE=explicit_gemm_grouped
+export WARPCONVNET_DGRAD_ALGO_MODE=cutlass_grouped_hybrid
+export WARPCONVNET_WGRAD_ALGO_MODE=explicit_gemm_grouped
 ```
 
 ### Grouping Parameters

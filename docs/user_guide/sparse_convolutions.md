@@ -167,52 +167,63 @@ algorithm modes (`WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` /
 A complete training step through one spatially sparse convolution layer
 requires **three mathematically distinct GEMM operations**:
 
-| Pass                                            | Math                                           | WarpConvNet GEMM class | Cache namespace     |
-| ----------------------------------------------- | ---------------------------------------------- | ---------------------- | ------------------- |
-| Forward                                         | $\mathbf{Y} = \mathbf{A},\mathbf{W}$           | **AB** gather-scatter  | `AB_gather_scatter` |
-| Backward $\partial/\partial \mathbf{X}$ (dgrad) | $\mathbf{dX} = \mathbf{dY},\mathbf{W}^{!\top}$ | **AB** gather-scatter  | `AB_gather_scatter` |
-| Backward $\partial/\partial \mathbf{W}$ (wgrad) | $\mathbf{dW} = \mathbf{A}^{!\top},\mathbf{dY}$ | **AtB** gather-gather  | `AtB_gather_gather` |
+| Pass                                            | Math                                        | WarpConvNet GEMM class | Cache namespace      |
+| ----------------------------------------------- | ------------------------------------------- | ---------------------- | -------------------- |
+| Forward                                         | $\mathbf{Y} = \mathbf{A} \mathbf{W}$        | **AB** gather-scatter  | `AB_gather_scatter`  |
+| Backward $\partial/\partial \mathbf{X}$ (dgrad) | $\mathbf{dX} = \mathbf{dY} \mathbf{W}^\top$ | **ABt** gather-scatter | `ABt_gather_scatter` |
+| Backward $\partial/\partial \mathbf{W}$ (wgrad) | $\mathbf{dW} = \mathbf{A}^\top \mathbf{dY}$ | **AtB** gather-gather  | `AtB_gather_gather`  |
 
-- **AB gather-scatter**: gather rows of $\mathbf{A}$ by the input-side
-  kernel map, multiply by the dense per-offset weight matrix $\mathbf{W}$,
-  scatter-add into the output buffer. Forward and dgrad share the same
-  kernel class with the roles of source/target swapped (warpconvnet builds
-  a reverse pair_table so the forward-path mask kernel can run dgrad with
-  no atomics). Each output row is written by a single thread block → no
-  atomicAdd needed.
-- **AtB gather-gather**: gather rows of both operands by the input and
-  output kernel maps, compute a reduction of outer products into the
+- **AB gather-scatter** (forward): gather rows of $\mathbf{A}$ by the
+  input-side kernel map, multiply by the dense per-offset weight matrix
+  $\mathbf{W}$, scatter-add into the output buffer. Each output row is
+  written by a single thread block → no `atomicAdd` needed.
+- **ABt gather-scatter** (dgrad): same gather-scatter shape as forward,
+  but $\mathbf{B}$ is $\mathbf{W}^\top$ — warpconvnet builds a reverse
+  pair_table so the forward-path mask kernel can run dgrad with no
+  atomics and no explicit transpose tensor at runtime (the transpose is
+  folded into the iteration order). Distinct from AB because the optimal
+  tile shape and split-K depend on the $C_\text{in} \leftrightarrow C_\text{out}$
+  swap.
+- **AtB gather-gather** (wgrad): gather rows of both operands by the
+  input and output kernel maps, reduce outer products into the
   per-offset weight-gradient buffer. No scatter step; one dense output
   tile per kernel offset. Shape and reuse pattern are different enough
-  from AB that the optimal algorithm differs per shape.
+  from AB/ABt that the optimal algorithm differs per shape.
 
-This split matters because **the three ops need three independent
-autotune searches**: there is no single algorithm that wins for all of
-forward, dgrad, and wgrad simultaneously, and the AtB gather-gather
-pattern has different arithmetic intensity from AB gather-scatter even at
-the same $(N, C_{\text{in}}, C_{\text{out}}, K)$ shape.
+This split matters because **each of the three ops is auto-tuned
+independently** in its own cache namespace (`AB_gather_scatter`,
+`ABt_gather_scatter`, `AtB_gather_gather`). There is no single
+algorithm that wins for all of forward, dgrad, and wgrad at the same
+$(N, C_{\text{in}}, C_{\text{out}}, K)$ shape, and the gather-gather
+pattern has different arithmetic intensity from gather-scatter even
+holding the shape fixed.
 
 ## Algorithms (overview)
 
 Each math kernel class above has multiple CUDA backend implementations.
 A short taxonomy:
 
-### AB backends (forward + dgrad)
+### AB / ABt backends (forward + dgrad)
 
-| Backend                  | Implementation                                                                          | Strengths                                                               |
-| ------------------------ | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `explicit_gemm`          | Gather to dense buffer, `torch.mm`, scatter-add.                                        | Reliable fallback. No alignment requirements.                           |
-| `implicit_gemm`          | Fused CUDA kernel; SIMT gather + GEMM + scatter-add in one launch.                      | Small channels (C ≤ 64).                                                |
-| `cutlass_implicit_gemm`  | CUTLASS fused gather-GEMM-scatter.                                                      | Tensor-core throughput at large channels. Auto-pads unaligned channels. |
-| `cute_implicit_gemm`     | CuTe 3.x fused kernel with `cp.async` vectorized A-loads.                               | Competitive at small-medium channels.                                   |
-| `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch.           | Small-N medium-channel; winner for C > 256 at small N.                  |
-| `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets.                      | Strong at large N + medium-large channels.                              |
-| `production`             | Mask-based fused kernel — iterates all $K$ offsets per output row via bitmask skipping. | Dominant AB winner on most shapes. No atomicAdd. CuTe tensor core MMA.  |
+The forward (AB) and dgrad (ABt) passes share this backend list —
+they have the same gather-scatter structure, only $\mathbf{B}$
+differs ($\mathbf{W}$ for fwd, $\mathbf{W}^\top$ for dgrad). Each
+op picks its own winner per shape.
+
+| Backend                  | Implementation                                                                          | Strengths                                                                  |
+| ------------------------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `explicit_gemm`          | Gather to dense buffer, `torch.mm`, scatter-add.                                        | Reliable fallback. No alignment requirements.                              |
+| `implicit_gemm`          | Fused CUDA kernel; SIMT gather + GEMM + scatter-add in one launch.                      | Small channels (C ≤ 64).                                                   |
+| `cutlass_implicit_gemm`  | CUTLASS fused gather-GEMM-scatter.                                                      | Tensor-core throughput at large channels. Auto-pads unaligned channels.    |
+| `cute_implicit_gemm`     | CuTe 3.x fused kernel with `cp.async` vectorized A-loads.                               | Competitive at small-medium channels.                                      |
+| `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch.           | Small-N medium-channel; winner for C > 256 at small N.                     |
+| `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets.                      | Strong at large N + medium-large channels.                                 |
+| `production`             | Mask-based fused kernel — iterates all $K$ offsets per output row via bitmask skipping. | Dominant AB/ABt winner on most shapes. No atomicAdd. CuTe tensor core MMA. |
 
 ### AtB backends (wgrad)
 
 Same name list as above, but implementing the
-$\mathbf{A}^{!\top},\mathbf{dY}$ gather-gather pattern. `cute_grouped`
+$\mathbf{A}^\top \mathbf{dY}$ gather-gather pattern. `cute_grouped`
 wins the majority of wgrad shapes empirically.
 
 ### How `production` works

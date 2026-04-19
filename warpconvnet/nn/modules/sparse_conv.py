@@ -23,7 +23,8 @@ from warpconvnet.nn.functional.sparse_conv import (
 from warpconvnet.utils.ntuple import ntuple
 from warpconvnet.constants import (
     WARPCONVNET_FWD_ALGO_MODE,
-    WARPCONVNET_BWD_ALGO_MODE,
+    WARPCONVNET_DGRAD_ALGO_MODE,
+    WARPCONVNET_WGRAD_ALGO_MODE,
 )
 
 
@@ -122,9 +123,9 @@ class SpatiallySparseConv(BaseSpatialModule):
         if fwd_algo is None:
             fwd_algo = WARPCONVNET_FWD_ALGO_MODE
         if dgrad_algo is None:
-            dgrad_algo = WARPCONVNET_FWD_ALGO_MODE
+            dgrad_algo = WARPCONVNET_DGRAD_ALGO_MODE
         if wgrad_algo is None:
-            wgrad_algo = WARPCONVNET_BWD_ALGO_MODE
+            wgrad_algo = WARPCONVNET_WGRAD_ALGO_MODE
 
         def _parse_algo(algo, enum_cls):
             if isinstance(algo, str):

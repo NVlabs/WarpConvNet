@@ -10,7 +10,8 @@ from enum import Enum
 
 from warpconvnet.constants import (
     WARPCONVNET_FWD_ALGO_MODE as WARPCONVNET_AB_ALGO_MODE,
-    WARPCONVNET_BWD_ALGO_MODE as WARPCONVNET_ATB_ALGO_MODE,
+    WARPCONVNET_DGRAD_ALGO_MODE as WARPCONVNET_ABT_ALGO_MODE,
+    WARPCONVNET_WGRAD_ALGO_MODE as WARPCONVNET_ATB_ALGO_MODE,
 )
 from warpconvnet.utils.logger import get_logger
 

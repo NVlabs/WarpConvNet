@@ -88,11 +88,15 @@ _AUTOTUNE_BANNER_SHOWN = False
 _BENCHMARK_AB_RESULTS: Dict[
     SpatiallySparseConvConfig,
     List[Tuple[str, Dict[str, Any], float]],
-] = {}  # AB gather-scatter (forward + dgrad)
+] = {}  # AB gather-scatter (forward): Y = A @ B
+_BENCHMARK_ABT_RESULTS: Dict[
+    SpatiallySparseConvConfig,
+    List[Tuple[str, Dict[str, Any], float]],
+] = {}  # ABt gather-scatter (dgrad): dX = dY @ W^T
 _BENCHMARK_ATB_RESULTS: Dict[
     SpatiallySparseConvConfig,
     List[Tuple[str, Dict[str, Any], float]],
-] = {}  # AtB gather-gather (wgrad)
+] = {}  # AtB gather-gather (wgrad): dW = A^T @ dY
 
 # ---------------------------------------------------------------------------
 # Serialization helpers for cache
@@ -137,21 +141,26 @@ def _normalize_benchmark_results(
 def _initialize_benchmark_cache():
     """Load cached benchmark results and populate global dictionaries."""
     ab_ns = generic_benchmark_get_namespace("AB_gather_scatter")
+    abt_ns = generic_benchmark_get_namespace("ABt_gather_scatter")
     atb_ns = generic_benchmark_get_namespace("AtB_gather_gather")
 
     if isinstance(ab_ns, dict):
         for k, v in ab_ns.items():
             _BENCHMARK_AB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=True)
+    if isinstance(abt_ns, dict):
+        for k, v in abt_ns.items():
+            _BENCHMARK_ABT_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
     if isinstance(atb_ns, dict):
         for k, v in atb_ns.items():
             _BENCHMARK_ATB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
 
     n_ab = len(ab_ns) if ab_ns else 0
+    n_abt = len(abt_ns) if abt_ns else 0
     n_atb = len(atb_ns) if atb_ns else 0
-    if n_ab or n_atb:
+    if n_ab or n_abt or n_atb:
         logger.info(
-            f"Loaded {n_ab} AB_gather_scatter, {n_atb} AtB_gather_gather "
-            f"benchmark configurations from cache"
+            f"Loaded {n_ab} AB_gather_scatter (fwd), {n_abt} ABt_gather_scatter (dgrad), "
+            f"{n_atb} AtB_gather_gather (wgrad) benchmark configurations from cache"
         )
 
 
@@ -164,6 +173,10 @@ def _on_cache_merge(namespace: str, merged_dict: dict) -> None:
         for k, v in merged_dict.items():
             if k not in _BENCHMARK_AB_RESULTS:
                 _BENCHMARK_AB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=True)
+    elif namespace == "ABt_gather_scatter":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_ABT_RESULTS:
+                _BENCHMARK_ABT_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
     elif namespace == "AtB_gather_gather":
         for k, v in merged_dict.items():
             if k not in _BENCHMARK_ATB_RESULTS:

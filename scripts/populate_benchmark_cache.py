@@ -350,7 +350,7 @@ def run_single_config(
             "AB_gather_scatter", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
         dgrad_cached = _config_is_cached(
-            "AB_gather_scatter", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
+            "ABt_gather_scatter", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
         )
         wgrad_cached = _config_is_cached(
             "AtB_gather_gather", num_voxels, num_voxels, c_in, c_out, kernel_volume, dtype
@@ -621,7 +621,8 @@ def main():
     # Set algo mode via environment if not "auto"
     if args.algo_mode != "auto":
         os.environ["WARPCONVNET_FWD_ALGO_MODE"] = args.algo_mode
-        os.environ["WARPCONVNET_BWD_ALGO_MODE"] = args.algo_mode
+        os.environ["WARPCONVNET_DGRAD_ALGO_MODE"] = args.algo_mode
+        os.environ["WARPCONVNET_WGRAD_ALGO_MODE"] = args.algo_mode
 
     # Build config grid
     configs: list[tuple[int, int, int, int, torch.dtype]] = []
