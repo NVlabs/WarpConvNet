@@ -44,6 +44,12 @@ jobs:
           - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.12" }
 
     steps:
+      - name: Free disk space on runner
+        run: |
+          df -h || true
+          rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h || true
+
       - name: Install system dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -69,6 +75,9 @@ jobs:
             --index-url https://download.pytorch.org/whl/${{ matrix.cuda }}
 
       - name: Build wheel
+        env:
+          MAX_JOBS: "2"
+          NVCC_THREADS: "1"
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . /tmp/buildenv/bin/activate
