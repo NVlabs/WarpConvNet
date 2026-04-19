@@ -180,8 +180,11 @@ class SpatiallySparseConv(BaseSpatialModule):
 
     def _calculate_fan_in_and_fan_out(self):
         receptive_field_size = np.prod(self.kernel_size)
-        fan_in = self.in_channels * receptive_field_size
-        fan_out = self.out_channels * receptive_field_size
+        # For group conv, each output unit sees only in_channels/groups input
+        # channels (and symmetrically out_channels/groups output channels).
+        # Matches torch.nn._ConvNd convention.
+        fan_in = (self.in_channels // self.groups) * receptive_field_size
+        fan_out = (self.out_channels // self.groups) * receptive_field_size
         return fan_in, fan_out
 
     def _calculate_correct_fan(self, mode: Literal["fan_in", "fan_out"]):
