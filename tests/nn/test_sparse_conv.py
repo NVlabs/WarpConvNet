@@ -1078,3 +1078,67 @@ def test_k343_backward_correctness():
     assert not torch.isnan(gw_p).any(), "production K=343 wgrad produced NaN"
     assert gi_rdiff < 0.02, f"K=343 dgrad rel_diff={gi_rdiff:.5f}"
     assert gw_rdiff < 0.02, f"K=343 wgrad rel_diff={gw_rdiff:.5f}"
+
+
+def _make_voxels_k8(N=400_000, C=64, grid=100, seed=1234, device="cuda"):
+    """Dense voxels for K=8 (2x2x2) at realistic encoder shape (N~329k after dedup)."""
+    torch.manual_seed(seed)
+    coords = [(torch.rand(N, 3) * grid).int()]
+    feats = [torch.randn(N, C).clamp(0, 44)]
+    return Voxels(coords, feats, device=device).unique()
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("stride", [1, 2])
+def test_k8_tile3_pipeline_drain(seed, stride):
+    """K=8 (kernel_size=2) fp16 fwd: regression for the
+    MaskGemm_forward_64x128x32_3s 3-stage pipeline epilog race (warpgemm
+    e543398). Prior to the fix, tile_id=43 at K=8 C_in=64 with num_k_tiles=2
+    produced non-deterministic NaN / garbage across seeds because the
+    epilog's smem read raced the prolog's last cp.async. K=27 / K=125
+    workloads masked it via cache warming.
+
+    Pinned tile_id=43 forces the pool through the affected kernel; the
+    all-seeds pass confirms the drain is correct.
+    """
+    import warpconvnet.nn.functional.sparse_conv.detail.algo_params as ap
+
+    orig_f32 = ap._AB_PRODUCTION_F32ACC
+    orig_f16 = ap._AB_PRODUCTION_F16ACC
+    ap._AB_PRODUCTION_F32ACC = [("production", {"tile_id": 43})]
+    ap._AB_PRODUCTION_F16ACC = []
+    ap._AB_PRODUCTION = ap._AB_PRODUCTION_F32ACC
+
+    try:
+        vox = _make_voxels_k8(N=400_000, C=64)
+        torch.manual_seed(seed)
+        weight = torch.randn(8, 64, 128, device="cuda") * 0.02
+
+        with torch.amp.autocast("cuda", dtype=torch.float16):
+            out_e = spatially_sparse_conv(
+                vox,
+                weight,
+                kernel_size=(2, 2, 2),
+                stride=(stride, stride, stride),
+                fwd_algo="explicit_gemm",
+            ).feature_tensor.float()
+            out_p = spatially_sparse_conv(
+                vox,
+                weight,
+                kernel_size=(2, 2, 2),
+                stride=(stride, stride, stride),
+                fwd_algo="production",
+            ).feature_tensor.float()
+
+        assert torch.isfinite(
+            out_p
+        ).all(), f"K=8 tile=43 seed={seed} stride={stride}: production produced NaN"
+        rdiff = (out_p - out_e).abs().mean() / (out_e.abs().mean() + 1e-8)
+        assert rdiff < 0.02, (
+            f"K=8 tile=43 seed={seed} stride={stride}: rel_diff={rdiff:.5f} "
+            f"(p_max={out_p.abs().max():.3f} e_max={out_e.abs().max():.3f})"
+        )
+    finally:
+        ap._AB_PRODUCTION_F32ACC = orig_f32
+        ap._AB_PRODUCTION_F16ACC = orig_f16
+        ap._AB_PRODUCTION = orig_f32 + orig_f16

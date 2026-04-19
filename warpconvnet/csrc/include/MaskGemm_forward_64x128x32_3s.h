@@ -395,6 +395,17 @@ struct MaskGemm_forward_64x128x32_3s {
             if (smem_pipe_read >= NumStages) smem_pipe_read = 0;
           }
 
+          // Drain outstanding cp.async before the epilog reads smem.
+          // Both the prolog's wait<NumStages-2> and the main loop's
+          // iterative wait<NumStages-2> leave 1 fence outstanding (the
+          // most recent load). Without this drain, the epilog's last
+          // MMA reads smem before its cp.async completes — silent
+          // garbage / NaN on tile 3 (64x128x32_3s) at K=8 fp16,
+          // non-deterministic across seeds. K=27/125 masks it via
+          // cache warming; K=8 is short enough to surface the race.
+          cute::cp_async_wait<0>();
+          __syncthreads();
+
           {
             int remaining = (num_k_tiles < NumStages) ? num_k_tiles : (NumStages - 1);
             CUTLASS_PRAGMA_UNROLL
