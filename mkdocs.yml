@@ -54,6 +54,7 @@ nav:
       - Geometry Tutorial: user_guide/geometry_tutorial.md
       - Network Tutorial: user_guide/network_tutorial.md
       - Spatially Sparse Convolutions: user_guide/sparse_convolutions.md
+      - Packed Hash Table: user_guide/packed_hash_table.md
       - Auto-Tuning: user_guide/autotune.md
       - Accumulator Precision: user_guide/accumulator_precision.md
       - Point Convolutions: user_guide/point_convolutions.md
