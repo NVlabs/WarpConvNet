@@ -67,6 +67,61 @@ int launch_production_wgrad(const void *a,
                             int groups,
                             cudaStream_t stream);
 
+// Workspace wgrad launchers: write to [split_k, K, G, C_in_g, C_out_g] fp32
+// workspace buffer. Caller owns workspace allocation + post-launch reduction
+// (workspace.sum(0) -> grad_weight). See WGRAD_WORKSPACE_CASE macro.
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_workspace_64x64(const void *,
+                                 const void *,
+                                 void *,
+                                 const int *,
+                                 const uint32_t *,
+                                 const int *,
+                                 const uint32_t *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 float,
+                                 int,
+                                 cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_workspace_64x64_3s(const void *,
+                                    const void *,
+                                    void *,
+                                    const int *,
+                                    const uint32_t *,
+                                    const int *,
+                                    const uint32_t *,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    int,
+                                    float,
+                                    int,
+                                    cudaStream_t);
+template <typename ElemIn, typename ElemOut>
+int launch_wgrad_workspace_64x128(const void *,
+                                  const void *,
+                                  void *,
+                                  const int *,
+                                  const uint32_t *,
+                                  const int *,
+                                  const uint32_t *,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  float,
+                                  int,
+                                  cudaStream_t);
+
 // Scalar variant launch functions (separate template families)
 template <typename ElemIn, typename ElemOut>
 int launch_scalar_fwd_sab_se(const void *,
@@ -1234,6 +1289,36 @@ int production_wgrad(torch::Tensor input,
                                                          groups,                 \
                                                          stream)
 
+  // Workspace variant: allocate [split_k, K, G, C_in, C_out] fp32, launch with
+  // workspace as target, reduce sum(dim=0) into grad_weight. Caller pre-zeroed
+  // grad_weight so copy_ is the right final op. No atomics — each split shard
+  // writes to its own slice.
+#define WGRAD_WORKSPACE_CASE(ElemIn, suffix)                                                       \
+  do {                                                                                             \
+    auto workspace = torch::zeros({split_k, K, groups, C_in, C_out},                               \
+                                  grad_weight.options().dtype(torch::kFloat32));                   \
+    int status = cute_gemm::launch_wgrad_workspace_##suffix<ElemIn, float>(input.data_ptr(),       \
+                                                                           grad_output.data_ptr(), \
+                                                                           workspace.data_ptr(),   \
+                                                                           pt_ptr,                 \
+                                                                           pm_ptr,                 \
+                                                                           ms_ptr,                 \
+                                                                           rm_ptr,                 \
+                                                                           N_in,                   \
+                                                                           N_out,                  \
+                                                                           C_in,                   \
+                                                                           C_out,                  \
+                                                                           K,                      \
+                                                                           split_k,                \
+                                                                           alpha,                  \
+                                                                           groups,                 \
+                                                                           stream);                \
+    if (status != 0) return status;                                                                \
+    /* Reduce workspace along split_k dim into grad_weight (pre-zeroed by caller) */               \
+    grad_weight.copy_(workspace.sum(0));                                                           \
+    return 0;                                                                                      \
+  } while (0)
+
   if (si == torch::kFloat16) {
     using In = cutlass::half_t;
     switch (tile) {
@@ -1243,6 +1328,12 @@ int production_wgrad(torch::Tensor input,
         return WGRAD_ATOMIC(In, 64x128);
       case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_atomic:
         return WGRAD_ATOMIC(In, 3s);
+      case gemm::MMATile::Prod_Wgrad_64x64x32_2s_f32_workspace:
+        WGRAD_WORKSPACE_CASE(In, 64x64);
+      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_workspace:
+        WGRAD_WORKSPACE_CASE(In, 64x64_3s);
+      case gemm::MMATile::Prod_Wgrad_64x128x32_2s_f32_workspace:
+        WGRAD_WORKSPACE_CASE(In, 64x128);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);
     }
@@ -1257,6 +1348,12 @@ int production_wgrad(torch::Tensor input,
         return WGRAD_ATOMIC(In, 64x128);
       case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_atomic:
         return WGRAD_ATOMIC(In, 3s);
+      case gemm::MMATile::Prod_Wgrad_64x64x32_2s_f32_workspace:
+        WGRAD_WORKSPACE_CASE(In, 64x64);
+      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_workspace:
+        WGRAD_WORKSPACE_CASE(In, 64x64_3s);
+      case gemm::MMATile::Prod_Wgrad_64x128x32_2s_f32_workspace:
+        WGRAD_WORKSPACE_CASE(In, 64x128);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);
     }
@@ -1264,6 +1361,7 @@ int production_wgrad(torch::Tensor input,
 #endif
 #undef WGRAD_DISPATCH
 #undef WGRAD_ATOMIC
+#undef WGRAD_WORKSPACE_CASE
   TORCH_CHECK(false, "Unsupported dtype for production_wgrad");
   return -1;
 }

@@ -304,6 +304,18 @@ _ATB_PRODUCTION = (
         ("production", {"tile_id": 62, "split_k": 16}),  # Atomic 64x128, low split_k
         ("production", {"tile_id": 63, "split_k": 128}),  # 3-stage atomic, high split_k
         ("production", {"tile_id": 63, "split_k": 32}),  # 3-stage atomic, low split_k
+        # Workspace tiles: allocate [split_k, K, G, Cig, Cog] fp32 buffer, no
+        # atomic contention, post-kernel sum reduction. Win at small per-group
+        # C + large K*G where atomic tiles thrash (e.g. K=343 g=4 Cig=Cog=16).
+        # Upper split_k capped at 32 per warpgemm valid_split_k recommendation
+        # (workspace memory = split_k * K * G * Cig * Cog * 4 bytes; 32 is a
+        # good perf/memory compromise for typical UNet shapes).
+        ("production", {"tile_id": 64, "split_k": 16}),  # Workspace 64x64 2s
+        ("production", {"tile_id": 64, "split_k": 32}),  # Workspace 64x64 2s
+        ("production", {"tile_id": 65, "split_k": 16}),  # Workspace 64x64 3s
+        ("production", {"tile_id": 65, "split_k": 32}),  # Workspace 64x64 3s
+        ("production", {"tile_id": 66, "split_k": 16}),  # Workspace 64x128 2s
+        ("production", {"tile_id": 66, "split_k": 32}),  # Workspace 64x128 2s
     ]
     if _HAS_PRODUCTION
     else []
