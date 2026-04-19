@@ -184,3 +184,19 @@ class IntSearchResult:
     @property
     def device(self):
         return self.in_maps.device
+
+    @torch.no_grad()
+    def neighbor_count_per_output(self, num_out: int) -> Tensor:
+        """Per-output-voxel neighbor count: K-offsets with a valid input.
+
+        ``out_maps`` lists output voxel id for every valid (out, in, k)
+        triplet. Counting occurrences of each id gives the neighbor count.
+        Shape ``[num_out]``, int64.
+        """
+        counts = torch.zeros(num_out, dtype=torch.long, device=self.out_maps.device)
+        counts.scatter_add_(
+            0,
+            self.out_maps.long(),
+            torch.ones_like(self.out_maps, dtype=torch.long),
+        )
+        return counts
