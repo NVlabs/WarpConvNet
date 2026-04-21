@@ -50,6 +50,16 @@ struct Tile32x32x32 {};
 struct Tile32x32x32_F16Accum {};
 struct Tile32x16x32_F16Accum {};  // tN=16: 2x blocks for better wave scheduling
 
+// --- Pcoff (E1 offset-index precompute) variants — universal-safe 2026-04-20 ---
+// Each mirrors warpgemm fwd tile IDs 54-63. Config inherits from a base tile.
+struct Tile64x64x32_Pcoff {};      // tile 54: F16Accum base
+struct Tile64x64x32_Pcoff_K8 {};   // tile 55: F16K8 base
+struct Tile64x128x32_Pcoff_K8 {};  // tile 56: F16K8 base (A100 flagship)
+struct Tile64x128x32_Pcoff {};     // tile 57: F16Accum base
+struct Tile64x64x32_Pcoff_3s {};   // tile 58: F32 accum, 3-stage override
+struct Tile64x64x32_Pcoff_WS {};   // tile 59: F32 accum, warp-spec
+struct Tile64x128x32_Pcoff_WS {};  // tile 63: F32 accum, warp-spec 64x128
+
 // --- SM90 (Hopper) WGMMA tiles ---
 #if defined(WARPCONVNET_SM90_ENABLED)
 struct SM90_Tile64x64x64 {};
@@ -108,34 +118,63 @@ enum class MMATile : int {
   SM90_FP8_Tile64x256x128 = 206,
 #endif  // WARPCONVNET_SM90_ENABLED
 
-  // Production mask GEMM tile IDs (warpconvnet-specific)
-  Prod_Fwd_32x32x32_F16Acc = 40,
-  Prod_Fwd_64x64x32 = 41,
-  Prod_Fwd_64x128x32_F16Acc = 42,
-  Prod_Fwd_64x128x32_3s = 43,
-  Prod_Fwd_128x64x32 = 44,
-  Prod_Dgrad_32x32x32 = 50,
-  Prod_Dgrad_64x64x32 = 51,
-  Prod_Dgrad_64x128x32 = 52,
-  Prod_Dgrad_64x64x32_F16Acc = 53,
-  Prod_Dgrad_64x128x32_F16Acc = 54,
-  Prod_Dgrad_64x64x32_Pipe = 55,
-  Prod_Dgrad_64x128x32_Pipe = 56,
-  Prod_Dgrad_128x64x32_Pipe = 57,
-  Prod_Wgrad_64x64x32_f32 = 60,
-  Prod_Wgrad_64x64x32_f32_atomic = 61,
-  Prod_Wgrad_64x128x32_f32_atomic = 62,
-  Prod_Wgrad_64x64x32_3s_f32_atomic = 63,
-  Prod_Wgrad_64x64x32_2s_f32_workspace = 64,
-  Prod_Wgrad_64x64x32_3s_f32_workspace = 65,
-  Prod_Wgrad_64x128x32_2s_f32_workspace = 66,
-  Prod_Scalar_SAB_SE = 70,
-  Prod_Scalar_SA = 71,
-  Prod_Scalar_SB_SE = 72,
-  Prod_Wgrad_Scalar_SAB = 73,
-  Prod_Fwd_64x64x32_f32out = 80,
-  Prod_Dgrad_64x64x32_f32out = 81,
-  Prod_Fwd_64x64x32_f32out_sb = 82,
+};
+
+// -----------------------------------------------------------------------------
+// Production mask GEMM tile IDs — op-scoped enums mirroring warpgemm's
+// op-scoped catalog. Each sync from warpgemm adds new entries to the
+// matching op enum with warpgemm's native tile_id values (no translation).
+// -----------------------------------------------------------------------------
+
+enum class ProdFwdTile : int {
+  _32x32x32_F16Acc = 40,
+  _64x64x32 = 41,
+  _64x128x32_F16Acc = 42,
+  _64x128x32_3s = 43,
+  _128x64x32 = 44,
+  // E1 pcoff (offset-precomputation) tiles — universal-safe 2026-04-20
+  Pcoff_64x64x32_flat = 54,    // E1 alone (Ada universal winner)
+  Pcoff_64x64x32_f16k8 = 55,   // E1 x D1 (64x64)
+  Pcoff_64x128x32_f16k8 = 56,  // E1 x D1 (64x128, A100 flagship)
+  Pcoff_64x128x32_flat = 57,   // E1 alone (64x128)
+  // F arc pcoff compositions — dissolve SM_89 pathologies 2026-04-20
+  Pcoff_64x64x32_3s = 58,             // E1 x tile10 (3-stage interleaved)
+  Pcoff_64x64x32_2s_warp_spec = 59,   // E1 x tile48 (warp-spec)
+  Pcoff_64x128x32_2s_warp_spec = 63,  // E1 x tile49 (warp-spec 64x128)
+  // Scalar fallbacks (non-aligned C) — shared tag space with dgrad scalars
+  Scalar_SAB_SE = 70,
+  Scalar_SA = 71,
+  Scalar_SB_SE = 72,
+  // F32-output tiles (fp16/bf16 input → fp32 output, non-AMP path)
+  _64x64x32_f32out = 80,
+  _64x64x32_f32out_sb = 82,
+};
+
+enum class ProdDgradTile : int {
+  _32x32x32 = 50,
+  _64x64x32 = 51,
+  _64x128x32 = 52,
+  _64x64x32_F16Acc = 53,
+  _64x128x32_F16Acc = 54,
+  _64x64x32_Pipe = 55,
+  _64x128x32_Pipe = 56,
+  _128x64x32_Pipe = 57,
+  // Scalar fallbacks (shared numbering with fwd, distinct type)
+  Scalar_SAB_SE = 70,
+  Scalar_SA = 71,
+  Scalar_SB_SE = 72,
+  _64x64x32_f32out = 81,
+};
+
+enum class ProdWgradTile : int {
+  _64x64x32_f32 = 60,
+  _64x64x32_f32_atomic = 61,
+  _64x128x32_f32_atomic = 62,
+  _64x64x32_3s_f32_atomic = 63,
+  _64x64x32_2s_f32_workspace = 64,
+  _64x64x32_3s_f32_workspace = 65,
+  _64x128x32_2s_f32_workspace = 66,
+  Scalar_SAB = 73,
 };
 
 }  // namespace gemm

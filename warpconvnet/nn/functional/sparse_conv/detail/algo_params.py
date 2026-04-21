@@ -259,10 +259,47 @@ _AB_PRODUCTION_F16ACC = (
     else []
 )
 
-# Full production pool (F32Acc + F16Acc). Referenced by _AB_PARAMS_AUTO so
-# that env-var overrides like WARPCONVNET_AB_ALGO_MODE=["production"] can
-# still opt into F16Acc tiles.
-_AB_PRODUCTION = _AB_PRODUCTION_F32ACC + _AB_PRODUCTION_F16ACC
+# Pcoff (E1 offset-precompute) tiles — warpgemm IDs 54/55/56/57/58/59/63.
+# E1 hoists per-offset pair_table __ldg out of main loop -> attacks the
+# ~145us per-call intercept. Tile 54 is Ada universal winner at 3/4 MinkUNet
+# shapes (-7% to -18% p10 vs tile 17). Tile 56 is A100 flagship at wide C.
+# F arc (58/59/63) dissolves SM_89 pathologies of their non-E1 ancestors.
+# MW=1 only for now; K>32 configs route through non-pcoff tiles until
+# MW>1 instantiations land.
+_AB_PRODUCTION_PCOFF = (
+    [
+        ("production", {"tile_id": 54}),  # 64x64 flat_pcoff (F16Acc, Ada winner)
+        ("production", {"tile_id": 55}),  # 64x64 flat_pcoff (F16K8)
+        ("production", {"tile_id": 56}),  # 64x128 flat_pcoff (F16K8, A100 flagship)
+        ("production", {"tile_id": 57}),  # 64x128 flat_pcoff (F16Acc)
+        ("production", {"tile_id": 58}),  # 64x64 3s_pcoff
+        ("production", {"tile_id": 59}),  # 64x64 warp_spec_pcoff
+        ("production", {"tile_id": 63}),  # 64x128 warp_spec_pcoff
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
+
+# Full production pool (F32Acc + F16Acc + Pcoff). Referenced by _AB_PARAMS_AUTO
+# so env-var overrides like WARPCONVNET_AB_ALGO_MODE=["production"] can still
+# opt into F16Acc and pcoff tiles.
+_AB_PRODUCTION = _AB_PRODUCTION_F32ACC + _AB_PRODUCTION_F16ACC + _AB_PRODUCTION_PCOFF
+
+# Dgrad via forward kernel: pcoff tiles also usable for dgrad (pre-transposed
+# weight) since they're forward kernels. Enabled at same tier as base F32Acc.
+_AB_PRODUCTION_FWD_AS_DGRAD_PCOFF = (
+    [
+        ("production_fwd_as_dgrad", {"tile_id": 54}),
+        ("production_fwd_as_dgrad", {"tile_id": 55}),
+        ("production_fwd_as_dgrad", {"tile_id": 56}),
+        ("production_fwd_as_dgrad", {"tile_id": 57}),
+        ("production_fwd_as_dgrad", {"tile_id": 58}),
+        ("production_fwd_as_dgrad", {"tile_id": 59}),
+        ("production_fwd_as_dgrad", {"tile_id": 63}),
+    ]
+    if _HAS_PRODUCTION
+    else []
+)
 
 # Dgrad via forward kernel (explicit weight transpose, reuses fwd tiles).
 # Same F32Acc / F16Acc split as forward above — F16Acc tiles gated by mode.
@@ -286,7 +323,9 @@ _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC = (
 )
 
 _AB_PRODUCTION_FWD_AS_DGRAD = (
-    _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC + _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC
+    _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC
+    + _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC
+    + _AB_PRODUCTION_FWD_AS_DGRAD_PCOFF
 )
 
 _ATB_PRODUCTION = (
