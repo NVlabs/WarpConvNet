@@ -17,11 +17,41 @@ from __future__ import annotations
 
 from typing import Iterable
 
-_MIN_SCHEMA_VERSION = 4
+_MIN_SCHEMA_VERSION = 5
 
 
-def _get_tiles(op: str):
-    """Return active tile records for ``op``. Imports warpgemm directly."""
+def _device_arch_code() -> int | None:
+    """Current device SM capability as major*10+minor (e.g. 89 for Ada).
+
+    Returns ``None`` when CUDA isn't initialized — caller should skip
+    arch-gate filtering in that case (CI test collection, etc.).
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability(0)
+    return major * 10 + minor
+
+
+# Cache arch at import — SM capability doesn't change at runtime.
+_DEVICE_ARCH: int | None = None
+
+
+def _get_device_arch() -> int | None:
+    global _DEVICE_ARCH
+    if _DEVICE_ARCH is None:
+        _DEVICE_ARCH = _device_arch_code()
+    return _DEVICE_ARCH
+
+
+def _get_tiles(op: str, filter_arch: bool = True):
+    """Return active tile records for ``op``. Imports warpgemm directly.
+
+    ``filter_arch=True`` (default) drops tiles whose ``compile_archs`` excludes
+    the current device SM — prevents arch-gated tiles (e.g. 10/22/24/48/49
+    with compile_archs=(80,)) from appearing in dispatch candidates on Ada.
+    """
     from warpgemm.autotune import build_tile_metadata, get_schema_version
 
     if get_schema_version() < _MIN_SCHEMA_VERSION:
@@ -29,7 +59,13 @@ def _get_tiles(op: str):
             f"warpgemm tile_metadata schema_version "
             f"{get_schema_version()} < required {_MIN_SCHEMA_VERSION}"
         )
-    return build_tile_metadata(active_only=True, ops=(op,))
+    tiles = build_tile_metadata(active_only=True, ops=(op,))
+    if not filter_arch:
+        return tiles
+    arch = _get_device_arch()
+    if arch is None:
+        return tiles
+    return [t for t in tiles if t.supports_arch(arch)]
 
 
 # ---------------------------------------------------------------------------

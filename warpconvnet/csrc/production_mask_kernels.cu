@@ -24,6 +24,13 @@
 #include "include/MaskGemm_forward_64x64x32_1s_flat.h"
 #include "include/MaskGemm_forward_64x64x32_1s_flat_direpi_sb.h"
 
+// Forward pcoff (E1 offset-precompute) variants — warpgemm tiles 54-63
+#include "include/MaskGemm_forward_64x128x32_1s_flat_pcoff.h"
+#include "include/MaskGemm_forward_64x128x32_2s_warp_spec_pcoff.h"
+#include "include/MaskGemm_forward_64x64x32_1s_flat_pcoff.h"
+#include "include/MaskGemm_forward_64x64x32_2s_warp_spec_pcoff.h"
+#include "include/MaskGemm_forward_64x64x32_3s_pcoff.h"
+
 // Dgrad kernels
 #include "include/MaskGemm_dgrad_32x32x32_1s_flat.h"
 #include "include/MaskGemm_dgrad_64x128x32_1s_flat_direpi.h"
@@ -302,6 +309,50 @@ INSTANTIATE_PROD_FWD(MaskGemm_forward_128x64x32_2s_fused,
                      Tile128x64x32,
                      cutlass::bfloat16_t)
 INSTANTIATE_PROD_FWD(MaskGemm_forward_128x64x32_2s_fused, cutlass::bfloat16_t, Tile128x64x32, float)
+
+// Forward pcoff variants (E1 offset-precompute): warpgemm tile IDs 54-63.
+// fp16->fp16 canonical flavor for all 7; bf16->bf16 for tiles 58/59/63 whose
+// base configs use F32 accumulator (54-57 are F16Accum/F16K8, fp16-only).
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x64x32_1s_flat_pcoff,  // tile 54
+                     cutlass::half_t,
+                     Tile64x64x32_Pcoff,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x64x32_1s_flat_pcoff,  // tile 55
+                     cutlass::half_t,
+                     Tile64x64x32_Pcoff_K8,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x128x32_1s_flat_pcoff,  // tile 56
+                     cutlass::half_t,
+                     Tile64x128x32_Pcoff_K8,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x128x32_1s_flat_pcoff,  // tile 57
+                     cutlass::half_t,
+                     Tile64x128x32_Pcoff,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x64x32_3s_pcoff,  // tile 58 fp16
+                     cutlass::half_t,
+                     Tile64x64x32_Pcoff_3s,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x64x32_3s_pcoff,  // tile 58 bf16
+                     cutlass::bfloat16_t,
+                     Tile64x64x32_Pcoff_3s,
+                     cutlass::bfloat16_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x64x32_2s_warp_spec_pcoff,  // tile 59 fp16
+                     cutlass::half_t,
+                     Tile64x64x32_Pcoff_WS,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x64x32_2s_warp_spec_pcoff,  // tile 59 bf16
+                     cutlass::bfloat16_t,
+                     Tile64x64x32_Pcoff_WS,
+                     cutlass::bfloat16_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x128x32_2s_warp_spec_pcoff,  // tile 63 fp16
+                     cutlass::half_t,
+                     Tile64x128x32_Pcoff_WS,
+                     cutlass::half_t)
+INSTANTIATE_PROD_FWD(MaskGemm_forward_64x128x32_2s_warp_spec_pcoff,  // tile 63 bf16
+                     cutlass::bfloat16_t,
+                     Tile64x128x32_Pcoff_WS,
+                     cutlass::bfloat16_t)
 
 // Forward: 64x64x32 flat with fp32 output — uses dedicated launch function
 // to avoid conflict with existing (half_t, Tile64x64x32, float) instantiation

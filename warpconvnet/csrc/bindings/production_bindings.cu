@@ -685,7 +685,7 @@ int production_fwd(torch::Tensor input,
   auto si = input.scalar_type();
   auto so = output.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto tile = static_cast<gemm::MMATile>(tile_id);
+  auto tile = static_cast<gemm::ProdFwdTile>(tile_id);
 
   auto args = std::make_tuple(input.data_ptr(),
                               weight.data_ptr(),
@@ -754,9 +754,9 @@ int production_fwd(torch::Tensor input,
           [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 12>(a...); }, \
           args))
 
-  if (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out ||
-      tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out_sb) {
-    bool use_sb = (tile == gemm::MMATile::Prod_Fwd_64x64x32_f32out_sb);
+  if (tile == gemm::ProdFwdTile::_64x64x32_f32out ||
+      tile == gemm::ProdFwdTile::_64x64x32_f32out_sb) {
+    bool use_sb = (tile == gemm::ProdFwdTile::_64x64x32_f32out_sb);
     if (si == torch::kFloat16) {
       if (use_sb)
         FWD_F32OUT_SB_MW(cutlass::half_t);
@@ -805,11 +805,11 @@ int production_fwd(torch::Tensor input,
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Scalar_SAB_SE:
+      case gemm::ProdFwdTile::Scalar_SAB_SE:
         SCALAR_FWD_MW(sab_se, In, Out);
-      case gemm::MMATile::Prod_Scalar_SA:
+      case gemm::ProdFwdTile::Scalar_SA:
         SCALAR_FWD_MW(sa, In, Out);
-      case gemm::MMATile::Prod_Scalar_SB_SE:
+      case gemm::ProdFwdTile::Scalar_SB_SE:
         SCALAR_FWD_MW(sb_se, In, Out);
       default:
         break;
@@ -820,11 +820,11 @@ int production_fwd(torch::Tensor input,
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Scalar_SAB_SE:
+      case gemm::ProdFwdTile::Scalar_SAB_SE:
         SCALAR_FWD_MW(sab_se, In, Out);
-      case gemm::MMATile::Prod_Scalar_SA:
+      case gemm::ProdFwdTile::Scalar_SA:
         SCALAR_FWD_MW(sa, In, Out);
-      case gemm::MMATile::Prod_Scalar_SB_SE:
+      case gemm::ProdFwdTile::Scalar_SB_SE:
         SCALAR_FWD_MW(sb_se, In, Out);
       default:
         break;
@@ -917,17 +917,39 @@ int production_fwd(torch::Tensor input,
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Fwd_32x32x32_F16Acc:
+      case gemm::ProdFwdTile::_32x32x32_F16Acc:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile32x32x32_F16Accum, Out, a...); }, args);
-      case gemm::MMATile::Prod_Fwd_64x64x32:
+      case gemm::ProdFwdTile::_64x64x32:
         FWD_64x64_MW(In);
-      case gemm::MMATile::Prod_Fwd_64x128x32_F16Acc:
+      case gemm::ProdFwdTile::_64x128x32_F16Acc:
         FWD_64x128_F16ACC_MW_DISP();
-      case gemm::MMATile::Prod_Fwd_64x128x32_3s:
+      case gemm::ProdFwdTile::_64x128x32_3s:
         FWD_64x128_3S_MW(In);
-      case gemm::MMATile::Prod_Fwd_128x64x32:
+      case gemm::ProdFwdTile::_128x64x32:
         FWD_128x64_MW(In);
+      // Pcoff (E1) variants, MW=1 only (MW>1 instantiations deferred)
+      case gemm::ProdFwdTile::Pcoff_64x64x32_flat:
+        return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff, Out, a...); },
+                          args);
+      case gemm::ProdFwdTile::Pcoff_64x64x32_f16k8:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_K8, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x128x32_f16k8:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_K8, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x128x32_flat:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x64x32_3s:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_3s, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x64x32_2s_warp_spec:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_WS, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x128x32_2s_warp_spec:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_WS, Out, a...); }, args);
       default:
         break;
     }
@@ -937,12 +959,22 @@ int production_fwd(torch::Tensor input,
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Fwd_64x64x32:
+      case gemm::ProdFwdTile::_64x64x32:
         FWD_64x64_MW(In);
-      case gemm::MMATile::Prod_Fwd_64x128x32_3s:
+      case gemm::ProdFwdTile::_64x128x32_3s:
         FWD_64x128_3S_MW(In);
-      case gemm::MMATile::Prod_Fwd_128x64x32:
+      case gemm::ProdFwdTile::_128x64x32:
         FWD_128x64_MW(In);
+      // Pcoff bf16 variants — only tiles 58/59/63 (F32-accum base supports bf16)
+      case gemm::ProdFwdTile::Pcoff_64x64x32_3s:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_3s, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x64x32_2s_warp_spec:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_WS, Out, a...); }, args);
+      case gemm::ProdFwdTile::Pcoff_64x128x32_2s_warp_spec:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_WS, Out, a...); }, args);
       default:
         break;
     }
@@ -986,7 +1018,7 @@ int production_dgrad(torch::Tensor grad_output,
   auto si = grad_output.scalar_type();
   auto so = grad_input.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto tile = static_cast<gemm::MMATile>(tile_id);
+  auto tile = static_cast<gemm::ProdDgradTile>(tile_id);
 
   auto args = std::make_tuple(grad_output.data_ptr(),
                               weight_T.data_ptr(),
@@ -1022,7 +1054,7 @@ int production_dgrad(torch::Tensor grad_output,
           [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 12>(a...); }, \
           args))
 
-  if (tile == gemm::MMATile::Prod_Dgrad_64x64x32_f32out) {
+  if (tile == gemm::ProdDgradTile::_64x64x32_f32out) {
     if (si == torch::kFloat16) DGRAD_F32OUT_MW(cutlass::half_t);
 #ifndef DISABLE_BFLOAT16
     if (si == torch::kBFloat16) DGRAD_F32OUT_MW(cutlass::bfloat16_t);
@@ -1059,11 +1091,11 @@ int production_dgrad(torch::Tensor grad_output,
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Scalar_SAB_SE:
+      case gemm::ProdDgradTile::Scalar_SAB_SE:
         SCALAR_DGRAD_MW(sab_se, In, Out);
-      case gemm::MMATile::Prod_Scalar_SA:
+      case gemm::ProdDgradTile::Scalar_SA:
         SCALAR_DGRAD_MW(sa, In, Out);
-      case gemm::MMATile::Prod_Scalar_SB_SE:
+      case gemm::ProdDgradTile::Scalar_SB_SE:
         SCALAR_DGRAD_MW(sb_se, In, Out);
       default:
         break;
@@ -1074,11 +1106,11 @@ int production_dgrad(torch::Tensor grad_output,
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Scalar_SAB_SE:
+      case gemm::ProdDgradTile::Scalar_SAB_SE:
         SCALAR_DGRAD_MW(sab_se, In, Out);
-      case gemm::MMATile::Prod_Scalar_SA:
+      case gemm::ProdDgradTile::Scalar_SA:
         SCALAR_DGRAD_MW(sa, In, Out);
-      case gemm::MMATile::Prod_Scalar_SB_SE:
+      case gemm::ProdDgradTile::Scalar_SB_SE:
         SCALAR_DGRAD_MW(sb_se, In, Out);
       default:
         break;
@@ -1109,29 +1141,29 @@ int production_dgrad(torch::Tensor grad_output,
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Dgrad_32x32x32:
+      case gemm::ProdDgradTile::_32x32x32:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile32x32x32, Out, a...); },
                           args);
-      case gemm::MMATile::Prod_Dgrad_64x64x32:
+      case gemm::ProdDgradTile::_64x64x32:
         DGRAD_64x64_MW(In);
-      case gemm::MMATile::Prod_Dgrad_64x64x32_F16Acc:
+      case gemm::ProdDgradTile::_64x64x32_F16Acc:
         return std::apply(
             [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32_F16Accum, Out, a...); }, args);
-      case gemm::MMATile::Prod_Dgrad_64x128x32:
+      case gemm::ProdDgradTile::_64x128x32:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32, Out, a...); },
                           args);
-      case gemm::MMATile::Prod_Dgrad_64x128x32_F16Acc:
+      case gemm::ProdDgradTile::_64x128x32_F16Acc:
         return std::apply(
             [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32_F16Accum, Out, a...); }, args);
-      case gemm::MMATile::Prod_Dgrad_64x64x32_Pipe:
+      case gemm::ProdDgradTile::_64x64x32_Pipe:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x64<In, Out>(a...); },
             args);
-      case gemm::MMATile::Prod_Dgrad_64x128x32_Pipe:
+      case gemm::ProdDgradTile::_64x128x32_Pipe:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x128<In, Out>(a...); },
             args);
-      case gemm::MMATile::Prod_Dgrad_128x64x32_Pipe:
+      case gemm::ProdDgradTile::_128x64x32_Pipe:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
             args);
@@ -1144,20 +1176,20 @@ int production_dgrad(torch::Tensor grad_output,
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Dgrad_64x64x32:
+      case gemm::ProdDgradTile::_64x64x32:
         DGRAD_64x64_MW(In);
-      case gemm::MMATile::Prod_Dgrad_64x128x32:
+      case gemm::ProdDgradTile::_64x128x32:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32, Out, a...); },
                           args);
-      case gemm::MMATile::Prod_Dgrad_64x64x32_Pipe:
+      case gemm::ProdDgradTile::_64x64x32_Pipe:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x64<In, Out>(a...); },
             args);
-      case gemm::MMATile::Prod_Dgrad_64x128x32_Pipe:
+      case gemm::ProdDgradTile::_64x128x32_Pipe:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x128<In, Out>(a...); },
             args);
-      case gemm::MMATile::Prod_Dgrad_128x64x32_Pipe:
+      case gemm::ProdDgradTile::_128x64x32_Pipe:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
             args);
@@ -1206,14 +1238,14 @@ int production_wgrad(torch::Tensor input,
   auto si = input.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  auto tile = static_cast<gemm::MMATile>(tile_id);
+  auto tile = static_cast<gemm::ProdWgradTile>(tile_id);
   auto pt_ptr = pair_table.data_ptr<int>();
   auto pm_ptr = reinterpret_cast<const uint32_t *>(pair_mask.data_ptr<int>());
   auto ms_ptr = mask_argsort.data_ptr<int>();
   auto rm_ptr = reinterpret_cast<const uint32_t *>(reduced_mask.data_ptr<int>());
 
   // Scalar wgrad (any C alignment)
-  if (tile == gemm::MMATile::Prod_Wgrad_Scalar_SAB) {
+  if (tile == gemm::ProdWgradTile::Scalar_SAB) {
     if (si == torch::kFloat16)
       return cute_gemm::launch_scalar_wgrad_sab<cutlass::half_t, float>(input.data_ptr(),
                                                                         grad_output.data_ptr(),
@@ -1322,17 +1354,17 @@ int production_wgrad(torch::Tensor input,
   if (si == torch::kFloat16) {
     using In = cutlass::half_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Wgrad_64x64x32_f32_atomic:
+      case gemm::ProdWgradTile::_64x64x32_f32_atomic:
         return WGRAD_ATOMIC(In, 64x64);
-      case gemm::MMATile::Prod_Wgrad_64x128x32_f32_atomic:
+      case gemm::ProdWgradTile::_64x128x32_f32_atomic:
         return WGRAD_ATOMIC(In, 64x128);
-      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_atomic:
+      case gemm::ProdWgradTile::_64x64x32_3s_f32_atomic:
         return WGRAD_ATOMIC(In, 3s);
-      case gemm::MMATile::Prod_Wgrad_64x64x32_2s_f32_workspace:
+      case gemm::ProdWgradTile::_64x64x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64);
-      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_workspace:
+      case gemm::ProdWgradTile::_64x64x32_3s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64_3s);
-      case gemm::MMATile::Prod_Wgrad_64x128x32_2s_f32_workspace:
+      case gemm::ProdWgradTile::_64x128x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x128);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);
@@ -1342,17 +1374,17 @@ int production_wgrad(torch::Tensor input,
   if (si == torch::kBFloat16) {
     using In = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::MMATile::Prod_Wgrad_64x64x32_f32_atomic:
+      case gemm::ProdWgradTile::_64x64x32_f32_atomic:
         return WGRAD_ATOMIC(In, 64x64);
-      case gemm::MMATile::Prod_Wgrad_64x128x32_f32_atomic:
+      case gemm::ProdWgradTile::_64x128x32_f32_atomic:
         return WGRAD_ATOMIC(In, 64x128);
-      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_atomic:
+      case gemm::ProdWgradTile::_64x64x32_3s_f32_atomic:
         return WGRAD_ATOMIC(In, 3s);
-      case gemm::MMATile::Prod_Wgrad_64x64x32_2s_f32_workspace:
+      case gemm::ProdWgradTile::_64x64x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64);
-      case gemm::MMATile::Prod_Wgrad_64x64x32_3s_f32_workspace:
+      case gemm::ProdWgradTile::_64x64x32_3s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64_3s);
-      case gemm::MMATile::Prod_Wgrad_64x128x32_2s_f32_workspace:
+      case gemm::ProdWgradTile::_64x128x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x128);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);

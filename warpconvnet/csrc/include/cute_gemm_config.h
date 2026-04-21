@@ -382,5 +382,47 @@ struct CuteTileConfigOverride {
   static constexpr bool UseCpAsyncGatherA = UseCpAsyncGatherA_;
 };
 
+// -----------------------------------------------------------------------------
+// Pcoff tile Config specializations (tiles 54-63 from warpgemm)
+// Each Pcoff TileTag inherits from the matching base config so the existing
+// DEFINE_CUTE_TILE_CONFIG macros aren't duplicated. Kernel class carries the
+// _pcoff suffix (offset-precompute variant).
+// -----------------------------------------------------------------------------
+
+// tile 54: flat_pcoff + F16Accum base
+template <>
+struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_Pcoff>
+    : CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_F16Accum> {};
+
+// tile 55: flat_pcoff + F16K8 base
+template <>
+struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_Pcoff_K8>
+    : CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_F16K8> {};
+
+// tile 56: flat_pcoff + F16K8 base (64x128, A100 flagship)
+template <>
+struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_Pcoff_K8>
+    : CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_F16K8> {};
+
+// tile 57: flat_pcoff + F16Accum base (64x128)
+template <>
+struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_Pcoff>
+    : CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_F16Accum> {};
+
+// tile 58: 3s_pcoff — F32 accum base with NumStages=3 override
+template <typename ElemIn>
+struct CuteTileConfig<ElemIn, gemm::Tile64x64x32_Pcoff_3s>
+    : CuteTileConfigOverride<CuteTileConfig<ElemIn, gemm::Tile64x64x32>, 3, false> {};
+
+// tile 59: 2s_warp_spec_pcoff — F32 accum base
+template <typename ElemIn>
+struct CuteTileConfig<ElemIn, gemm::Tile64x64x32_Pcoff_WS>
+    : CuteTileConfig<ElemIn, gemm::Tile64x64x32> {};
+
+// tile 63: 2s_warp_spec_pcoff — F32 accum base (64x128)
+template <typename ElemIn>
+struct CuteTileConfig<ElemIn, gemm::Tile64x128x32_Pcoff_WS>
+    : CuteTileConfig<ElemIn, gemm::Tile64x128x32> {};
+
 }  // namespace cute_gemm
 }  // namespace warpconvnet

@@ -43,6 +43,10 @@ from .algo_params import (
 
 logger = get_logger(__name__)
 
+# Pcoff forward tile IDs (warpgemm catalog, mirrored in ProdFwdTile enum).
+# These have MW=1 instantiations only; K>32 configs must route elsewhere.
+_PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
+
 # Lazy imports for optional backends
 if _HAS_CUTE_BACKEND:
     from .cute import (
@@ -262,6 +266,15 @@ def _execute_forward(
                 tile_id = 72
 
         out_dtype = torch.float32 if use_f32_out_tile else _in.dtype
+
+        # Pcoff tiles (warpgemm 54/55/56/57/58/59/63) are MW=1 only — MW>1 kernels
+        # are not yet instantiated. Guard so autotune discards these candidates at K>32
+        # instead of silently producing zeros.
+        if mask_words > 1 and tile_id in _PCOFF_FWD_TILES:
+            raise RuntimeError(
+                f"Pcoff tile {tile_id} only supports mask_words==1 (got {mask_words}). "
+                "Use a non-pcoff tile for K>32."
+            )
 
         # Single launch handles groups=1 and groups>1 via grid.z
         C_out_total = C_out_g * groups
@@ -546,6 +559,9 @@ def _execute_backward(
                         dgrad_tile = 71
                     else:
                         dgrad_tile = 72
+                elif mask_words > 1 and dgrad_tile in _PCOFF_FWD_TILES:
+                    # Pcoff tiles are MW=1 only — reroute to MW-capable aligned tile 41.
+                    dgrad_tile = 41
 
                 dgrad_fn = _C.production.fwd
             else:
