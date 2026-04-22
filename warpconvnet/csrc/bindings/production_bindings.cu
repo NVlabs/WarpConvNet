@@ -1346,8 +1346,12 @@ int production_wgrad(torch::Tensor input,
                                                                            groups,                 \
                                                                            stream);                \
     if (status != 0) return status;                                                                \
-    /* Reduce workspace along split_k dim into grad_weight (pre-zeroed by caller) */               \
-    grad_weight.copy_(workspace.sum(0));                                                           \
+    /* Reduce workspace along split_k dim into grad_weight (pre-zeroed by caller).                 \
+       Workspace carries an explicit groups dim; grad_weight from the groups=1                     \
+       caller path is [K, C_in, C_out] with no G dim, so squeeze when groups==1. */                \
+    auto reduced = workspace.sum(0);                                                               \
+    if (groups == 1) reduced = reduced.squeeze(1);                                                 \
+    grad_weight.copy_(reduced);                                                                    \
     return 0;                                                                                      \
   } while (0)
 
