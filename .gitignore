@@ -34,3 +34,6 @@ scratch/
 plans/
 internal/
 notes/
+
+# Auto-generated at build time
+warpconvnet/_version.py

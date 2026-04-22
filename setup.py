@@ -29,6 +29,23 @@ if _HAS_TORCH:
 
 workspace_dir = os.path.dirname(os.path.abspath(__file__))
 
+
+def _git_commit():
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=workspace_dir, stderr=subprocess.DEVNULL
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+BUILD_COMMIT = _git_commit()
+print(f"warpconvnet build commit: {BUILD_COMMIT}")
+
 # Defaults for sdist-only mode (no torch)
 ext_modules = []
 cmdclass = {}
@@ -89,10 +106,13 @@ if _HAS_TORCH:
     ]
 
     # Define compile arguments
+    _commit_define = f'-DWARPCONVNET_BUILD_COMMIT="{BUILD_COMMIT}"'
+
     cxx_args = [
         "-std=c++17",
         "-O3",
         "-DWITH_CUDA",
+        _commit_define,
         "-Wno-changes-meaning",
         "-fpermissive",
     ]
@@ -103,6 +123,7 @@ if _HAS_TORCH:
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "-DWITH_CUDA",
+        _commit_define,
         # Intentionally omit -gencode/-arch flags. PyTorch will inject these
         # based on TORCH_CUDA_ARCH_LIST or its internal defaults.
         "--allow-unsupported-compiler",
@@ -289,6 +310,9 @@ if _HAS_TORCH:
 else:
     print("PyTorch not found — building source distribution only (no CUDA extensions).")
 
+
+# Bake git commit hash into warpconvnet/_build_info.py at build time so
+# `import warpconvnet` can report which binary was loaded.
 # For pre-built wheels, set SETUPTOOLS_SCM_PRETEND_VERSION externally
 # (e.g. "1.4.2+torch2.10cu128") to inject a local version tag.
 # setuptools-scm reads version from git tags by default.
