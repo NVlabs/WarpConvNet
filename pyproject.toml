@@ -72,6 +72,7 @@ warpconvnet = ["csrc/*.cu", "csrc/*.cpp", "csrc/*.h", "csrc/*.hpp", "csrc/includ
 [tool.setuptools_scm]
 # Version derived from git tags (e.g. v1.4.2 → 1.4.2)
 # Between tags: 1.4.3.dev3+g1234567
+write_to = "warpconvnet/_version.py"
 
 [tool.pytest.ini_options]
 markers = [

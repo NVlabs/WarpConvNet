@@ -13,8 +13,14 @@
 
 namespace py = pybind11;
 
+// Build-time commit hash injected via -DWARPCONVNET_BUILD_COMMIT="<sha>".
+#ifndef WARPCONVNET_BUILD_COMMIT
+#define WARPCONVNET_BUILD_COMMIT "unknown"
+#endif
+
 PYBIND11_MODULE(_C, m) {
   m.doc() = "CUDA kernels exposed through PyBind11";
+  m.attr("__build_commit__") = py::str(WARPCONVNET_BUILD_COMMIT);
   warpconvnet::bindings::register_gemm(m);
   warpconvnet::bindings::register_fma(m);
   warpconvnet::bindings::register_utils(m);
