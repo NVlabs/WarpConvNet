@@ -526,15 +526,17 @@ def _execute_backward(
                 kernel_map, N_in, num_out_coords, grad_output.device
             )
 
-            # production.dgrad expects weight in its NATIVE [K, G, C_in, C_out] layout
-            # (the kernel header docstring states: "weight [K, G, C_in, C_out] — NOT
-            # transposed"). The mainloop's _load_B_tile addresses each per-K plane as
-            # rows of length C_out indexed by C_in (n_local * K_dim + k_local with
-            # K_dim=C_out), which matches the un-transposed memory layout. Earlier code
-            # passed _w.transpose(1,2) which double-transposed B and gave near-zero
-            # correlation with the reference (rdiff ~1.4 across every shape). The
-            # production_fwd_as_dgrad path also expects un-transposed weight here.
-            _w_dgrad = _w.contiguous()
+            # Native production.dgrad reads W[K, G, Cin, Cout] with a stride-transpose
+            # in shared memory so MMA reduces over Cout (correct for dX = dY @ W^T).
+            # production_fwd_as_dgrad reuses the fwd kernel, whose B-loader reduces
+            # over the first channel axis — so W must be pre-transposed to swap the
+            # axes before the kernel sees it. .contiguous() is mandatory: fwd's
+            # vectorized cp.async needs 16-byte-aligned strides and a .transpose()
+            # view does not satisfy that.
+            if use_fwd_for_dgrad:
+                _w_dgrad = _w.transpose(-1, -2).contiguous()
+            else:
+                _w_dgrad = _w.contiguous()
 
             # Select dgrad tile based on per-group channel dims.
             # Note: f32out tiles (80, 81, 82) and partial-scalar tiles (71, 72)
@@ -545,7 +547,12 @@ def _execute_backward(
             dgrad_out_dtype = torch.float32 if use_f32_out_tile else compute_dtype
 
             if use_fwd_for_dgrad:
+                from .algo_params import WT_TILE_TO_FWD_TILE
+
                 dgrad_tile = params.get("tile_id", 41)
+                # Autotune pool uses dgrad-namespace _wt ids (83-94); translate
+                # back to the underlying fwd tile that the binding dispatches on.
+                dgrad_tile = WT_TILE_TO_FWD_TILE.get(dgrad_tile, dgrad_tile)
                 fwd_cin_aligned = C_out_g % vec_width == 0
                 fwd_cout_aligned = C_in_g % vec_width == 0
                 if use_f32_out_tile:

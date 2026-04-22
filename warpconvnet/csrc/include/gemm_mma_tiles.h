@@ -164,6 +164,22 @@ enum class ProdDgradTile : int {
   Scalar_SA = 71,
   Scalar_SB_SE = 72,
   _64x64x32_f32out = 81,
+  // fwd-kernel-reused-as-dgrad (weight pre-transposed by caller). These are
+  // descriptive labels for autotune cache and logs; dispatch translates them
+  // to the underlying ProdFwdTile id before invoking launch_production_fwd.
+  // See WT_TILE_TO_FWD_TILE in algo_params.py.
+  _64x64x32_wt = 83,                     // -> ProdFwdTile::_64x64x32 (41)
+  _64x128x32_3s_wt = 84,                 // -> ProdFwdTile::_64x128x32_3s (43)
+  _128x64x32_wt = 85,                    // -> ProdFwdTile::_128x64x32 (44)
+  _32x32x32_wt_F16Acc = 86,              // -> ProdFwdTile::_32x32x32_F16Acc (40)
+  _64x128x32_wt_F16Acc = 87,             // -> ProdFwdTile::_64x128x32_F16Acc (42)
+  Pcoff_64x64x32_flat_wt = 88,           // -> ProdFwdTile::Pcoff_64x64x32_flat (54)
+  Pcoff_64x64x32_f16k8_wt = 89,          // -> ProdFwdTile::Pcoff_64x64x32_f16k8 (55)
+  Pcoff_64x128x32_f16k8_wt = 90,         // -> ProdFwdTile::Pcoff_64x128x32_f16k8 (56)
+  Pcoff_64x128x32_flat_wt = 91,          // -> ProdFwdTile::Pcoff_64x128x32_flat (57)
+  Pcoff_64x64x32_3s_wt = 92,             // -> ProdFwdTile::Pcoff_64x64x32_3s (58)
+  Pcoff_64x64x32_2s_warp_spec_wt = 93,   // -> ProdFwdTile::Pcoff_64x64x32_2s_warp_spec (59)
+  Pcoff_64x128x32_2s_warp_spec_wt = 94,  // -> ProdFwdTile::Pcoff_64x128x32_2s_warp_spec (63)
 };
 
 enum class ProdWgradTile : int {
