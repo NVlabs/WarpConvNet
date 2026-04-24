@@ -86,12 +86,13 @@ See [Accumulator Precision](https://nvlabs.github.io/WarpConvNet/user_guide/accu
 
 WarpConvNet automatically benchmarks CUDA kernel algorithms on the first forward/backward pass and caches results to `~/.cache/warpconvnet/`. Subsequent runs reuse cached results with no overhead.
 
-Sparse convolution decomposes into two distinct GEMM operations:
+Sparse convolution training decomposes into three distinct GEMM operations:
 
-- **AB gather-scatter** (forward and dgrad): `D[scatter] = A[gather] @ B` — fused gather-GEMM-scatter
+- **AB gather-scatter** (forward): `Y = A @ W` — fused gather-GEMM-scatter
+- **ABt gather-scatter** (dgrad): `dX = dY @ W.T` — dgrad uses the gather-scatter path with a reverse pair table
 - **AtB gather-gather** (wgrad): `D = A[gather]^T @ B[gather]` — reduction GEMM
 
-Each operation is auto-tuned independently with its own candidate set and cache namespace.
+Forward, dgrad, and wgrad are auto-tuned independently. They have separate algorithm controls and separate cache namespaces: `AB_gather_scatter`, `ABt_gather_scatter`, and `AtB_gather_gather`.
 
 **The first iteration will be slower** while auto-tuning runs. You will see log messages like:
 
@@ -102,23 +103,24 @@ Auto-tune forward complete: production (mma_tile=3) — 0.21ms
 
 ### Algorithm Selection Modes
 
-The auto-tuner supports three candidate selection modes, controlled by environment variables:
+Each direction supports the same selection modes via `WARPCONVNET_FWD_ALGO_MODE`, `WARPCONVNET_DGRAD_ALGO_MODE`, and `WARPCONVNET_WGRAD_ALGO_MODE`:
 
-| Mode                 | AB candidates | AtB candidates | Description                                                                                     |
-| -------------------- | ------------: | -------------: | ----------------------------------------------------------------------------------------------- |
-| **`auto`** (default) |           4-5 |            3-4 | Fastest auto-tune. Only the dominant winner per channel/N region. Recommended for training.     |
-| **`trimmed`**        |          5-11 |            6-9 | Moderate search. Includes runner-ups for edge cases. Default for `populate_benchmark_cache.py`. |
-| **`all`**            |            23 |             35 | Exhaustive. Benchmarks every algorithm. Use for new hardware validation or after code changes.  |
+| Mode                 | Description                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------ |
+| **`auto`** (default) | Fastest auto-tune. Uses a dimension-aware reduced candidate set for each op. Recommended for training. |
+| **`trimmed`**        | Broader search. Includes runner-ups for edge cases. Default for `populate_benchmark_cache.py`.         |
+| **`all`**            | Exhaustive. Benchmarks every algorithm variant. Use for new hardware validation or after code changes. |
 
 ### Environment Variables
 
-| Variable                          | Default                | Description                                             |
-| --------------------------------- | ---------------------- | ------------------------------------------------------- |
-| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | AB gather-scatter algorithm (forward/dgrad)             |
-| `WARPCONVNET_BWD_ALGO_MODE`       | `auto`                 | AtB gather-gather algorithm (wgrad)                     |
-| `WARPCONVNET_USE_FP16_ACCUM`      | `false`                | Use fp16 accumulator for ~15% speedup (lower precision) |
-| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` to suppress auto-tuning logs             |
-| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Cache directory                                         |
+| Variable                          | Default                | Description                                                                  |
+| --------------------------------- | ---------------------- | ---------------------------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | Forward AB gather-scatter algorithm                                          |
+| `WARPCONVNET_DGRAD_ALGO_MODE`     | `auto`                 | Dgrad ABt gather-scatter algorithm, tuned and cached separately from forward |
+| `WARPCONVNET_WGRAD_ALGO_MODE`     | `auto`                 | Wgrad AtB gather-gather algorithm                                            |
+| `WARPCONVNET_USE_FP16_ACCUM`      | `false`                | Use fp16 accumulator for ~15% speedup (lower precision)                      |
+| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` to suppress auto-tuning logs                                  |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Cache directory                                                              |
 
 ```bash
 # Suppress auto-tuning logs
@@ -126,18 +128,35 @@ export WARPCONVNET_AUTOTUNE_LOG=false
 
 # Pin a specific algorithm (skip auto-tuning entirely)
 export WARPCONVNET_FWD_ALGO_MODE=production
+export WARPCONVNET_DGRAD_ALGO_MODE=production
+export WARPCONVNET_WGRAD_ALGO_MODE=cute_grouped
 
 # Exhaustive search (slow, for benchmarking)
 export WARPCONVNET_FWD_ALGO_MODE=all
+export WARPCONVNET_DGRAD_ALGO_MODE=all
+export WARPCONVNET_WGRAD_ALGO_MODE=all
 
 # Benchmark only specific algorithms
 export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
+export WARPCONVNET_DGRAD_ALGO_MODE="[production,cute_grouped]"
+export WARPCONVNET_WGRAD_ALGO_MODE="[cute_grouped,cutlass_grouped_hybrid]"
 
-# Enable fp16 accumulator globally (2x tensor core throughput)
+# Enable fp16 accumulator globally (faster, lower precision)
 export WARPCONVNET_USE_FP16_ACCUM=true
 ```
 
-Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `cute_grouped`, `explicit_gemm_grouped`, `cutlass_grouped_hybrid`, `production`.
+You can also set algorithms per module:
+
+```python
+conv = SparseConv3d(
+    64, 128, kernel_size=3,
+    fwd_algo="production",
+    dgrad_algo="production",
+    wgrad_algo="cute_grouped",
+)
+```
+
+Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`, `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`, `production`.
 
 ### Pre-Populating the Cache
 
