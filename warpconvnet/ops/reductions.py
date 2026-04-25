@@ -7,7 +7,6 @@ from typing import Literal, Tuple
 import torch
 from jaxtyping import Float, Int
 from torch import Tensor
-from torch_scatter import segment_csr
 
 
 class REDUCTIONS(Enum):
@@ -35,6 +34,22 @@ def _var(
     return out_var, out_mean
 
 
+def _segment_reduce(
+    features: Float[Tensor, "N F"],
+    row_offsets: Int[Tensor, "M+1"],  # noqa
+    reduction: REDUCTIONS,
+) -> Float[Tensor, "M F"]:  # noqa
+    reduce_name = {
+        REDUCTIONS.MIN: "min",
+        REDUCTIONS.MAX: "max",
+        REDUCTIONS.MEAN: "mean",
+        REDUCTIONS.SUM: "sum",
+        REDUCTIONS.MUL: "prod",
+    }[reduction]
+    lengths = row_offsets.diff().to(features.device)
+    return torch.segment_reduce(features, reduce_name, lengths=lengths)
+
+
 def row_reduction(
     features: Float[Tensor, "N F"],  # noqa
     row_offsets: Int[Tensor, "M+1"],  # noqa
@@ -55,7 +70,7 @@ def row_reduction(
         REDUCTIONS.SUM,
         REDUCTIONS.MUL,
     ]:
-        out_feature = segment_csr(features, row_offsets, reduce=str(reduction.value))
+        out_feature = _segment_reduce(features, row_offsets, reduction)
     elif reduction == REDUCTIONS.VAR:
         out_feature = _var(features, row_offsets)[0]
     elif reduction == REDUCTIONS.STD:
