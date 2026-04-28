@@ -9,7 +9,11 @@ from jaxtyping import Float
 import torch
 from torch import Tensor
 
-import warpconvnet._C as _C
+from warpconvnet._offset_gemm_constants import BACKEND_CUTE_SM80
+from warpconvnet.csrc.offset_gemm_dispatch import (
+    dispatch_ad_gather_scatter,
+    dispatch_trab_gather,
+)
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.type_cast import _min_dtype
 
@@ -19,7 +23,9 @@ def _cute_implicit_gemm_sm90_forward_logic(
     weight: Float[Tensor, "K C_in C_out"],
     kernel_map: IntSearchResult,
     num_out_coords: int,
-    mma_tile: int = 100,
+    *,
+    backend: str,
+    tile_id: int,
 ) -> Union[Float[Tensor, "M C_out"], int]:
     """Forward pass using SM90 WGMMA CuTe GEMM kernels."""
     device = in_features.device
@@ -30,14 +36,12 @@ def _cute_implicit_gemm_sm90_forward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = (
-        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
-    )
+    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
 
     if iden_idx is not None:
-        output_feature_tensor = torch.matmul(
-            _in_features_detached, _weight_detached[iden_idx]
-        ).to(dtype=out_dtype)
+        output_feature_tensor = torch.matmul(_in_features_detached, _weight_detached[iden_idx]).to(
+            dtype=out_dtype
+        )
     else:
         output_feature_tensor = torch.zeros(
             num_out_coords, weight.shape[-1], device=device, dtype=out_dtype
@@ -52,14 +56,15 @@ def _cute_implicit_gemm_sm90_forward_logic(
             continue
         in_map = in_map.to(device).int()
         out_map = out_map.to(device).int()
-        status = _C.gemm.cute_gemm_sm90_AD_gather_scatter(
+        status = dispatch_ad_gather_scatter(
             _in_features_detached,
             _weight_detached[i],
             output_feature_tensor,
             output_feature_tensor,
             in_map,
             out_map,
-            mma_tile=mma_tile,
+            backend=backend,
+            tile_id=tile_id,
             alpha=1.0,
             beta=1.0,
         )
@@ -75,10 +80,10 @@ def _cute_implicit_gemm_sm90_backward_logic(
     kernel_map: IntSearchResult,
     requires_grad: Tuple[bool, bool] = (True, True),
     device: torch.device = None,
-    mma_tile: int = 100,
-) -> Union[
-    Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]
-]:
+    *,
+    backend: str,
+    tile_id: int,
+) -> Union[Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]], Tuple[int, int]]:
     """Backward pass using SM90 WGMMA CuTe GEMM kernels."""
     if device is None:
         device = in_features.device
@@ -90,19 +95,17 @@ def _cute_implicit_gemm_sm90_backward_logic(
     _in_features_detached = in_features.contiguous().detach().to(dtype=min_dtype)
     _weight_detached = weight.contiguous().detach().to(dtype=min_dtype)
 
-    out_dtype = (
-        min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
-    )
+    out_dtype = min_dtype if min_dtype in (torch.float16, torch.bfloat16) else torch.float32
     grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
 
     iden_idx = kernel_map.identity_map_index
     if iden_idx is not None:
-        grad_in_features = torch.matmul(
-            _grad_output_detached, _weight_detached[iden_idx].T
-        ).to(dtype=out_dtype)
-        grad_weight[iden_idx] = torch.matmul(
-            _in_features_detached.T, _grad_output_detached
-        ).to(dtype=out_dtype)
+        grad_in_features = torch.matmul(_grad_output_detached, _weight_detached[iden_idx].T).to(
+            dtype=out_dtype
+        )
+        grad_weight[iden_idx] = torch.matmul(_in_features_detached.T, _grad_output_detached).to(
+            dtype=out_dtype
+        )
     else:
         grad_in_features = torch.zeros(
             _in_features_detached.shape[0],
@@ -122,14 +125,15 @@ def _cute_implicit_gemm_sm90_backward_logic(
         out_map = out_map.to(device).int()
 
         if requires_grad[0]:
-            status = _C.gemm.cute_gemm_sm90_AD_gather_scatter(
+            status = dispatch_ad_gather_scatter(
                 _grad_output_detached,
                 _weight_detached[i].T.contiguous(),
                 grad_in_features,
                 grad_in_features,
                 out_map,
                 in_map,
-                mma_tile=mma_tile,
+                backend=backend,
+                tile_id=tile_id,
                 alpha=1.0,
                 beta=1.0,
             )
@@ -137,15 +141,16 @@ def _cute_implicit_gemm_sm90_backward_logic(
                 return status, i
 
         if requires_grad[1]:
-            # Weight gradient: use SM80 TrAB (SM90 TrAB with dual gather not yet implemented)
-            status = _C.gemm.cute_gemm_trAB_gather(
+            # Weight gradient currently routes through the SM80 TrAB kernel family.
+            status = dispatch_trab_gather(
                 _in_features_detached,
                 _grad_output_detached,
                 grad_weight[i],
                 grad_weight[i],
                 in_map,
                 out_map,
-                mma_tile=0,  # SM80 Tile128x128x32 default
+                backend=BACKEND_CUTE_SM80,
+                tile_id=0,
                 alpha=1.0,
                 beta=0.0,
             )

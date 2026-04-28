@@ -170,7 +170,7 @@ def test_fwd_handles_c_in_still_padded_semantics():
 
 
 def test_schema_is_v4():
-    from warpgemm.autotune import get_schema_version
+    from warpconvnet.csrc.mask_gemm.tile_metadata import get_schema_version
 
     assert get_schema_version() >= 4
 

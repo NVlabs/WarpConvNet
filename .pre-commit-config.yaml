@@ -31,6 +31,9 @@ repos:
     hooks:
       - id: pyupgrade
         args: [--py38-plus]
+        # warpgemm 3.1.0 emit doesn't run pyupgrade; pinned upstream issue.
+        # Drop this exclude once warpgemm bakes pyupgrade into write_to().
+        exclude: ^warpconvnet/csrc/(offset_gemm|mask_gemm)/
 
   # python check (PEP8), programming errors and code complexity
   - repo: https://github.com/PyCQA/flake8

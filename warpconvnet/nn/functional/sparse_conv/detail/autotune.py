@@ -12,6 +12,7 @@ from enum import Enum
 import torch
 from torch import Tensor
 
+from warpconvnet._offset_gemm_constants import BACKEND_CUTE_GROUPED_SM90, BACKEND_CUTE_SM90
 from warpconvnet.utils.benchmark_cache import (
     SpatiallySparseConvConfig,
     generic_benchmark_get_namespace,
@@ -117,6 +118,29 @@ def _serialize_benchmark_results(
     ]
 
 
+def _normalize_cached_params(algo: str, params: Any) -> Dict[str, Any]:
+    if not isinstance(params, dict):
+        return {}
+    normalized = dict(params)
+    if (
+        algo == "cute_implicit_gemm_sm90"
+        and "tile_id" not in normalized
+        and "mma_tile" in normalized
+    ):
+        normalized["backend"] = normalized.get("backend", BACKEND_CUTE_SM90)
+        normalized["tile_id"] = normalized.pop("mma_tile")
+    elif algo == "cute_grouped_sm90" and "tile_id" not in normalized and "mma_tile" in normalized:
+        normalized["backend"] = normalized.get("backend", BACKEND_CUTE_GROUPED_SM90)
+        normalized["tile_id"] = normalized.pop("mma_tile")
+    return normalized
+
+
+def _normalize_cached_algo(algo: str) -> str:
+    # Cache namespaces changed with the registry migration. The algorithm names
+    # stay stable; only params are rewritten by _normalize_cached_params.
+    return algo
+
+
 def _normalize_benchmark_results(
     results: Any,
     is_forward: bool,
@@ -128,8 +152,8 @@ def _normalize_benchmark_results(
         if not isinstance(item, (list, tuple)) or len(item) != 3:
             continue
         algo_raw, params, metric = item
-        algo_str = _serialize_algo_value(algo_raw)
-        out.append((algo_str, params, float(metric)))
+        algo_str = _normalize_cached_algo(_serialize_algo_value(algo_raw))
+        out.append((algo_str, _normalize_cached_params(algo_str, params), float(metric)))
     return out
 
 
@@ -304,7 +328,8 @@ def _run_forward_benchmarks(
                 weight,
                 kernel_map,
                 num_out_coords,
-                mma_tile=params_config.get("mma_tile", 100),
+                backend=params_config["backend"],
+                tile_id=params_config["tile_id"],
             )
             if isinstance(status, int) and status != 0:
                 return status
@@ -316,7 +341,9 @@ def _run_forward_benchmarks(
                 weight,
                 kernel_map,
                 num_out_coords,
-                mma_tile=params_config.get("mma_tile", 100),
+                backend=params_config["backend"],
+                tile_id=params_config["tile_id"],
+                use_cp_async=params_config.get("use_cp_async", True),
             )
             if isinstance(status, int) and status != 0:
                 return status
@@ -574,7 +601,8 @@ def _run_backward_benchmarks(
                 weight,
                 kernel_map,
                 device=device,
-                mma_tile=params_config.get("mma_tile", 100),
+                backend=params_config["backend"],
+                tile_id=params_config["tile_id"],
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
@@ -588,7 +616,9 @@ def _run_backward_benchmarks(
                 kernel_map,
                 requires_grad=needs_input_grad,
                 device=device,
-                mma_tile=params_config.get("mma_tile", 100),
+                backend=params_config["backend"],
+                tile_id=params_config["tile_id"],
+                use_cp_async=params_config.get("use_cp_async", True),
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
