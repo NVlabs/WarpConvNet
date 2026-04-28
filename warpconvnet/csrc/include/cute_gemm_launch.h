@@ -243,6 +243,13 @@ int launch_cute_gemm_grouped_trAB_gather(const void *ptr_A,
 }  // namespace cute_gemm
 }  // namespace warpconvnet
 
+// Chain-include run_cute_gemm_* SM80 wrapper templates so warpgemm-emitted
+// offset_gemm TUs that #include this header transitively pick up the template
+// bodies needed for INSTANTIATE_CUTE_* macro expansion.
+#if defined(WARPCONVNET_SM80_ENABLED)
+#include "cute_gemm_template_sm80.cuh"
+#endif
+
 // ============================================================================
 // SM90 Grouped GEMM launcher — fused multi-offset sparse convolution (WGMMA)
 // ============================================================================
@@ -309,5 +316,11 @@ int launch_cute_gemm_grouped_ad_gather_scatter_sm90(const void *ptr_A,
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
+
+// Chain-include run_cute_gemm_sm90_* wrapper templates so warpgemm-emitted
+// offset_gemm SM90 TUs that #include this header transitively pick up the
+// template bodies needed for INSTANTIATE_SM90_* macro expansion.
+#include "cute_gemm_template_grouped_sm90.cuh"
+#include "cute_gemm_template_sm90.cuh"
 
 #endif  // WARPCONVNET_SM90_ENABLED

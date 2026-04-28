@@ -183,7 +183,8 @@ def _execute_forward(
             weight,
             kernel_map,
             num_out_coords,
-            mma_tile=params.get("mma_tile", 100),
+            backend=params["backend"],
+            tile_id=params["tile_id"],
         )
         if isinstance(result, int) and result != 0:
             raise RuntimeError(
@@ -196,7 +197,8 @@ def _execute_forward(
             weight,
             kernel_map,
             num_out_coords,
-            mma_tile=params.get("mma_tile", 100),
+            backend=params["backend"],
+            tile_id=params["tile_id"],
             use_cp_async=params.get("use_cp_async", True),
         )
         if isinstance(result, int) and result != 0:
@@ -450,7 +452,8 @@ def _execute_backward(
             kernel_map,
             requires_grad=(needs_input_grad[0], needs_input_grad[1]),
             device=device,
-            mma_tile=params.get("mma_tile", 100),
+            backend=params["backend"],
+            tile_id=params["tile_id"],
         )
         if isinstance(result[0], int) and result[0] != 0:
             raise RuntimeError(
@@ -465,7 +468,8 @@ def _execute_backward(
             kernel_map,
             requires_grad=(needs_input_grad[0], needs_input_grad[1]),
             device=device,
-            mma_tile=params.get("mma_tile", 100),
+            backend=params["backend"],
+            tile_id=params["tile_id"],
             use_cp_async=params.get("use_cp_async", True),
         )
         if isinstance(result[0], int) and result[0] != 0:

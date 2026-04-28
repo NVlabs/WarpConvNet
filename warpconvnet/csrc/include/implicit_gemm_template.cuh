@@ -1,4 +1,3 @@
-
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -14,6 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Template body header for run_implicit_gemm[_grouped]_templated. Included by
+// warpconvnet/csrc/implicit_gemm.cu (existing instantiations) and by
+// warpgemm-generated offset_gemm TUs that invoke INSTANTIATE_IMPLICIT_GEMM[_GROUPED]
+// for the production tier.
+
+#pragma once
+
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -22,7 +28,7 @@
 #include <string>
 #include <type_traits>
 
-#include "include/vectorized_types.h"
+#include "vectorized_types.h"
 
 // Define error codes for implicit GEMM operations
 enum class ImplicitGemmStatus {
@@ -477,99 +483,3 @@ int run_implicit_gemm_grouped_templated(const void *tensor_a,
 
 }  // namespace implicit_gemm
 }  // namespace warpconvnet
-
-// Use the namespace for convenience in the rest of the file
-using namespace warpconvnet::implicit_gemm;
-
-// Expose the template instantiations for use in pybind
-template int warpconvnet::implicit_gemm::run_implicit_gemm_templated<float, float, float, int>(
-    const void *,
-    const void *,
-    void *,
-    const int *,
-    const int *,
-    int,
-    int,
-    int,
-    int,
-    int,
-    const std::string &,
-    int);
-
-template int warpconvnet::implicit_gemm::run_implicit_gemm_templated<__half, __half, __half, int>(
-    const void *,
-    const void *,
-    void *,
-    const int *,
-    const int *,
-    int,
-    int,
-    int,
-    int,
-    int,
-    const std::string &,
-    int);
-
-template int warpconvnet::implicit_gemm::
-    run_implicit_gemm_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
-        const void *,
-        const void *,
-        void *,
-        const int *,
-        const int *,
-        int,
-        int,
-        int,
-        int,
-        int,
-        const std::string &,
-        int);
-
-// Grouped kernel template instantiations
-template int
-warpconvnet::implicit_gemm::run_implicit_gemm_grouped_templated<float, float, float, int>(
-    const void *,
-    const void *,
-    void *,
-    const int *,
-    const int *,
-    const int *,
-    int,
-    int,
-    int,
-    int,
-    int,
-    const std::string &,
-    int);
-
-template int
-warpconvnet::implicit_gemm::run_implicit_gemm_grouped_templated<__half, __half, __half, int>(
-    const void *,
-    const void *,
-    void *,
-    const int *,
-    const int *,
-    const int *,
-    int,
-    int,
-    int,
-    int,
-    int,
-    const std::string &,
-    int);
-
-template int warpconvnet::implicit_gemm::
-    run_implicit_gemm_grouped_templated<__nv_bfloat16, __nv_bfloat16, __nv_bfloat16, int>(
-        const void *,
-        const void *,
-        void *,
-        const int *,
-        const int *,
-        const int *,
-        int,
-        int,
-        int,
-        int,
-        int,
-        const std::string &,
-        int);

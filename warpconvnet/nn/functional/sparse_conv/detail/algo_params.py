@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Tuple, Union
 
 from enum import Enum
 
+from warpconvnet._offset_gemm_constants import BACKEND_CUTE_GROUPED_SM90, BACKEND_CUTE_SM90
+from warpconvnet.csrc.offset_gemm_dispatch import backend_available
 from warpconvnet.constants import (
     WARPCONVNET_FWD_ALGO_MODE as WARPCONVNET_AB_ALGO_MODE,
     WARPCONVNET_DGRAD_ALGO_MODE as WARPCONVNET_ABT_ALGO_MODE,
@@ -74,10 +76,8 @@ if not _HAS_SM80_HARDWARE:
 
 # SM90 WGMMA backends — available when compiled with SM90 support and running on SM90+ hardware
 try:
-    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and hasattr(_C.gemm, "cute_gemm_sm90_AD_gather_scatter")
-    _HAS_CUTE_GROUPED_SM90 = _HAS_SM90_HARDWARE and hasattr(
-        _C.gemm, "cute_gemm_sm90_grouped_AD_gather_scatter"
-    )
+    _HAS_CUTE_SM90 = _HAS_SM90_HARDWARE and backend_available(BACKEND_CUTE_SM90)
+    _HAS_CUTE_GROUPED_SM90 = _HAS_SM90_HARDWARE and backend_available(BACKEND_CUTE_GROUPED_SM90)
 except Exception:
     _HAS_CUTE_SM90 = False
     _HAS_CUTE_GROUPED_SM90 = False
@@ -195,19 +195,31 @@ _AB_CUTE_SM90 = (
     []
     if not _HAS_CUTE_SM90
     else [
-        ("cute_implicit_gemm_sm90", {"mma_tile": 100}),
-        ("cute_implicit_gemm_sm90", {"mma_tile": 103}),
-        ("cute_implicit_gemm_sm90", {"mma_tile": 104}),
+        ("cute_implicit_gemm_sm90", {"backend": BACKEND_CUTE_SM90, "tile_id": 100}),
+        ("cute_implicit_gemm_sm90", {"backend": BACKEND_CUTE_SM90, "tile_id": 103}),
+        ("cute_implicit_gemm_sm90", {"backend": BACKEND_CUTE_SM90, "tile_id": 104}),
     ]
 )
 _AB_CUTE_GROUPED_SM90 = (
     []
     if not _HAS_CUTE_GROUPED_SM90
     else [
-        ("cute_grouped_sm90", {"mma_tile": 103, "use_cp_async": True}),
-        ("cute_grouped_sm90", {"mma_tile": 100, "use_cp_async": True}),
-        ("cute_grouped_sm90", {"mma_tile": 101, "use_cp_async": True}),
-        ("cute_grouped_sm90", {"mma_tile": 104, "use_cp_async": True}),
+        (
+            "cute_grouped_sm90",
+            {"backend": BACKEND_CUTE_GROUPED_SM90, "tile_id": 103, "use_cp_async": True},
+        ),
+        (
+            "cute_grouped_sm90",
+            {"backend": BACKEND_CUTE_GROUPED_SM90, "tile_id": 100, "use_cp_async": True},
+        ),
+        (
+            "cute_grouped_sm90",
+            {"backend": BACKEND_CUTE_GROUPED_SM90, "tile_id": 101, "use_cp_async": True},
+        ),
+        (
+            "cute_grouped_sm90",
+            {"backend": BACKEND_CUTE_GROUPED_SM90, "tile_id": 104, "use_cp_async": True},
+        ),
     ]
 )
 _AB_CUTE_GROUPED = (
@@ -563,14 +575,18 @@ _ALL_AB_PARAMS = [
         []
         if not _HAS_CUTE_SM90
         else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+            ("cute_implicit_gemm_sm90", {"backend": BACKEND_CUTE_SM90, "tile_id": tile})
+            for tile in [100, 101, 102, 103, 104]
         ]
     ),
     *(
         []
         if not _HAS_CUTE_GROUPED_SM90
         else [
-            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
+            (
+                "cute_grouped_sm90",
+                {"backend": BACKEND_CUTE_GROUPED_SM90, "tile_id": tile, "use_cp_async": cp},
+            )
             for tile in [100, 101, 102, 103, 104]
             for cp in [True, False]
         ]
@@ -833,14 +849,18 @@ _ALL_ATB_PARAMS = [
         []
         if not _HAS_CUTE_SM90
         else [
-            ("cute_implicit_gemm_sm90", {"mma_tile": tile}) for tile in [100, 101, 102, 103, 104]
+            ("cute_implicit_gemm_sm90", {"backend": BACKEND_CUTE_SM90, "tile_id": tile})
+            for tile in [100, 101, 102, 103, 104]
         ]
     ),
     *(
         []
         if not _HAS_CUTE_GROUPED_SM90
         else [
-            ("cute_grouped_sm90", {"mma_tile": tile, "use_cp_async": cp})
+            (
+                "cute_grouped_sm90",
+                {"backend": BACKEND_CUTE_GROUPED_SM90, "tile_id": tile, "use_cp_async": cp},
+            )
             for tile in [100, 101, 102, 103, 104]
             for cp in [True, False]
         ]

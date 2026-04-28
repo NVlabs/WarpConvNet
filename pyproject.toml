@@ -68,7 +68,19 @@ warpconvnet-build-docs = "scripts.build_docs:build_docs"
 include = ["warpconvnet*", "scripts*"]
 
 [tool.setuptools.package-data]
-warpconvnet = ["csrc/*.cu", "csrc/*.cpp", "csrc/*.h", "csrc/*.hpp", "csrc/include/*.h", "csrc/include/**/*.h", "csrc/include/**/*.hpp"]
+warpconvnet = [
+    "csrc/*.cu",
+    "csrc/*.cpp",
+    "csrc/*.h",
+    "csrc/*.hpp",
+    "csrc/include/*.h",
+    "csrc/include/**/*.h",
+    "csrc/include/**/*.hpp",
+    "csrc/offset_gemm/*.cu",
+    "csrc/offset_gemm/*.inc",
+    "csrc/offset_gemm/include/*.cuh",
+    "csrc/mask_gemm/*.py",
+]
 
 [tool.setuptools_scm]
 # Version derived from git tags (e.g. v1.4.2 → 1.4.2)

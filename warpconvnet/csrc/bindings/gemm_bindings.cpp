@@ -13,12 +13,81 @@
 #include <algorithm>
 #include <cstddef>
 #include <sstream>
+#include <string>
 
 #include "../include/gemm_error_codes.h"
 #include "../include/gemm_mma_tiles.h"
 #include "../include/grouped_gemm_params.h"  // GroupedGemmParams
 
 namespace py = pybind11;
+
+namespace {
+
+bool has_registered_offset_gemm_kernel(const char *op, const std::string &backend, int tile_id) {
+  bool found = false;
+#define OFFSET_GEMM_KERNEL(OP,             \
+                           BACKEND,        \
+                           TILE_ID,        \
+                           GROUPED,        \
+                           SPLIT_K,        \
+                           SYMBOL,         \
+                           TILE_TAG,       \
+                           IN_DT,          \
+                           OUT_DT,         \
+                           ACC_DT,         \
+                           ITYPE,          \
+                           BLOCK_SIZE,     \
+                           KERNEL_VARIANT, \
+                           MMA_ATOM)       \
+  if (!found && std::string(OP) == op && backend == BACKEND && tile_id == TILE_ID) found = true;
+#include "../offset_gemm/offset_gemm_dispatch_table.inc"
+#undef OFFSET_GEMM_KERNEL
+  return found;
+}
+
+// Snapshot of the compile-time OFFSET_GEMM_KERNEL table. Lets Python code
+// enumerate registered (op, backend, tile_id) variants without importing
+// the warpgemm.codegen.offset_gemm build-time package.
+py::list offset_gemm_list_kernels() {
+  py::list out;
+#define OFFSET_GEMM_KERNEL(OP,                           \
+                           BACKEND,                      \
+                           TILE_ID,                      \
+                           GROUPED,                      \
+                           SPLIT_K,                      \
+                           SYMBOL,                       \
+                           TILE_TAG,                     \
+                           IN_DT,                        \
+                           OUT_DT,                       \
+                           ACC_DT,                       \
+                           ITYPE,                        \
+                           BLOCK_SIZE,                   \
+                           KERNEL_VARIANT,               \
+                           MMA_ATOM)                     \
+  do {                                                   \
+    py::dict row;                                        \
+    row["op"] = std::string(OP);                         \
+    row["backend"] = std::string(BACKEND);               \
+    row["tile_id"] = static_cast<int>(TILE_ID);          \
+    row["grouped"] = static_cast<bool>(GROUPED);         \
+    row["split_k"] = static_cast<bool>(SPLIT_K);         \
+    row["launch_symbol"] = std::string(SYMBOL);          \
+    row["tile_tag"] = std::string(TILE_TAG);             \
+    row["input_dtype"] = std::string(IN_DT);             \
+    row["output_dtype"] = std::string(OUT_DT);           \
+    row["acc_dtype"] = std::string(ACC_DT);              \
+    row["itype"] = std::string(ITYPE);                   \
+    row["block_size"] = static_cast<int>(BLOCK_SIZE);    \
+    row["kernel_variant"] = std::string(KERNEL_VARIANT); \
+    row["mma_atom"] = std::string(MMA_ATOM);             \
+    out.append(row);                                     \
+  } while (0);
+#include "../offset_gemm/offset_gemm_dispatch_table.inc"
+#undef OFFSET_GEMM_KERNEL
+  return out;
+}
+
+}  // namespace
 
 // Forward declarations for CUDA kernels and GEMM launchers in their namespaces
 namespace warpconvnet {
@@ -2160,6 +2229,176 @@ int cute_gemm_sm90_AD_gather_scatter(torch::Tensor tensor_a,
 }
 #undef DISPATCH_SM90_AD_GS
 
+#if defined(WARPCONVNET_SM90_ENABLED)
+int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
+                                             torch::Tensor tensor_d,
+                                             torch::Tensor in_map,
+                                             torch::Tensor out_map,
+                                             torch::Tensor weight_ptrs,
+                                             torch::Tensor tile_offsets,
+                                             torch::Tensor group_sizes,
+                                             torch::Tensor map_offsets,
+                                             int total_m_tiles,
+                                             int mma_tile,
+                                             float alpha,
+                                             bool use_atomic,
+                                             bool use_cp_async);
+#endif
+
+#endif  // WARPCONVNET_SM90_ENABLED
+
+#if defined(WARPCONVNET_SM80_ENABLED) || defined(WARPCONVNET_SM90_ENABLED)
+bool offset_gemm_backend_available(const std::string &backend) {
+#if defined(WARPCONVNET_SM90_ENABLED)
+  if (backend == "cute_sm90" || backend == "cute_grouped_sm90") {
+    return true;
+  }
+#endif
+
+#if defined(WARPCONVNET_SM80_ENABLED)
+  if (backend == "cute_sm80" || backend == "cute_grouped_sm80") {
+    return true;
+  }
+#endif
+
+  return false;
+}
+
+int offset_gemm_ad_gather_scatter(torch::Tensor tensor_a,
+                                  torch::Tensor tensor_b,
+                                  torch::Tensor tensor_c,
+                                  torch::Tensor tensor_d,
+                                  torch::Tensor indices_a,
+                                  torch::Tensor indices_d,
+                                  const std::string &backend,
+                                  int tile_id,
+                                  float alpha,
+                                  float beta) {
+  TORCH_CHECK(has_registered_offset_gemm_kernel("ad_gather_scatter", backend, tile_id),
+              "Unknown registered non-mask kernel key: (op=ad_gather_scatter, backend=",
+              backend,
+              ", tile_id=",
+              tile_id,
+              ")");
+
+#if defined(WARPCONVNET_SM90_ENABLED)
+  if (backend == "cute_sm90") {
+    return cute_gemm_sm90_AD_gather_scatter(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d, tile_id, alpha, beta);
+  }
+#endif
+
+#if defined(WARPCONVNET_SM80_ENABLED)
+  if (backend == "cute_sm80") {
+    return cute_gemm_AD_gather_scatter(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_d, tile_id, alpha, beta);
+  }
+#endif
+
+  TORCH_CHECK(false,
+              "Registered non-mask backend is not wired in this build: backend=",
+              backend,
+              ", tile_id=",
+              tile_id);
+}
+
+int offset_gemm_trAB_gather(torch::Tensor tensor_a,
+                            torch::Tensor tensor_b,
+                            torch::Tensor tensor_c,
+                            torch::Tensor tensor_d,
+                            torch::Tensor indices_a,
+                            torch::Tensor indices_b,
+                            const std::string &backend,
+                            int tile_id,
+                            float alpha,
+                            float beta) {
+  TORCH_CHECK(has_registered_offset_gemm_kernel("trab_gather", backend, tile_id),
+              "Unknown registered non-mask kernel key: (op=trab_gather, backend=",
+              backend,
+              ", tile_id=",
+              tile_id,
+              ")");
+
+#if defined(WARPCONVNET_SM80_ENABLED)
+  if (backend == "cute_sm80") {
+    return cute_gemm_trAB_gather(
+        tensor_a, tensor_b, tensor_c, tensor_d, indices_a, indices_b, tile_id, alpha, beta);
+  }
+#endif
+
+  TORCH_CHECK(false,
+              "Registered non-mask backend is not wired in this build: backend=",
+              backend,
+              ", tile_id=",
+              tile_id);
+}
+
+int offset_gemm_grouped_ad_gather_scatter(torch::Tensor tensor_a,
+                                          torch::Tensor tensor_d,
+                                          torch::Tensor in_map,
+                                          torch::Tensor out_map,
+                                          torch::Tensor weight_ptrs,
+                                          torch::Tensor tile_offsets,
+                                          torch::Tensor group_sizes,
+                                          torch::Tensor map_offsets,
+                                          int total_m_tiles,
+                                          const std::string &backend,
+                                          int tile_id,
+                                          float alpha,
+                                          bool use_atomic,
+                                          bool use_cp_async) {
+  TORCH_CHECK(has_registered_offset_gemm_kernel("ad_gather_scatter", backend, tile_id),
+              "Unknown registered grouped non-mask kernel key: (op=ad_gather_scatter, backend=",
+              backend,
+              ", tile_id=",
+              tile_id,
+              ")");
+
+#if defined(WARPCONVNET_SM90_ENABLED)
+  if (backend == "cute_grouped_sm90") {
+    return cute_gemm_sm90_grouped_AD_gather_scatter(tensor_a,
+                                                    tensor_d,
+                                                    in_map,
+                                                    out_map,
+                                                    weight_ptrs,
+                                                    tile_offsets,
+                                                    group_sizes,
+                                                    map_offsets,
+                                                    total_m_tiles,
+                                                    tile_id,
+                                                    alpha,
+                                                    use_atomic,
+                                                    use_cp_async);
+  }
+#endif
+
+#if defined(WARPCONVNET_SM80_ENABLED)
+  if (backend == "cute_grouped_sm80") {
+    return cute_gemm_grouped_AD_gather_scatter(tensor_a,
+                                               tensor_d,
+                                               in_map,
+                                               out_map,
+                                               weight_ptrs,
+                                               tile_offsets,
+                                               group_sizes,
+                                               map_offsets,
+                                               total_m_tiles,
+                                               tile_id,
+                                               alpha);
+  }
+#endif
+
+  TORCH_CHECK(false,
+              "Registered grouped non-mask backend is not wired in this build: backend=",
+              backend,
+              ", tile_id=",
+              tile_id);
+}
+
+#endif  // WARPCONVNET_SM80_ENABLED || WARPCONVNET_SM90_ENABLED
+
+#if defined(WARPCONVNET_SM90_ENABLED)
+
 int cute_gemm_sm90_grouped_AD_gather_scatter(torch::Tensor tensor_a,
                                              torch::Tensor tensor_d,
                                              torch::Tensor in_map,
@@ -2454,6 +2693,44 @@ int cute_gemm_grouped_trAB_gather(
   return status;
 }
 
+int offset_gemm_grouped_trAB_gather(torch::Tensor tensor_a,
+                                    torch::Tensor tensor_b,
+                                    torch::Tensor in_map,
+                                    torch::Tensor out_map,
+                                    torch::Tensor output_ptrs,
+                                    torch::Tensor gather_sizes,
+                                    torch::Tensor map_offsets,
+                                    int K_dim,
+                                    int N,
+                                    const std::string &backend,
+                                    int tile_id,
+                                    float alpha,
+                                    int output_scalar_type) {
+  TORCH_CHECK(has_registered_offset_gemm_kernel("trab_gather", backend, tile_id),
+              "Unknown registered grouped non-mask kernel key: (op=trab_gather, backend=",
+              backend,
+              ", tile_id=",
+              tile_id,
+              ")");
+  TORCH_CHECK(backend == "cute_grouped_sm80",
+              "Registered grouped TrAB backend is not wired in this build: backend=",
+              backend,
+              ", tile_id=",
+              tile_id);
+  return cute_gemm_grouped_trAB_gather(tensor_a,
+                                       tensor_b,
+                                       in_map,
+                                       out_map,
+                                       output_ptrs,
+                                       gather_sizes,
+                                       map_offsets,
+                                       K_dim,
+                                       N,
+                                       tile_id,
+                                       alpha,
+                                       output_scalar_type);
+}
+
 #endif  // WARPCONVNET_SM80_ENABLED (CuTe Grouped TrAB)
 
 // =============================================================================
@@ -2567,6 +2844,38 @@ void register_gemm(py::module_ &m) {
            py::arg("alpha") = 1.0f,
            py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
 
+  gemm.def("offset_gemm_grouped_trab_gather",
+           &offset_gemm_grouped_trAB_gather,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("output_ptrs"),
+           py::arg("gather_sizes"),
+           py::arg("map_offsets"),
+           py::arg("K_dim"),
+           py::arg("N"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
+
+  gemm.def("offset_gemm_grouped_trAB_gather",
+           &offset_gemm_grouped_trAB_gather,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("output_ptrs"),
+           py::arg("gather_sizes"),
+           py::arg("map_offsets"),
+           py::arg("K_dim"),
+           py::arg("N"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
+
   gemm.def("cute_gemm_AD_gather_scatter_staged",
            &cute_gemm_AD_gather_scatter_staged,
            py::arg("tensor_a"),
@@ -2643,6 +2952,96 @@ void register_gemm(py::module_ &m) {
            py::arg("split_k_factor") = 4,
            py::arg("block_size") = 16);
 
+#if defined(WARPCONVNET_SM80_ENABLED) || defined(WARPCONVNET_SM90_ENABLED)
+  gemm.def("offset_gemm_backend_available", &offset_gemm_backend_available, py::arg("backend"));
+  gemm.def("offset_gemm_list_kernels",
+           &offset_gemm_list_kernels,
+           "Snapshot of the compile-time OFFSET_GEMM_KERNEL dispatch table. Each entry "
+           "is a dict with keys op, backend, tile_id, grouped, split_k, launch_symbol, "
+           "tile_tag.");
+  gemm.def("offset_gemm_ad_gather_scatter",
+           &offset_gemm_ad_gather_scatter,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_d"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 1.0f);
+  gemm.def("offset_gemm_trab_gather",
+           &offset_gemm_trAB_gather,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_b"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 1.0f);
+  gemm.def("offset_gemm_grouped_ad_gather_scatter",
+           &offset_gemm_grouped_ad_gather_scatter,
+           py::arg("tensor_a"),
+           py::arg("tensor_d"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("weight_ptrs"),
+           py::arg("tile_offsets"),
+           py::arg("group_sizes"),
+           py::arg("map_offsets"),
+           py::arg("total_m_tiles"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("use_atomic") = true,
+           py::arg("use_cp_async") = true);
+
+  // Temporary alias while the Python side migrates to snake_case op names.
+  gemm.def("offset_gemm_AD_gather_scatter",
+           &offset_gemm_ad_gather_scatter,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_d"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 1.0f);
+  gemm.def("offset_gemm_trAB_gather",
+           &offset_gemm_trAB_gather,
+           py::arg("tensor_a"),
+           py::arg("tensor_b"),
+           py::arg("tensor_c"),
+           py::arg("tensor_d"),
+           py::arg("indices_a"),
+           py::arg("indices_b"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("beta") = 1.0f);
+  gemm.def("offset_gemm_grouped_AD_gather_scatter",
+           &offset_gemm_grouped_ad_gather_scatter,
+           py::arg("tensor_a"),
+           py::arg("tensor_d"),
+           py::arg("in_map"),
+           py::arg("out_map"),
+           py::arg("weight_ptrs"),
+           py::arg("tile_offsets"),
+           py::arg("group_sizes"),
+           py::arg("map_offsets"),
+           py::arg("total_m_tiles"),
+           py::arg("backend"),
+           py::arg("tile_id"),
+           py::arg("alpha") = 1.0f,
+           py::arg("use_atomic") = true,
+           py::arg("use_cp_async") = true);
+
 #if defined(WARPCONVNET_SM90_ENABLED)
   gemm.def("cute_gemm_sm90_AD_gather_scatter",
            &cute_gemm_sm90_AD_gather_scatter,
@@ -2671,7 +3070,8 @@ void register_gemm(py::module_ &m) {
            py::arg("alpha") = 1.0f,
            py::arg("use_atomic") = true,
            py::arg("use_cp_async") = true);
-#endif  // WARPCONVNET_SM90_ENABLED
+#endif
+#endif  // WARPCONVNET_SM80_ENABLED || WARPCONVNET_SM90_ENABLED
 
 #if defined(WARPCONVNET_SM80_ENABLED)
 #endif
