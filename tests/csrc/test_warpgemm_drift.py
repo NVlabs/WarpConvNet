@@ -28,11 +28,16 @@ autotune = pytest.importorskip(
     "warpgemm.autotune",
     reason="warpgemm is a developer codegen tool; install it to run drift checks",
 )
+mask_codegen = pytest.importorskip(
+    "warpgemm.codegen",
+    reason="warpgemm is a developer codegen tool; install it to run drift checks",
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OFFSET_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "offset_gemm"
 MASK_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "mask_gemm"
+MASK_GEMM_INCLUDE_DIR = MASK_GEMM_DIR / "include"
 SUPPORTED_OFFSET_GEMM_SCHEMA_MAJOR = 3
 SUPPORTED_TILE_METADATA_SCHEMA = 5
 
@@ -90,6 +95,37 @@ def test_tile_metadata_snapshot_matches_emit() -> None:
         diffs = _diff_emit(emitted, tmp, MASK_GEMM_DIR)
         assert not diffs, (
             "Tracked tile_metadata.py drifted from warpgemm emit:\n  "
+            + "\n  ".join(diffs)
+            + "\nRefresh with `WARPGEMM_REGEN=1 pip install -e . --no-build-isolation` "
+            "and commit the diff."
+        )
+
+
+def test_mask_gemm_snapshot_matches_emit() -> None:
+    """warpgemm.codegen.write_mask_to(names=tracked) must byte-match tracked headers.
+
+    Pinned name list = current set of MaskGemm_*.h files in the tracked
+    csrc/mask_gemm/include/. Helper .cuh fragments are emitted alongside
+    (always) and verified too. Drift here means warpgemm regenerated a
+    kernel body or helper fragment without a matching warpconvnet snapshot
+    refresh.
+    """
+
+    write_mask_to = getattr(mask_codegen, "write_mask_to", None)
+    if write_mask_to is None:
+        pytest.skip("warpgemm.codegen.write_mask_to not available; upgrade warpgemm")
+
+    tracked_headers = sorted(p.stem for p in MASK_GEMM_INCLUDE_DIR.glob("MaskGemm_*.h"))
+    assert tracked_headers, (
+        f"no MaskGemm_*.h tracked under {MASK_GEMM_INCLUDE_DIR}; mask kernel migration "
+        "incomplete"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        emitted = [Path(p) for p in write_mask_to(tmp, names=tracked_headers)]
+        diffs = _diff_emit(emitted, tmp, MASK_GEMM_INCLUDE_DIR)
+        assert not diffs, (
+            "Tracked mask GEMM headers drifted from warpgemm emit:\n  "
             + "\n  ".join(diffs)
             + "\nRefresh with `WARPGEMM_REGEN=1 pip install -e . --no-build-isolation` "
             "and commit the diff."
