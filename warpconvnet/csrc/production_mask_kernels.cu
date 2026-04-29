@@ -10,54 +10,54 @@
 #include "include/mma_macros.h"
 
 // Forward kernels
-#include "include/MaskGemm_forward_128x64x32_2s_fused.h"
-#include "include/MaskGemm_forward_32x32x32_1s_flat.h"
-#include "include/MaskGemm_forward_64x128x32_2s_fused.h"
-#include "include/MaskGemm_forward_64x128x32_3s.h"
-#include "include/MaskGemm_forward_64x64x32_2s_pipelined.h"
+#include "mask_gemm/include/MaskGemm_forward_128x64x32_2s_fused.h"
+#include "mask_gemm/include/MaskGemm_forward_32x32x32_1s_flat.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_2s_fused.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_3s.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_2s_pipelined.h"
 // Forward scalar variants (for unaligned C)
-#include "include/MaskGemm_forward_64x64x32_1s_flat_sa.h"
-#include "include/MaskGemm_forward_64x64x32_1s_flat_sab_se.h"
-#include "include/MaskGemm_forward_64x64x32_1s_flat_sb_se.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_sa.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_sab_se.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_sb_se.h"
 
 // Forward fp32 output kernels (fp16/bf16 input, f32 output)
-#include "include/MaskGemm_forward_64x64x32_1s_flat.h"
-#include "include/MaskGemm_forward_64x64x32_1s_flat_direpi_sb.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_direpi_sb.h"
 
 // Forward pcoff (E1 offset-precompute) variants — warpgemm tiles 54-63
-#include "include/MaskGemm_forward_64x128x32_1s_flat_pcoff.h"
-#include "include/MaskGemm_forward_64x128x32_2s_warp_spec_pcoff.h"
-#include "include/MaskGemm_forward_64x64x32_1s_flat_pcoff.h"
-#include "include/MaskGemm_forward_64x64x32_2s_warp_spec_pcoff.h"
-#include "include/MaskGemm_forward_64x64x32_3s_pcoff.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_1s_flat_pcoff.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_2s_warp_spec_pcoff.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_pcoff.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_2s_warp_spec_pcoff.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_3s_pcoff.h"
 
 // Dgrad kernels
-#include "include/MaskGemm_dgrad_32x32x32_1s_flat.h"
-#include "include/MaskGemm_dgrad_64x128x32_1s_flat_direpi.h"
-#include "include/MaskGemm_dgrad_64x64x32_1s_flat.h"
+#include "mask_gemm/include/MaskGemm_dgrad_32x32x32_1s_flat.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x128x32_1s_flat_direpi.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat.h"
 // Dgrad fp32 output kernel
-#include "include/MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb.h"
 // Dgrad pipelined variants
-#include "include/MaskGemm_dgrad_128x64x32_2s_pipelined.h"
-#include "include/MaskGemm_dgrad_64x128x32_2s_pipelined.h"
-#include "include/MaskGemm_dgrad_64x64x32_2s_pipelined.h"
+#include "mask_gemm/include/MaskGemm_dgrad_128x64x32_2s_pipelined.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x128x32_2s_pipelined.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_2s_pipelined.h"
 
 // Dgrad scalar variants
-#include "include/MaskGemm_dgrad_64x64x32_1s_flat_sa.h"
-#include "include/MaskGemm_dgrad_64x64x32_1s_flat_sab_se.h"
-#include "include/MaskGemm_dgrad_64x64x32_1s_flat_sb_se.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sa.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sab_se.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sb_se.h"
 
 // Wgrad kernels
-#include "include/MaskGemm_wgrad_64x64x32_2s_f32.h"
-#include "include/MaskGemm_wgrad_64x64x32_2s_f32_sab.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x64x32_2s_f32.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x64x32_2s_f32_sab.h"
 // Wgrad atomic kernels (split-K with atomicAdd accumulation)
-#include "include/MaskGemm_wgrad_64x128x32_2s_f32_atomic.h"
-#include "include/MaskGemm_wgrad_64x128x32_2s_f32_workspace.h"
-#include "include/MaskGemm_wgrad_64x64x32_2s_f32_atomic.h"
-#include "include/MaskGemm_wgrad_64x64x32_2s_f32_workspace.h"
-#include "include/MaskGemm_wgrad_64x64x32_3s_f32_atomic.h"
-#include "include/MaskGemm_wgrad_64x64x32_3s_f32_workspace.h"
 #include "include/kernel_dispatch.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x128x32_2s_f32_atomic.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x128x32_2s_f32_workspace.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x64x32_2s_f32_atomic.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x64x32_2s_f32_workspace.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x64x32_3s_f32_atomic.h"
+#include "mask_gemm/include/MaskGemm_wgrad_64x64x32_3s_f32_workspace.h"
 
 namespace warpconvnet {
 namespace cute_gemm {

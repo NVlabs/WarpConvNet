@@ -60,6 +60,9 @@ def _generate_warpgemm_codegen():
       - tile_metadata.py — self-contained mask-tile registry consumed by
         nn/.../sparse_conv/detail/tile_metadata.py
         (warpgemm.autotune.write_tile_metadata_to)
+      - MaskGemm_*.h chain-include kernel headers + warpgemm_*.cuh helper
+        fragments, pinned to the names already tracked in
+        csrc/mask_gemm/include/ (warpgemm.codegen.write_mask_to)
 
     Refresh the snapshot by setting WARPGEMM_REGEN=1 (and having warpgemm
     importable). Honors WARPGEMM_TILES (default 'production'). Drift is
@@ -71,11 +74,14 @@ def _generate_warpgemm_codegen():
     csrc_dir = os.path.join(workspace_dir, "warpconvnet", "csrc")
     offset_gemm_dir = os.path.join(csrc_dir, "offset_gemm")
     mask_gemm_dir = os.path.join(csrc_dir, "mask_gemm")
+    mask_gemm_include_dir = os.path.join(mask_gemm_dir, "include")
     os.makedirs(offset_gemm_dir, exist_ok=True)
     os.makedirs(mask_gemm_dir, exist_ok=True)
+    os.makedirs(mask_gemm_include_dir, exist_ok=True)
     try:
         from warpgemm.codegen.offset_gemm import write_to as _write_offset_gemm
         from warpgemm.autotune import write_tile_metadata_to as _write_tile_metadata
+        from warpgemm.codegen import write_mask_to as _write_mask
     except ImportError as exc:
         print(f"WARPGEMM_REGEN=1 set but warpgemm not importable: {exc}; skipping codegen")
         return
@@ -86,6 +92,22 @@ def _generate_warpgemm_codegen():
     )
     tm_path = _write_tile_metadata(mask_gemm_dir)
     print(f"warpgemm tile_metadata codegen: wrote {tm_path}")
+    tracked_mask_names = sorted(
+        os.path.splitext(f)[0]
+        for f in os.listdir(mask_gemm_include_dir)
+        if f.startswith("MaskGemm_") and f.endswith(".h")
+    )
+    if tracked_mask_names:
+        mask_written = _write_mask(mask_gemm_include_dir, names=tracked_mask_names)
+        print(
+            f"warpgemm mask_gemm codegen: wrote {len(mask_written)} files to "
+            f"{mask_gemm_include_dir}"
+        )
+    else:
+        print(
+            f"warpgemm mask_gemm codegen: no tracked MaskGemm_*.h under "
+            f"{mask_gemm_include_dir}; skipping (initial seed must be done by hand)"
+        )
 
 
 # Defaults for sdist-only mode (no torch)

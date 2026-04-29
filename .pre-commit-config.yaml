@@ -57,6 +57,9 @@ repos:
         name: clang-format (C++/CUDA)
         language_version: python3
         files: \.(c|cc|cpp|cxx|hpp|hxx|h|cu|cuh)$
+        # warpgemm 3.1.0 emit is canonical-formatted via warpgemm._format,
+        # which uses its own .clang-format; do not re-format here.
+        exclude: ^warpconvnet/csrc/(offset_gemm|mask_gemm)/
         # style is read from .clang-format if present; otherwise fallback:
         args: ["--style=file"]
 

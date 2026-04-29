@@ -80,6 +80,8 @@ warpconvnet = [
     "csrc/offset_gemm/*.inc",
     "csrc/offset_gemm/include/*.cuh",
     "csrc/mask_gemm/*.py",
+    "csrc/mask_gemm/include/*.h",
+    "csrc/mask_gemm/include/*.cuh",
 ]
 
 [tool.setuptools_scm]
