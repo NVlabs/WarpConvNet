@@ -1,4 +1,6 @@
-# WarpConvNet
+<p align="center">
+  <img src="https://github.com/NVlabs/WarpConvNet/raw/main/assets/icons/figures/fusion_banner.png" alt="WarpConvNet — High-Performance 3D Deep Learning" />
+</p>
 
 <p align="center">
   <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a>
