@@ -56,11 +56,9 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y software-properties-common git
-          add-apt-repository -y ppa:deadsnakes/ppa
-          apt-get update
-          apt-get install -y python${{ matrix.python }} python${{ matrix.python }}-dev python${{ matrix.python }}-venv
-          python${{ matrix.python }} -m ensurepip --upgrade || true
+          apt-get install -y --no-install-recommends git curl ca-certificates
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@v4
         with:
@@ -69,9 +67,11 @@ jobs:
 
       - name: Create venv and install dependencies
         run: |
-          python${{ matrix.python }} -m venv /tmp/buildenv
+          uv python install ${{ matrix.python }}
+          uv venv --python ${{ matrix.python }} /tmp/buildenv
           . /tmp/buildenv/bin/activate
-          pip install --upgrade pip setuptools 'setuptools-scm<10' wheel pybind11 ninja
+          uv pip install uv uv-pip
+          pip install --upgrade setuptools 'setuptools-scm<10' wheel pybind11 ninja
           pip install torch==${{ matrix.torch }}+${{ matrix.cuda }} \
             --index-url https://download.pytorch.org/whl/${{ matrix.cuda }}
 
