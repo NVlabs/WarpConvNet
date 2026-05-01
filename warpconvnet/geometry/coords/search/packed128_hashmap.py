@@ -26,19 +26,7 @@ import torch
 from torch import Tensor
 
 import warpconvnet._C as _C
-
-
-def _next_power_of_2(n: int) -> int:
-    if n <= 0:
-        return 1
-    n -= 1
-    n |= n >> 1
-    n |= n >> 2
-    n |= n >> 4
-    n |= n >> 8
-    n |= n >> 16
-    n |= n >> 32
-    return n + 1
+from warpconvnet.geometry.coords.search._packed_base import PackedHashTableBase
 
 
 def _debug_hash_enabled() -> bool:
@@ -46,7 +34,7 @@ def _debug_hash_enabled() -> bool:
     return v not in ("", "0", "false", "False")
 
 
-class PackedHashTable128:
+class PackedHashTable128(PackedHashTableBase):
     """Hash table for D-dim integer coords packed into a 128-bit key.
 
     Currently exposes D=7, CoordBits=17. Per-axis range is [-65536, 65535];
@@ -55,7 +43,7 @@ class PackedHashTable128:
 
     Layout:
       keys: int64 [capacity, 2]   reinterpret-cast as PackedKey128 in C++
-      vals: int32 [capacity]       vals[slot] = original insertion index, or -1
+      values: int32 [capacity]    values[slot] = original insertion index, or -1
 
     Coord range: coords outside [-65536, 65535] silently truncate via 17-bit
     mask unless WARPCONVNET_DEBUG_HASH=1 is set; truncated keys can collide
@@ -76,12 +64,8 @@ class PackedHashTable128:
     ):
         if not (1 <= key_dim <= self.DIM):
             raise ValueError(f"key_dim must be in [1, {self.DIM}]; got {key_dim}")
-        self._capacity = _next_power_of_2(capacity)
-        self._device = torch.device(device)
+        super().__init__(capacity=capacity, device=device)
         self._key_dim = int(key_dim)
-        self._keys: Optional[Tensor] = None
-        self._vals: Optional[Tensor] = None
-        self._num_entries = 0
 
     @property
     def key_dim(self) -> int:
@@ -100,44 +84,11 @@ class PackedHashTable128:
         )
         return torch.cat([coords, pad], dim=1).contiguous()
 
-    @property
-    def capacity(self) -> int:
-        return self._capacity
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
-
-    @property
-    def num_entries(self) -> int:
-        return self._num_entries
-
-    @property
-    def keys_tensor(self) -> Tensor:
-        return self._keys
-
-    @property
-    def vals_tensor(self) -> Tensor:
-        return self._vals
-
-    def insert(self, coords: Tensor):
-        """Insert distinct integer coordinates into the table.
-
-        Args:
-            coords: int32 tensor of shape (N, DIM) on CUDA. Caller guarantees
-                rows are distinct (no insert-time dedup).
-
-        Raises:
-            ValueError: if any coord is outside [COORD_MIN, COORD_MAX]
-                (only checked when WARPCONVNET_DEBUG_HASH is set).
-            RuntimeError: if the hash table fills up during insertion.
-        """
+    def _prepare_insert_coords(self, coords: Tensor) -> Tensor:
         assert (
             coords.ndim == 2 and coords.shape[1] == self._key_dim
         ), f"Expected (N, {self._key_dim}); got {tuple(coords.shape)}"
-        assert coords.is_cuda
         coords = coords.to(dtype=torch.int32, device=self._device)
-
         if coords.shape[0] > 0 and _debug_hash_enabled():
             mn = coords.min().item()
             mx = coords.max().item()
@@ -146,34 +97,41 @@ class PackedHashTable128:
                     f"Coord out of range [{self.COORD_MIN}, {self.COORD_MAX}]: "
                     f"got [{mn}, {mx}]"
                 )
+        return self._pad_to_dim(coords)
 
-        coords = self._pad_to_dim(coords)
-        num_keys = coords.shape[0]
+    def _prepare_search_coords(self, queries: Tensor) -> Tensor:
         assert (
-            num_keys <= self._capacity // 2
-        ), f"num_keys={num_keys} exceeds capacity/2={self._capacity // 2}"
+            queries.ndim == 2 and queries.shape[1] == self._key_dim
+        ), f"queries shape must be (M, {self._key_dim}); got {tuple(queries.shape)}"
+        queries = queries.to(dtype=torch.int32, device=self._device)
+        return self._pad_to_dim(queries)
 
+    def _allocate_storage(self) -> None:
         self._keys = torch.empty((self._capacity, 2), dtype=torch.int64, device=self._device)
-        self._vals = torch.empty(self._capacity, dtype=torch.int32, device=self._device)
+        self._values = torch.empty(self._capacity, dtype=torch.int32, device=self._device)
 
-        _C.cuhash.packed128_prepare(self._keys, self._vals, self._capacity)
-        status_tensor = torch.zeros(1, dtype=torch.int32, device=self._device)
+    def _run_prepare(self) -> None:
+        _C.cuhash.packed128_prepare(self._keys, self._values, self._capacity)
+
+    def _run_insert(self, coords: Tensor, num_keys: int, status_tensor: Tensor) -> None:
         _C.cuhash.packed128_insert_d7c17(
             self._keys,
-            self._vals,
+            self._values,
             coords,
             num_keys,
             self._capacity,
             status_tensor,
         )
-        if int(status_tensor.item()) != 0:
-            raise RuntimeError(
-                f"PackedHashTable128.insert failed: hash table is full "
-                f"(num_keys={num_keys}, capacity={self._capacity}). "
-                f"Increase capacity or reduce load factor."
-            )
 
-        self._num_entries = num_keys
+    def _run_search(self, queries: Tensor, results: Tensor, num_search: int, **kwargs) -> None:
+        _C.cuhash.packed128_search_d7c17(
+            self._keys,
+            self._values,
+            queries,
+            results,
+            num_search,
+            self._capacity,
+        )
 
     @classmethod
     def from_keys(
@@ -202,40 +160,13 @@ class PackedHashTable128:
         obj.insert(coords)
         return obj
 
-    def search(self, query_coords: Tensor) -> Tensor:
-        """Search for keys in the table.
-
-        Returns:
-            int32 tensor of shape (M,) with original insertion index, or -1
-            if the key is not in the table.
-        """
-        assert self._keys is not None, "Call insert() first"
-        assert (
-            query_coords.ndim == 2 and query_coords.shape[1] == self._key_dim
-        ), f"queries shape must be (M, {self._key_dim}); got {tuple(query_coords.shape)}"
-        query_coords = query_coords.to(dtype=torch.int32, device=self._device)
-        query_coords = self._pad_to_dim(query_coords)
-
-        num_search = query_coords.shape[0]
-        results = torch.empty(num_search, dtype=torch.int32, device=self._device)
-
-        _C.cuhash.packed128_search_d7c17(
-            self._keys,
-            self._vals,
-            query_coords,
-            results,
-            num_search,
-            self._capacity,
-        )
-        return results
-
     def batched_search(self, queries: Tensor, offsets: Tensor) -> Tensor:
         """Batched (queries, offsets) -> [K, M] indices in a single kernel.
 
         For each (query q, offset o) pair, packs (q + o) and searches the
         table. Query coords loaded once per thread, offsets staged through
         shared memory, output written K-major:
-            results[k * M + qidx] = vals[slot] on hit, -1 on miss.
+            results[k * M + qidx] = values[slot] on hit, -1 on miss.
 
         Use case: permutohedral lattice / bilateral-grid blur, K = 2*(d+1).
 
@@ -267,7 +198,7 @@ class PackedHashTable128:
 
         _C.cuhash.packed128_batched_search_d7c17(
             self._keys,
-            self._vals,
+            self._values,
             queries,
             offsets,
             results,
