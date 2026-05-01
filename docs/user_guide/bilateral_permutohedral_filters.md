@@ -1,7 +1,7 @@
 # Bilateral and Permutohedral Filters
 
 **Created**: 2026-04-30 19:55:27 PST
-**Edited**: 2026-04-30 22:50:38 PST
+**Edited**: 2026-04-30 22:55:12 PST
 
 WarpConvNet ships three families of edge-preserving filters for point clouds
 and high-dimensional feature volumes. They differ in the underlying spatial
@@ -177,8 +177,8 @@ Gaussian noise of variance 0.01. End-to-end times are on an RTX 6000 Ada at
 <td align="center"><b>Noisy (Gaussian, var=0.01) — 20.70 dB</b></td>
 </tr>
 <tr>
-<td><img src="img/astronaut_original.jpg" alt="Original astronaut" width="100%"></td>
-<td><img src="img/astronaut_noisy.jpg" alt="Noisy astronaut" width="100%"></td>
+<td><img src="https://raw.githubusercontent.com/NVlabs/WarpConvNet/main/docs/user_guide/img/astronaut_original.jpg" alt="Original astronaut" width="100%"></td>
+<td><img src="https://raw.githubusercontent.com/NVlabs/WarpConvNet/main/docs/user_guide/img/astronaut_noisy.jpg" alt="Noisy astronaut" width="100%"></td>
 </tr>
 </table>
 
@@ -191,9 +191,9 @@ Gaussian noise of variance 0.01. End-to-end times are on an RTX 6000 Ada at
 <td align="center"><b>Permutohedral — 24.68 dB / ~11 ms</b></td>
 </tr>
 <tr>
-<td><img src="img/astronaut_knn.jpg" alt="KNN bilateral" width="100%"></td>
-<td><img src="img/astronaut_grid.jpg" alt="Grid bilateral" width="100%"></td>
-<td><img src="img/astronaut_permutohedral.jpg" alt="Permutohedral bilateral" width="100%"></td>
+<td><img src="https://raw.githubusercontent.com/NVlabs/WarpConvNet/main/docs/user_guide/img/astronaut_knn.jpg" alt="KNN bilateral" width="100%"></td>
+<td><img src="https://raw.githubusercontent.com/NVlabs/WarpConvNet/main/docs/user_guide/img/astronaut_grid.jpg" alt="Grid bilateral" width="100%"></td>
+<td><img src="https://raw.githubusercontent.com/NVlabs/WarpConvNet/main/docs/user_guide/img/astronaut_permutohedral.jpg" alt="Permutohedral bilateral" width="100%"></td>
 </tr>
 </table>
 
@@ -211,7 +211,7 @@ preserves edges slightly better than the $d$-cube grid at this bandwidth,
 and noticeably better than the limited-$K$ KNN filter where boundary
 neighbors get clipped.
 
-Reproduce with [`examples/bilateral_image_example.py`](https://github.com/NVIDIA/warpconvnet/blob/main/examples/bilateral_image_example.py):
+Reproduce with [`examples/bilateral_image_example.py`](https://github.com/NVlabs/WarpConvNet/blob/main/examples/bilateral_image_example.py):
 
 ```bash
 python examples/bilateral_image_example.py \
