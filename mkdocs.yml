@@ -58,6 +58,7 @@ nav:
       - Auto-Tuning: user_guide/autotune.md
       - Accumulator Precision: user_guide/accumulator_precision.md
       - Point Convolutions: user_guide/point_convolutions.md
+      - Bilateral & Permutohedral Filters: user_guide/bilateral_permutohedral_filters.md
       - Normalizations: user_guide/normalizations.md
       - Adaptive GEMM Grouping: user_guide/adaptive_gemm_grouping.md
       - Pre-Populate Benchmark Cache: user_guide/populate_benchmark_cache.md

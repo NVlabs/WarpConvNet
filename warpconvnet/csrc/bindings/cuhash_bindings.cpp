@@ -180,6 +180,31 @@ launch_hierarchical_kernel_map(torch::Tensor fine_keys,
                                int stride,
                                int fine_capacity);
 
+// 128-bit packed hash table (high-D coords, D=7, CoordBits=17)
+namespace packed128 {
+void launch_packed128_prepare(torch::Tensor keys, torch::Tensor vals, int capacity);
+void launch_packed128_insert_d7c17(torch::Tensor keys,
+                                   torch::Tensor vals,
+                                   torch::Tensor coords,
+                                   int num_keys,
+                                   int capacity,
+                                   torch::Tensor status_tensor);
+void launch_packed128_search_d7c17(torch::Tensor keys,
+                                   torch::Tensor vals,
+                                   torch::Tensor search_coords,
+                                   torch::Tensor results,
+                                   int num_search,
+                                   int capacity);
+void launch_packed128_batched_search_d7c17(torch::Tensor keys,
+                                           torch::Tensor vals,
+                                           torch::Tensor queries,
+                                           torch::Tensor offsets,
+                                           torch::Tensor results,
+                                           int M,
+                                           int K,
+                                           int capacity);
+}  // namespace packed128
+
 // Hierarchical search (individual kernels)
 void launch_coarse_probe(torch::Tensor keys_c,
                          torch::Tensor values_c,
@@ -464,6 +489,39 @@ void register_cuhash(pybind11::module_ &m) {
           py::arg("fine_capacity"),
           py::arg("threads_x") = 64,
           py::arg("threads_y") = 8);
+
+  // --- 128-bit packed hash table (D=7, CoordBits=17) ---
+  mod.def("packed128_prepare",
+          &cuhash::packed128::launch_packed128_prepare,
+          py::arg("keys"),
+          py::arg("vals"),
+          py::arg("capacity"));
+  mod.def("packed128_insert_d7c17",
+          &cuhash::packed128::launch_packed128_insert_d7c17,
+          py::arg("keys"),
+          py::arg("vals"),
+          py::arg("coords"),
+          py::arg("num_keys"),
+          py::arg("capacity"),
+          py::arg("status_tensor"));
+  mod.def("packed128_search_d7c17",
+          &cuhash::packed128::launch_packed128_search_d7c17,
+          py::arg("keys"),
+          py::arg("vals"),
+          py::arg("search_coords"),
+          py::arg("results"),
+          py::arg("num_search"),
+          py::arg("capacity"));
+  mod.def("packed128_batched_search_d7c17",
+          &cuhash::packed128::launch_packed128_batched_search_d7c17,
+          py::arg("keys"),
+          py::arg("vals"),
+          py::arg("queries"),
+          py::arg("offsets"),
+          py::arg("results"),
+          py::arg("M"),
+          py::arg("K"),
+          py::arg("capacity"));
 }
 
 }  // namespace bindings
