@@ -72,12 +72,33 @@ class PackedHashTable128:
         self,
         capacity: int,
         device: Union[str, torch.device] = "cuda",
+        key_dim: int = DIM,
     ):
+        if not (1 <= key_dim <= self.DIM):
+            raise ValueError(f"key_dim must be in [1, {self.DIM}]; got {key_dim}")
         self._capacity = _next_power_of_2(capacity)
         self._device = torch.device(device)
+        self._key_dim = int(key_dim)
         self._keys: Optional[Tensor] = None
         self._vals: Optional[Tensor] = None
         self._num_entries = 0
+
+    @property
+    def key_dim(self) -> int:
+        """Logical key width seen by callers; padded to DIM=7 internally."""
+        return self._key_dim
+
+    def _pad_to_dim(self, coords: Tensor) -> Tensor:
+        """Zero-pad trailing axes from key_dim to DIM=7 if needed."""
+        if self._key_dim == self.DIM:
+            return coords.contiguous()
+        n = coords.shape[0]
+        pad = torch.zeros(
+            (n, self.DIM - self._key_dim),
+            dtype=coords.dtype,
+            device=coords.device,
+        )
+        return torch.cat([coords, pad], dim=1).contiguous()
 
     @property
     def capacity(self) -> int:
@@ -112,10 +133,10 @@ class PackedHashTable128:
             RuntimeError: if the hash table fills up during insertion.
         """
         assert (
-            coords.ndim == 2 and coords.shape[1] == self.DIM
-        ), f"Expected (N, {self.DIM}); got {tuple(coords.shape)}"
+            coords.ndim == 2 and coords.shape[1] == self._key_dim
+        ), f"Expected (N, {self._key_dim}); got {tuple(coords.shape)}"
         assert coords.is_cuda
-        coords = coords.contiguous().to(dtype=torch.int32, device=self._device)
+        coords = coords.to(dtype=torch.int32, device=self._device)
 
         if coords.shape[0] > 0 and _debug_hash_enabled():
             mn = coords.min().item()
@@ -126,6 +147,7 @@ class PackedHashTable128:
                     f"got [{mn}, {mx}]"
                 )
 
+        coords = self._pad_to_dim(coords)
         num_keys = coords.shape[0]
         assert (
             num_keys <= self._capacity // 2
@@ -159,13 +181,24 @@ class PackedHashTable128:
         coords: Tensor,
         device: Union[str, torch.device] = "cuda",
         capacity: Optional[int] = None,
+        key_dim: Optional[int] = None,
     ) -> "PackedHashTable128":
-        """Build a hash table from a coord tensor (caller guarantees distinct rows)."""
+        """Build a hash table from a coord tensor (caller guarantees distinct rows).
+
+        ``key_dim`` defaults to ``coords.shape[1]``; smaller key dims are
+        zero-padded to DIM=7 internally on insert/search/batched_search.
+        """
         target = torch.device(device)
-        coords = coords.contiguous().to(dtype=torch.int32, device=target)
+        coords = coords.to(dtype=torch.int32, device=target)
+        if key_dim is None:
+            key_dim = int(coords.shape[1])
+        if not (1 <= key_dim <= cls.DIM):
+            raise ValueError(f"key_dim must be in [1, {cls.DIM}]; got {key_dim}")
+        if coords.shape[1] != key_dim:
+            raise ValueError(f"coords width {coords.shape[1]} != key_dim {key_dim}")
         n = coords.shape[0]
         cap = capacity if capacity is not None else max(16, n * 2)
-        obj = cls(capacity=cap, device=target)
+        obj = cls(capacity=cap, device=target, key_dim=key_dim)
         obj.insert(coords)
         return obj
 
@@ -177,8 +210,11 @@ class PackedHashTable128:
             if the key is not in the table.
         """
         assert self._keys is not None, "Call insert() first"
-        assert query_coords.ndim == 2 and query_coords.shape[1] == self.DIM
-        query_coords = query_coords.contiguous().to(dtype=torch.int32, device=self._device)
+        assert (
+            query_coords.ndim == 2 and query_coords.shape[1] == self._key_dim
+        ), f"queries shape must be (M, {self._key_dim}); got {tuple(query_coords.shape)}"
+        query_coords = query_coords.to(dtype=torch.int32, device=self._device)
+        query_coords = self._pad_to_dim(query_coords)
 
         num_search = query_coords.shape[0]
         results = torch.empty(num_search, dtype=torch.int32, device=self._device)
@@ -212,14 +248,14 @@ class PackedHashTable128:
         """
         assert self._keys is not None, "Call insert() first"
         assert (
-            queries.ndim == 2 and queries.shape[1] == self.DIM
-        ), f"queries shape must be (M, {self.DIM}); got {tuple(queries.shape)}"
+            queries.ndim == 2 and queries.shape[1] == self._key_dim
+        ), f"queries shape must be (M, {self._key_dim}); got {tuple(queries.shape)}"
         assert (
-            offsets.ndim == 2 and offsets.shape[1] == self.DIM
-        ), f"offsets shape must be (K, {self.DIM}); got {tuple(offsets.shape)}"
+            offsets.ndim == 2 and offsets.shape[1] == self._key_dim
+        ), f"offsets shape must be (K, {self._key_dim}); got {tuple(offsets.shape)}"
 
-        queries = queries.contiguous().to(dtype=torch.int32, device=self._device)
-        offsets = offsets.contiguous().to(dtype=torch.int32, device=self._device)
+        queries = self._pad_to_dim(queries.to(dtype=torch.int32, device=self._device))
+        offsets = self._pad_to_dim(offsets.to(dtype=torch.int32, device=self._device))
 
         M = queries.shape[0]
         K = offsets.shape[0]

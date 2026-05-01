@@ -1,7 +1,7 @@
 # Bilateral and Permutohedral Filters
 
 **Created**: 2026-04-30 19:55:27 PST
-**Edited**: 2026-04-30 19:55:27 PST
+**Edited**: 2026-04-30 21:30:00 PST
 
 WarpConvNet ships three families of edge-preserving filters for point clouds
 and high-dimensional feature volumes. They differ in the underlying spatial
@@ -215,7 +215,8 @@ gone the pad path can be removed.
 - `warpconvnet/nn/functional/permutohedral.py` (lattice)
 - `warpconvnet/nn/modules/bilateral.py`
 - `warpconvnet/nn/modules/permutohedral.py`
-- `warpconvnet/nn/functional/_hash_backend.py` (lattice → hash table glue)
+- `warpconvnet/geometry/coords/search/packed128_hashmap.py` (`PackedHashTable128`,
+  used by both lattice variants; handles `key_dim < 7` via internal zero-pad)
 
 ## References
 
