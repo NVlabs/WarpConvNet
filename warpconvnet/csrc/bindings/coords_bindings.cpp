@@ -5,10 +5,12 @@
 // Exposes _C.coords submodule.
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/util/Exception.h>
 #include <cuda_runtime.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <torch/extension.h>
+#include <torch/python.h>
+#include <torch/types.h>
 
 #include <tuple>
 #include <vector>

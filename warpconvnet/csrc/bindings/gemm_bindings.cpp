@@ -2,18 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/util/Exception.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cutlass/arch/arch.h>
-#include <cutlass/numeric_types.h>
 #include <pybind11/pybind11.h>
-#include <torch/extension.h>
+#include <torch/python.h>
+#include <torch/types.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <sstream>
 #include <string>
+
+namespace cutlass {
+struct half_t;
+struct bfloat16_t;
+}  // namespace cutlass
 
 #include "../include/gemm_error_codes.h"
 #include "../include/gemm_mma_tiles.h"
@@ -23,8 +30,24 @@ namespace py = pybind11;
 
 namespace {
 
-bool has_registered_offset_gemm_kernel(const char *op, const std::string &backend, int tile_id) {
-  bool found = false;
+struct OffsetGemmKernelEntry {
+  const char *op;
+  const char *backend;
+  int tile_id;
+  bool grouped;
+  bool split_k;
+  const char *symbol;
+  const char *tile_tag;
+  const char *in_dt;
+  const char *out_dt;
+  const char *acc_dt;
+  const char *itype;
+  int block_size;
+  const char *kernel_variant;
+  const char *mma_atom;
+};
+
+constexpr OffsetGemmKernelEntry kOffsetGemmTable[] = {
 #define OFFSET_GEMM_KERNEL(OP,             \
                            BACKEND,        \
                            TILE_ID,        \
@@ -39,51 +62,53 @@ bool has_registered_offset_gemm_kernel(const char *op, const std::string &backen
                            BLOCK_SIZE,     \
                            KERNEL_VARIANT, \
                            MMA_ATOM)       \
-  if (!found && std::string(OP) == op && backend == BACKEND && tile_id == TILE_ID) found = true;
+  {OP,                                     \
+   BACKEND,                                \
+   TILE_ID,                                \
+   static_cast<bool>(GROUPED),             \
+   static_cast<bool>(SPLIT_K),             \
+   SYMBOL,                                 \
+   TILE_TAG,                               \
+   IN_DT,                                  \
+   OUT_DT,                                 \
+   ACC_DT,                                 \
+   ITYPE,                                  \
+   BLOCK_SIZE,                             \
+   KERNEL_VARIANT,                         \
+   MMA_ATOM},
 #include "../offset_gemm/offset_gemm_dispatch_table.inc"
 #undef OFFSET_GEMM_KERNEL
-  return found;
+};
+
+bool has_registered_offset_gemm_kernel(const char *op, const std::string &backend, int tile_id) {
+  for (const auto &e : kOffsetGemmTable) {
+    if (e.tile_id == tile_id && std::strcmp(e.op, op) == 0 && backend == e.backend) {
+      return true;
+    }
+  }
+  return false;
 }
 
-// Snapshot of the compile-time OFFSET_GEMM_KERNEL table. Lets Python code
-// enumerate registered (op, backend, tile_id) variants without importing
-// the warpgemm.codegen.offset_gemm build-time package.
 py::list offset_gemm_list_kernels() {
   py::list out;
-#define OFFSET_GEMM_KERNEL(OP,                           \
-                           BACKEND,                      \
-                           TILE_ID,                      \
-                           GROUPED,                      \
-                           SPLIT_K,                      \
-                           SYMBOL,                       \
-                           TILE_TAG,                     \
-                           IN_DT,                        \
-                           OUT_DT,                       \
-                           ACC_DT,                       \
-                           ITYPE,                        \
-                           BLOCK_SIZE,                   \
-                           KERNEL_VARIANT,               \
-                           MMA_ATOM)                     \
-  do {                                                   \
-    py::dict row;                                        \
-    row["op"] = std::string(OP);                         \
-    row["backend"] = std::string(BACKEND);               \
-    row["tile_id"] = static_cast<int>(TILE_ID);          \
-    row["grouped"] = static_cast<bool>(GROUPED);         \
-    row["split_k"] = static_cast<bool>(SPLIT_K);         \
-    row["launch_symbol"] = std::string(SYMBOL);          \
-    row["tile_tag"] = std::string(TILE_TAG);             \
-    row["input_dtype"] = std::string(IN_DT);             \
-    row["output_dtype"] = std::string(OUT_DT);           \
-    row["acc_dtype"] = std::string(ACC_DT);              \
-    row["itype"] = std::string(ITYPE);                   \
-    row["block_size"] = static_cast<int>(BLOCK_SIZE);    \
-    row["kernel_variant"] = std::string(KERNEL_VARIANT); \
-    row["mma_atom"] = std::string(MMA_ATOM);             \
-    out.append(row);                                     \
-  } while (0);
-#include "../offset_gemm/offset_gemm_dispatch_table.inc"
-#undef OFFSET_GEMM_KERNEL
+  for (const auto &e : kOffsetGemmTable) {
+    py::dict row;
+    row["op"] = e.op;
+    row["backend"] = e.backend;
+    row["tile_id"] = e.tile_id;
+    row["grouped"] = e.grouped;
+    row["split_k"] = e.split_k;
+    row["launch_symbol"] = e.symbol;
+    row["tile_tag"] = e.tile_tag;
+    row["input_dtype"] = e.in_dt;
+    row["output_dtype"] = e.out_dt;
+    row["acc_dtype"] = e.acc_dt;
+    row["itype"] = e.itype;
+    row["block_size"] = e.block_size;
+    row["kernel_variant"] = e.kernel_variant;
+    row["mma_atom"] = e.mma_atom;
+    out.append(row);
+  }
   return out;
 }
 

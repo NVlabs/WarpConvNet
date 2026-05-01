@@ -1,11 +1,17 @@
 // Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 // SPDX-License-Identifier: Apache-2.0
 
-// CUTLASS size_t requires cstddef
-#include <cstddef>
-#include <cutlass/numeric_types.h>
+#include <c10/util/Exception.h>
 #include <pybind11/pybind11.h>
-#include <torch/extension.h>
+#include <torch/python.h>
+#include <torch/types.h>
+
+#include <cstddef>
+
+namespace cutlass {
+struct half_t;
+struct bfloat16_t;
+}  // namespace cutlass
 
 namespace py = pybind11;
 

@@ -4,9 +4,11 @@
 // pybind11 bindings for cuhash packed hash table and kernel map kernels.
 // Registers everything under the _C.cuhash submodule.
 
+#include <c10/util/Exception.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <torch/extension.h>
+#include <torch/python.h>
+#include <torch/types.h>
 
 #include "register.h"
 
