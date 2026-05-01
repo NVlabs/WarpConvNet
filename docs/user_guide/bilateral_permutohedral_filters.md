@@ -1,7 +1,7 @@
 # Bilateral and Permutohedral Filters
 
 **Created**: 2026-04-30 19:55:27 PST
-**Edited**: 2026-04-30 21:30:00 PST
+**Edited**: 2026-04-30 22:50:38 PST
 
 WarpConvNet ships three families of edge-preserving filters for point clouds
 and high-dimensional feature volumes. They differ in the underlying spatial
@@ -158,6 +158,89 @@ smoothed = solver(src_xyz, src_feat, target, confidence)
 Sinkhorn-style bistochastization runs by default; disable via the
 underlying `bilateral_solver(grid, ..., bistochastize=False)` if extreme
 confidence values cause non-finite scaling factors.
+
+## Worked example: 2D image denoising
+
+Image denoising is the canonical bilateral demo: each pixel is a point with
+a 2D position and a 3D color, the guide is `concat(xy/sigma_xy, rgb/sigma_rgb)`, and the value being filtered is the noisy color itself.
+
+The example below applies all three filter families to the NASA `astronaut`
+test image (public domain, shipped with `scikit-image`) corrupted with
+Gaussian noise of variance 0.01. End-to-end times are on an RTX 6000 Ada at
+512×512 = 262k "points" with $\sigma_{xy} = 4$, $\sigma_{rgb} = 0.1$.
+
+### Input
+
+<table>
+<tr>
+<td align="center"><b>Original</b></td>
+<td align="center"><b>Noisy (Gaussian, var=0.01) — 20.70 dB</b></td>
+</tr>
+<tr>
+<td><img src="img/astronaut_original.jpg" alt="Original astronaut" width="100%"></td>
+<td><img src="img/astronaut_noisy.jpg" alt="Noisy astronaut" width="100%"></td>
+</tr>
+</table>
+
+### Output
+
+<table>
+<tr>
+<td align="center"><b>KNN (k=24) — 23.67 dB / ~3.3 s</b></td>
+<td align="center"><b>Grid — 23.94 dB / ~63 ms</b></td>
+<td align="center"><b>Permutohedral — 24.68 dB / ~11 ms</b></td>
+</tr>
+<tr>
+<td><img src="img/astronaut_knn.jpg" alt="KNN bilateral" width="100%"></td>
+<td><img src="img/astronaut_grid.jpg" alt="Grid bilateral" width="100%"></td>
+<td><img src="img/astronaut_permutohedral.jpg" alt="Permutohedral bilateral" width="100%"></td>
+</tr>
+</table>
+
+| Filter                         | Time   | PSNR (dB) | Notes                          |
+| ------------------------------ | ------ | --------- | ------------------------------ |
+| Noisy input (reference)        | —      | 20.70     | Gaussian noise, var = 0.01     |
+| `BilateralFilter` (KNN, k=24)  | ~3.3 s | 23.67     | Exact Gaussian, $O(N \cdot k)$ |
+| `BilateralFilterGrid`          | ~63 ms | 23.94     | $d=5$ sparse cube              |
+| `BilateralPermutohedralFilter` | ~11 ms | **24.68** | $d=5$ permutohedral lattice    |
+
+PSNR is computed against the clean original with `data_range=1.0`. The
+permutohedral lattice is both fastest *and* highest PSNR here — its
+conservative reconstruction (3-tap Gaussian on $(d{+}1)$ lattice axes)
+preserves edges slightly better than the $d$-cube grid at this bandwidth,
+and noticeably better than the limited-$K$ KNN filter where boundary
+neighbors get clipped.
+
+Reproduce with [`examples/bilateral_image_example.py`](https://github.com/NVIDIA/warpconvnet/blob/main/examples/bilateral_image_example.py):
+
+```bash
+python examples/bilateral_image_example.py \
+    --out-dir docs/user_guide/img \
+    --sigma-xy 4.0 --sigma-rgb 0.1 --noise-var 0.01
+```
+
+Sketch of the call site:
+
+```python
+from skimage import data, util
+import torch
+import warpconvnet.nn as wn
+
+img = util.img_as_float(data.astronaut())                    # (512, 512, 3)
+noisy = util.random_noise(img, mode="gaussian", var=0.01)
+h, w, _ = img.shape
+
+ys, xs = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+xy  = torch.stack([xs, ys], dim=-1).reshape(-1, 2).float().cuda()
+rgb = torch.from_numpy(noisy).reshape(-1, 3).float().cuda()
+
+filt = wn.BilateralPermutohedralFilter(sigma_xyz=4.0, sigma_feat=0.1)
+denoised = filt(xy, rgb, rgb).reshape(h, w, 3).clamp(0, 1)
+```
+
+The KNN filter is exact-Gaussian but $O(N \cdot k)$; the lattice variants
+trade ~10–20% reconstruction error for two orders of magnitude in speed and
+become the only viable option above ~$10^5$ points.
 
 ## Constraints
 
