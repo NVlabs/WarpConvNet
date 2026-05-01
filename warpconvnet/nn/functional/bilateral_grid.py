@@ -32,7 +32,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from ._hash_backend import make_hash_table
+from warpconvnet.geometry.coords.search.packed128_hashmap import PackedHashTable128
 
 
 def _corner_offsets(d: int, device: torch.device) -> Tensor:
@@ -101,7 +101,7 @@ class BilateralGrid:
 
         unique_keys, inverse = torch.unique(all_keys, dim=0, return_inverse=True)
         capacity = max(16, int(unique_keys.shape[0] * 2))
-        hash_table = make_hash_table(
+        hash_table = PackedHashTable128.from_keys(
             unique_keys,
             device=device,
             capacity=capacity,
