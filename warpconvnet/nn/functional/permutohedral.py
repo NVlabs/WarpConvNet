@@ -31,7 +31,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from ._hash_backend import make_hash_table
+from warpconvnet.geometry.coords.search.packed128_hashmap import PackedHashTable128
 
 
 # --- Lattice math ----------------------------------------------------------
@@ -238,7 +238,7 @@ class PermutohedralLattice:
         # unique_keys: (V, d+1) int32; inverse: (N*(d+1),) int64
 
         capacity = max(16, int(unique_keys.shape[0] * 2))
-        hash_table = make_hash_table(
+        hash_table = PackedHashTable128.from_keys(
             unique_keys,
             device=device,
             capacity=capacity,
