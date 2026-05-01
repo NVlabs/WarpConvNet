@@ -183,6 +183,12 @@ For algorithm backends and cache inspection, see the [Sparse Convolutions](https
 
 Recommend using [`uv`](https://docs.astral.sh/uv/) to install the dependencies. When using `uv`, prepend with `uv pip install ...`.
 
+Or install [`uv-pip`](https://github.com/chrischoy/uv-pip) so plain `pip` commands transparently route through `uv`:
+
+```bash
+uv pip install uv-pip
+```
+
 ### Pre-built wheels (recommended)
 
 Pre-built wheels are available for common PyTorch + CUDA combinations on Linux x86_64. This is the fastest way to install — no compiler or CUDA toolkit needed.
@@ -219,8 +225,8 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/${CUD
 # Install build dependencies
 pip install build ninja
 
-# Install warpconvnet (builds from source)
-pip install warpconvnet
+# Install warpconvnet (builds from source). Cap parallel nvcc to avoid OOM.
+MAX_JOBS=4 NVCC_THREADS=1 pip install warpconvnet
 ```
 
 ### Install from source (development)
@@ -238,8 +244,13 @@ pip install flash-attn --no-build-isolation
 git clone https://github.com/NVlabs/WarpConvNet.git
 cd WarpConvNet
 git submodule update --init 3rdparty/cutlass
-pip install -e . --no-build-isolation
+
+# Cap parallel nvcc jobs to avoid OOM (each nvcc on a mask-GEMM TU peaks ~5–7 GB).
+# Without MAX_JOBS, ninja runs `nproc + 2` jobs and may exhaust RAM.
+MAX_JOBS=4 NVCC_THREADS=1 pip install -e . --no-build-isolation
 ```
+
+Pick `MAX_JOBS` based on RAM: rough rule `MAX_JOBS ≈ free_GB / 7`. 32 GB → 4, 64 GB → 8, 128 GB → 16.
 
 If version detection fails (detached HEAD, shallow clone, rebase), bypass
 setuptools-scm:
