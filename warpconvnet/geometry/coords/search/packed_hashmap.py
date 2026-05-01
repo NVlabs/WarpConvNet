@@ -15,19 +15,7 @@ import torch
 from torch import Tensor
 
 import warpconvnet._C as _C
-
-
-def _next_power_of_2(n: int) -> int:
-    if n <= 0:
-        return 1
-    n -= 1
-    n |= n >> 1
-    n |= n >> 2
-    n |= n >> 4
-    n |= n >> 8
-    n |= n >> 16
-    n |= n >> 32
-    return n + 1
+from warpconvnet.geometry.coords.search._packed_base import PackedHashTableBase
 
 
 class SearchMode(enum.IntEnum):
@@ -36,7 +24,7 @@ class SearchMode(enum.IntEnum):
     WARP_COOP = 2
 
 
-class PackedHashTable:
+class PackedHashTable(PackedHashTableBase):
     """Hash table for 4D integer coordinates packed into uint64.
 
     Bit layout:
@@ -59,40 +47,14 @@ class PackedHashTable:
         device: Union[str, torch.device] = "cuda",
         use_double_hash: bool = False,
     ):
-        self._capacity = _next_power_of_2(capacity)
-        self._device = torch.device(device)
+        super().__init__(capacity=capacity, device=device)
         self._use_double_hash = use_double_hash
-        self._keys: Optional[Tensor] = None
-        self._values: Optional[Tensor] = None
-        self._num_entries = 0
         self._coords: Optional[Tensor] = None
         self._coarse_cache: dict = {}  # stride -> PackedHashTable
 
     @property
-    def capacity(self) -> int:
-        return self._capacity
-
-    @property
-    def device(self) -> torch.device:
-        if self._keys is not None:
-            return self._keys.device
-        return self._device
-
-    @property
-    def num_entries(self) -> int:
-        return self._num_entries
-
-    @property
     def key_dim(self) -> int:
         return 4
-
-    @property
-    def keys_tensor(self) -> Tensor:
-        return self._keys
-
-    @property
-    def values_tensor(self) -> Tensor:
-        return self._values
 
     @property
     def vector_keys(self) -> Tensor:
@@ -101,21 +63,9 @@ class PackedHashTable:
             raise RuntimeError("No coordinates stored. Call insert() first.")
         return self._coords[: self._num_entries]
 
-    def insert(self, coords: Tensor):
-        """Insert 4D integer coordinates into the hash table.
-
-        Args:
-            coords: int32 tensor of shape (N, 4) on CUDA device.
-
-        Raises:
-            ValueError: If any batch index is outside [0, BATCH_MAX] or any
-                spatial coordinate is outside [COORD_MIN, COORD_MAX].
-            RuntimeError: If the hash table is full during insertion.
-        """
+    def _prepare_insert_coords(self, coords: Tensor) -> Tensor:
         assert coords.ndim == 2 and coords.shape[1] == 4
-        assert coords.is_cuda
         coords = coords.contiguous().to(dtype=torch.int32, device=self._device)
-
         if coords.shape[0] > 0:
             batch = coords[:, 0]
             spatial = coords[:, 1:]
@@ -129,17 +79,20 @@ class PackedHashTable:
                     f"Spatial coord out of range [{self.COORD_MIN}, {self.COORD_MAX}]: "
                     f"got [{spatial.min().item()}, {spatial.max().item()}]"
                 )
+        return coords
 
-        num_keys = coords.shape[0]
-        assert (
-            num_keys <= self._capacity // 2
-        ), f"num_keys={num_keys} exceeds capacity/2={self._capacity // 2}"
+    def _prepare_search_coords(self, queries: Tensor) -> Tensor:
+        assert queries.ndim == 2 and queries.shape[1] == 4
+        return queries.contiguous().to(dtype=torch.int32, device=self._device)
 
+    def _allocate_storage(self) -> None:
         self._keys = torch.empty(self._capacity, dtype=torch.int64, device=self._device)
         self._values = torch.empty(self._capacity, dtype=torch.int32, device=self._device)
 
+    def _run_prepare(self) -> None:
         _C.cuhash.packed_prepare(self._keys, self._values, self._capacity)
-        status_tensor = torch.zeros(1, dtype=torch.int32, device=self._device)
+
+    def _run_insert(self, coords: Tensor, num_keys: int, status_tensor: Tensor) -> None:
         _C.cuhash.packed_insert(
             self._keys,
             self._values,
@@ -149,14 +102,28 @@ class PackedHashTable:
             self._use_double_hash,
             status_tensor,
         )
-        if int(status_tensor.item()) != 0:
-            raise RuntimeError(
-                f"PackedHashTable.insert failed: hash table is full "
-                f"(num_keys={num_keys}, capacity={self._capacity}). "
-                f"Increase capacity or reduce load factor."
-            )
 
-        self._num_entries = num_keys
+    def _run_search(
+        self,
+        queries: Tensor,
+        results: Tensor,
+        num_search: int,
+        mode: SearchMode = SearchMode.LINEAR,
+    ) -> None:
+        search_mode = int(mode)
+        if self._use_double_hash and search_mode == 0:
+            search_mode = 1
+        _C.cuhash.packed_search(
+            self._keys,
+            self._values,
+            queries,
+            results,
+            num_search,
+            self._capacity,
+            search_mode,
+        )
+
+    def _post_insert(self, coords: Tensor) -> None:
         self._coords = coords
 
     @classmethod
@@ -290,24 +257,4 @@ class PackedHashTable:
         Returns:
             int32 tensor of shape (M,) with original indices, -1 if not found.
         """
-        assert self._keys is not None, "Call insert() first"
-        assert query_coords.ndim == 2 and query_coords.shape[1] == 4
-        query_coords = query_coords.contiguous().to(dtype=torch.int32, device=self._device)
-
-        num_search = query_coords.shape[0]
-        results = torch.empty(num_search, dtype=torch.int32, device=self._device)
-
-        search_mode = int(mode)
-        if self._use_double_hash and search_mode == 0:
-            search_mode = 1
-
-        _C.cuhash.packed_search(
-            self._keys,
-            self._values,
-            query_coords,
-            results,
-            num_search,
-            self._capacity,
-            search_mode,
-        )
-        return results
+        return super().search(query_coords, mode=mode)
