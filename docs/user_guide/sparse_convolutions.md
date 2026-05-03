@@ -1,19 +1,23 @@
 # Spatially Sparse Convolutions
 
-**Created**: 2026-04-18 17:02:44
-**Edited**: 2026-04-18 17:02:44
+**Created**: 2026-04-18 17:02:44 PST
+**Edited**: 2026-05-03 19:15:00 PST
 
-WarpConvNet implements **spatially sparse convolutions** on voxel grids. This
-page defines what "spatially sparse" means, gives the mathematical
-formulation, describes convolution variants (standard, group, depthwise),
-and enumerates the three math kernels that make up a training step. The
-per-shape algorithm-selection system is described on its own page
-([Auto-Tuning](./autotune.md)).
+WarpConvNet implements **spatially sparse convolutions** on integer-grid
+voxel coordinates. This page is the conceptual entry point: what
+"spatially sparse" means, the mathematical definition, and visualizations
+of the four convolution regimes WarpConvNet supports.
 
-## Spatial, feature, and weight sparsity
+For the user-facing API (layer constructors, kernel sizes, group / depthwise
+variants, generative decoders), see
+[Variants & API](sparse_convolutions_variants.md). For the GEMM-level
+implementation (AB/ABt/AtB ops, kernel-map structures, algorithm picking),
+see [Internals](sparse_convolutions_internals.md).
 
-"Sparsity" in neural networks is an overloaded term. Three distinct flavors
-show up in 3D work and they have completely different implications:
+## Spatial vs. feature vs. weight sparsity
+
+"Sparsity" in neural networks is overloaded. Three distinct flavors show
+up in 3D work and they have completely different implications:
 
 | Kind                 | What is sparse                                                             | Typical source                                                   | How WarpConvNet handles it                                                         |
 | -------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -23,305 +27,202 @@ show up in 3D work and they have completely different implications:
 
 The distinction between *spatial* and *weight* sparsity (and the motivation
 to study them jointly) is the subject of [1]. This page is about **spatial
-sparsity** — only the first row of that table.
+sparsity** — only the first row of the table.
 
-## Mathematical formulation
+## Mathematical definition
 
-Let $\mathcal{C}^{\text{in}}, \mathcal{C}^{\text{out}} \subset \mathbb{Z}^D$
-be the input and output coordinate sets on a $D$-dimensional integer grid
-(typically $D = 2$ or $D = 3$). Let $\mathcal{K} \subset \mathbb{Z}^D$ be
-the set of kernel offsets (e.g. the 27 offsets of a $3 \times 3 \times 3$
-kernel in $D = 3$). The **generalized sparse convolution** [2] is:
+### Domain
 
-$$
-\mathbf{y}_{\mathbf{u}} = \sum_{\mathbf{i} \in \mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}})} \mathbf{W}_{\mathbf{i}} \, \mathbf{x}_{\mathbf{u} + \mathbf{i}}
-\qquad \text{for } \mathbf{u} \in \mathcal{C}^{\text{out}}
-$$
+Fix a spatial dimension $D \in \{2, 3\}$ (sometimes 4 with a temporal
+axis). The convolution operates on the integer grid $\mathbb{Z}^D$.
+Coordinates are written as bold lowercase, $\mathbf{u} = (u_1, \ldots, u_D) \in \mathbb{Z}^D$.
 
-with the active-offset set
+### Coordinate sets
+
+A *spatially sparse tensor* is a pair
 
 $$
-\mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}}) = \{\, \mathbf{i} \in \mathcal{K} : \mathbf{u} + \mathbf{i} \in \mathcal{C}^{\text{in}} \,\}.
+\bigl(\mathcal{C},\ \{\mathbf{x}_{\mathbf{u}}\}_{\mathbf{u} \in \mathcal{C}}\bigr),
+\qquad
+\mathcal{C} \subset \mathbb{Z}^D,
+\quad
+\mathbf{x}_{\mathbf{u}} \in \mathbb{R}^{C}.
 $$
 
-Here $\mathbf{x}_{\mathbf{u}} \in \mathbb{R}^{C_{\text{in}}}$ and
-$\mathbf{y}_{\mathbf{u}} \in \mathbb{R}^{C_{\text{out}}}$ are per-coordinate
-feature vectors, and $\mathbf{W}_{\mathbf{i}} \in \mathbb{R}^{C_{\text{out}} \times C_{\text{in}}}$
-is the weight matrix associated with kernel offset $\mathbf{i}$.
+$\mathcal{C}$ is the **coordinate set** (the explicitly stored, *occupied*
+voxels) and $\mathbf{x}_{\mathbf{u}}$ is the per-coordinate feature
+vector of width $C$. Only $|\mathcal{C}| \ll |\mathbb{Z}^D|$ coordinates
+are materialized; everywhere else the tensor is *implicitly* zero.
 
-The cost is proportional to $\sum_{\mathbf{u} \in \mathcal{C}^{\text{out}}} |\mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}})|$
-rather than $|\mathcal{C}^{\text{out}}| \cdot |\mathcal{K}|$, which is the
-entire point of spatial sparsity: work scales with occupied neighbor pairs,
-not with the dense grid volume.
+### Kernel offsets
 
-### How $\mathcal{C}^{\text{out}}$ is chosen
+A convolution kernel of (odd) size $K$ in each axis is identified with
+its **offset set**
 
-The output coordinate set is controlled by three flags on
-`SparseConv3d` / `spatially_sparse_conv`: `stride`, `transposed`, and
-`generative`.
+$$
+\mathcal{K} \;=\; \Bigl\{\, \mathbf{i} \in \mathbb{Z}^D : -\lfloor K/2 \rfloor \le i_d \le \lfloor K/2 \rfloor \;\text{for all } d \,\Bigr\},
+\qquad
+|\mathcal{K}| = K^D.
+$$
 
-| Regime                    | Flags                         | $\mathcal{C}^{\text{out}}$                                                                                                                        | Notes                                                                           |
-| ------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **stride=1**              | `stride=1`                    | $\mathcal{C}^{\text{out}} = \mathcal{C}^{\text{in}}$                                                                                              | Preserves coordinate set. Pioneered as *submanifold sparse convolution* in [3]. |
-| **Downsampling**          | `stride>1`                    | Downsampled coordinates (one per stride cell).                                                                                                    | Standard pooling/strided convolution.                                           |
-| **Transposed**            | `transposed=True`, `stride>1` | Upsampled coordinates by factor `stride` over $\mathcal{C}^{\text{in}}$.                                                                          | Deconvolution / learned upsampling.                                             |
-| **Generative (stride=1)** | `generative=True`, `stride=1` | $\mathcal{C}^{\text{in}}$ **expanded by the kernel support** — every grid point reachable from any input coordinate via a kernel offset is added. | Densification: the coordinate set *grows*.                                      |
-| **Generative (stride>1)** | `generative=True`, `stride>1` | Stride (or upsample, if `transposed=True`) the input coordinates first, then expand by the kernel support.                                        | Used in generative decoders / diffusion models that produce new occupied cells. |
+For $D=3$ and $K=3$ this is the familiar $3{\times}3{\times}3$ box of
+27 offsets. WarpConvNet also supports arbitrary offset sets
+$\mathcal{K} \subset \mathbb{Z}^D$ (no requirement to be a box).
 
-The stride-1 case — convolving over exactly the occupied coordinates
-without introducing new output sites — was introduced by Graham and
-van der Maaten [3] as *submanifold sparse convolution*. WarpConvNet uses
-the stride-based terminology internally (see `SparseConv3d(stride=1)`) but
-the idea is the one from [3]. The generalized form with arbitrary strides
-and coordinate sets follows Choy, Gwak, Savarese [2].
+### Generalized sparse convolution
 
-**Generative convolution** (`generative=True`) is the only regime that
-**adds** new coordinates rather than reducing or preserving them. For
-each input coordinate $\mathbf{u}$, every grid point $\mathbf{u} + \mathbf{i}$
-for $\mathbf{i} \in \mathcal{K}$ is added to $\mathcal{C}^{\text{out}}$
-(deduplicated). This is the standard tool for occupancy densification
-and generative sparse decoders — outputs can only appear within the
-kernel reach of existing inputs, so successive generative layers
-progressively fill the occupied region.
+Given an input tensor on $\mathcal{C}^{\text{in}}$, an output coordinate
+set $\mathcal{C}^{\text{out}} \subset \mathbb{Z}^D$, an offset set
+$\mathcal{K}$, and per-offset weight matrices $\mathbf{W}_{\mathbf{i}} \in \mathbb{R}^{C_{\text{out}} \times C_{\text{in}}}$
+for $\mathbf{i} \in \mathcal{K}$, the **generalized sparse convolution** [2] is
 
-```python
-# Generative, stride=1: expand the occupied set by the kernel support.
-# Output has more coordinates than input.
-conv_gen = SparseConv3d(64, 128, kernel_size=3, stride=1, generative=True)
+$$
+\boxed{\;
+\mathbf{y}_{\mathbf{u}} \;=\; \sum_{\mathbf{i} \in \mathcal{N}(\mathbf{u},\,\mathcal{K},\,\mathcal{C}^{\text{in}})} \mathbf{W}_{\mathbf{i}}\, \mathbf{x}_{\mathbf{u} + \mathbf{i}}
+\quad \text{for every } \mathbf{u} \in \mathcal{C}^{\text{out}},
+\;}
+$$
 
-# Generative, transposed, stride=2: upsample input by 2x, then expand.
-# Used in the decoder side of a sparse U-Net for generative tasks.
-up_gen = SparseConv3d(64, 128, kernel_size=3, stride=2,
-                      transposed=True, generative=True)
-```
+where the **active-offset set** at output coordinate $\mathbf{u}$ is
 
-## Convolution variants
+$$
+\mathcal{N}(\mathbf{u},\,\mathcal{K},\,\mathcal{C}^{\text{in}}) \;=\; \bigl\{\, \mathbf{i} \in \mathcal{K} : \mathbf{u} + \mathbf{i} \in \mathcal{C}^{\text{in}} \,\bigr\}.
+$$
 
-### Standard convolution
+That is: for each output coordinate $\mathbf{u}$, only the kernel offsets
+that land on an *occupied* input coordinate contribute to the sum.
 
-The default. `SparseConv3d(C_in, C_out, kernel_size=K, stride=s)` with
-weight tensor $\mathbf{W} \in \mathbb{R}^{K \times C_{\text{in}} \times C_{\text{out}}}$
-implements the equation above exactly.
+### Cost
 
-```python
-from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+The total work is proportional to the number of occupied
+**(input, output, offset)** triples:
 
-# stride=1, preserves C_out = C_in coordinate set (the stride-1 regime above)
-conv = SparseConv3d(64, 128, kernel_size=3, stride=1)
+$$
+T \;=\; \sum_{\mathbf{u} \in \mathcal{C}^{\text{out}}} \bigl|\,\mathcal{N}(\mathbf{u},\,\mathcal{K},\,\mathcal{C}^{\text{in}})\,\bigr| \;\cdot\; C_{\text{in}} \cdot C_{\text{out}}.
+$$
 
-# stride=2, downsampling convolution
-down = SparseConv3d(64, 128, kernel_size=3, stride=2)
-```
+Compare to dense convolution, where work is
+$|\mathbb{Z}^D \cap \text{volume}| \cdot |\mathcal{K}| \cdot C_{\text{in}} \cdot C_{\text{out}}$ — independent
+of how many cells are actually occupied. **Spatial sparsity replaces
+"volume" with "occupied neighbor pairs"**, which is the entire point.
 
-### Group convolution
+## The four regimes — visual
 
-Partitions input and output channels into $G$ groups, each processed
-independently. The weight tensor is reshaped to $\mathbf{W} \in \mathbb{R}^{K \times G \times C_{\text{in}}/G \times C_{\text{out}}/G}$
-and the sum in the equation above is restricted per-group: group $g$ of
-the output attends only to group $g$ of the input. Compute and parameter
-count both drop by $G$; spatial connectivity (the coordinate set and
-kernel support) is unchanged.
+Three flags on `SparseConv3d` / `spatially_sparse_conv` — `stride`,
+`transposed`, `generative` — together with whether the input is dense
+or sparse, give rise to the regimes below. (Animations illustrate the
+2D case for visual clarity; the 3D case is identical with one extra axis.)
 
-```python
-# G=4: weight is [27, 4, 16, 32]
-conv_g4 = SparseConv3d(64, 128, kernel_size=3, groups=4)
-```
+### Dense input → dense output
 
-**Constraints:**
+The classical case: $\mathcal{C}^{\text{in}}$ and $\mathcal{C}^{\text{out}}$
+are both *every* cell in some bounding box, and $\mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}}) = \mathcal{K}$
+at every interior $\mathbf{u}$. The animation below sweeps the kernel over a
+$3{\times}3$ output, pulling a $3{\times}3$ patch from the dense input each
+step.
 
-- `C_in` and `C_out` must be divisible by `groups`.
-- Forward / dgrad pad per-group channel counts up to a multiple of
-  `kVec=8` internally. Per-group C >= 8 for vectorized fp16 loads.
-- Wgrad requires per-group channel counts to be **exactly** divisible by
-  `kVec=8` (no padding fallback). Pick per-group C as a multiple of 8.
-- Kernel-map state (pair_table, pair_mask) is spatial and is built once
-  per layer call, then reused across groups.
+![Dense convolution animation](img/sparse_conv_dense.gif)
 
-**Tested matrix** (RTX 6000 Ada, SM 8.9, AMP fp16, WideGroupUNet smoke):
-forward + backward correctness validated end-to-end for
+This is what `torch.nn.Conv3d` does. WarpConvNet handles it correctly but
+gains nothing over a dense backend in this regime — there is no spatial
+sparsity to exploit.
 
-- `kernel_size` ∈ {3, 5, 7}
-- `groups` ∈ {1, 2, 4}
+### Sparse input → sparse output (stride > 1, downsampling)
 
-spanning all 9 combinations. `kernel_size=7` exercises the $K=343$ /
-`mask_words=12` dispatch path end-to-end.
+$\mathcal{C}^{\text{in}}$ is sparse (only a few occupied voxels). When
+`stride > 1`, $\mathcal{C}^{\text{out}}$ is the downsampled image of
+$\mathcal{C}^{\text{in}}$:
 
-### Depthwise convolution
+$$
+\mathcal{C}^{\text{out}} \;=\; \bigl\{\, \mathbf{u} \in \mathbb{Z}^D : \mathbf{u} = \lfloor \mathbf{v} / s \rfloor \text{ for some } \mathbf{v} \in \mathcal{C}^{\text{in}} \,\bigr\}.
+$$
 
-Group convolution with $G = C_{\text{in}} = C_{\text{out}}$. Weight tensor
-is $\mathbf{W} \in \mathbb{R}^{K \times C \times 1 \times 1}$; each channel
-is convolved independently.
+![Sparse convolution animation](img/sparse_conv_sparse.gif)
 
-```python
-# Depthwise: each of 64 channels convolved independently
-conv_dw = SparseConv3d(64, 64, kernel_size=3, groups=64)
-```
+The frustum lines show the $3{\times}3$ kernel reach for the focused
+output cell. Most cells inside the kernel reach are *empty* (dashed
+scaffold) — the active-offset set $\mathcal{N}(\mathbf{u}, \mathcal{K}, \mathcal{C}^{\text{in}})$
+is much smaller than $|\mathcal{K}|$ in practice.
 
-A dedicated depthwise path lives under
-`warpconvnet.nn.functional.spatially_sparse_depthwise_conv` with its own
-algorithm modes (`WARPCONVNET_DEPTHWISE_CONV_FWD_ALGO_MODE` /
-`WARPCONVNET_DEPTHWISE_CONV_BWD_ALGO_MODE`).
+### Stride = 1 (coordinate-preserving)
 
-## Three math kernels per layer
+Special case of the above with stride 1 and `generative=False`:
 
-A complete training step through one spatially sparse convolution layer
-requires **three mathematically distinct GEMM operations**:
+$$
+\mathcal{C}^{\text{out}} \;=\; \mathcal{C}^{\text{in}}.
+$$
 
-| Pass                                            | Math                                        | WarpConvNet GEMM class | Cache namespace      |
-| ----------------------------------------------- | ------------------------------------------- | ---------------------- | -------------------- |
-| Forward                                         | $\mathbf{Y} = \mathbf{A} \mathbf{W}$        | **AB** gather-scatter  | `AB_gather_scatter`  |
-| Backward $\partial/\partial \mathbf{X}$ (dgrad) | $\mathbf{dX} = \mathbf{dY} \mathbf{W}^\top$ | **ABt** gather-scatter | `ABt_gather_scatter` |
-| Backward $\partial/\partial \mathbf{W}$ (wgrad) | $\mathbf{dW} = \mathbf{A}^\top \mathbf{dY}$ | **AtB** gather-gather  | `AtB_gather_gather`  |
+Every input coordinate produces an output at the same coordinate; no new
+sites are introduced and no sites are dropped. This is what
+Graham & van der Maaten introduced as *submanifold sparse convolution*
+[3]. WarpConvNet uses the stride-based name (`SparseConv3d(stride=1)`).
 
-- **AB gather-scatter** (forward): gather rows of $\mathbf{A}$ by the
-  input-side kernel map, multiply by the dense per-offset weight matrix
-  $\mathbf{W}$, scatter-add into the output buffer. Each output row is
-  written by a single thread block → no `atomicAdd` needed.
-- **ABt gather-scatter** (dgrad): same gather-scatter shape as forward,
-  but $\mathbf{B}$ is $\mathbf{W}^\top$ — warpconvnet builds a reverse
-  pair_table so the forward-path mask kernel can run dgrad with no
-  atomics and no explicit transpose tensor at runtime (the transpose is
-  folded into the iteration order). Distinct from AB because the optimal
-  tile shape and split-K depend on the $C_\text{in} \leftrightarrow C_\text{out}$
-  swap.
-- **AtB gather-gather** (wgrad): gather rows of both operands by the
-  input and output kernel maps, reduce outer products into the
-  per-offset weight-gradient buffer. No scatter step; one dense output
-  tile per kernel offset. Shape and reuse pattern are different enough
-  from AB/ABt that the optimal algorithm differs per shape.
+![Stride=1 convolution animation](img/sparse_conv_stride1.gif)
 
-This split matters because **each of the three ops is auto-tuned
-independently** in its own cache namespace (`AB_gather_scatter`,
-`ABt_gather_scatter`, `AtB_gather_gather`). There is no single
-algorithm that wins for all of forward, dgrad, and wgrad at the same
-$(N, C_{\text{in}}, C_{\text{out}}, K)$ shape, and the gather-gather
-pattern has different arithmetic intensity from gather-scatter even
-holding the shape fixed.
+The output cell sits *directly above* its input twin. Kernel offsets
+that land on empty input cells contribute nothing. This is the workhorse
+inside sparse U-Net trunks: it preserves the occupied set across many
+layers, so spatial sparsity does not erode with depth.
 
-## Algorithms (overview)
+### Generative convolution
 
-Each math kernel class above has multiple CUDA backend implementations.
-A short taxonomy:
+Generative convolution is the only regime that *adds* new coordinates.
+$\mathcal{C}^{\text{out}}$ is constructed by expanding every input
+coordinate $\mathbf{u} \in \mathcal{C}^{\text{in}}$ through the kernel:
 
-### AB / ABt backends (forward + dgrad)
+$$
+\mathcal{C}^{\text{out}} \;=\;
+\bigcup_{\mathbf{u} \in \mathcal{C}^{\text{in}}}
+\bigl\{\, \mathbf{u} + \mathbf{i} : \mathbf{i} \in \mathcal{K} \,\bigr\}.
+$$
 
-The forward (AB) and dgrad (ABt) passes share this backend list —
-they have the same gather-scatter structure, only $\mathbf{B}$
-differs ($\mathbf{W}$ for fwd, $\mathbf{W}^\top$ for dgrad). Each
-op picks its own winner per shape.
+The weight matrices are applied **transposed** relative to the forward
+direction (each output coordinate accumulates contributions from all input
+coordinates whose kernel reach covers it). Each animation frame highlights
+one input voxel and the output coordinates it generates (dark teal); output
+coordinates generated by other input voxels are shown in lighter teal.
 
-| Backend                  | Implementation                                                                          | Strengths                                                                  |
-| ------------------------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `explicit_gemm`          | Gather to dense buffer, `torch.mm`, scatter-add.                                        | Reliable fallback. No alignment requirements.                              |
-| `implicit_gemm`          | Fused CUDA kernel; SIMT gather + GEMM + scatter-add in one launch.                      | Small channels (C ≤ 64).                                                   |
-| `cutlass_implicit_gemm`  | CUTLASS fused gather-GEMM-scatter.                                                      | Tensor-core throughput at large channels. Auto-pads unaligned channels.    |
-| `cute_implicit_gemm`     | CuTe 3.x fused kernel with `cp.async` vectorized A-loads.                               | Competitive at small-medium channels.                                      |
-| `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch.           | Small-N medium-channel; winner for C > 256 at small N.                     |
-| `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets.                      | Strong at large N + medium-large channels.                                 |
-| `production`             | Mask-based fused kernel — iterates all $K$ offsets per output row via bitmask skipping. | Dominant AB/ABt winner on most shapes. No atomicAdd. CuTe tensor core MMA. |
+![Generative convolution animation](img/sparse_conv_generative.gif)
 
-### AtB backends (wgrad)
+Successive generative layers progressively fill the occupied region and are
+the standard tool for sparse generative decoders and diffusion models.
 
-Same name list as above, but implementing the
-$\mathbf{A}^\top \mathbf{dY}$ gather-gather pattern. `cute_grouped`
-wins the majority of wgrad shapes empirically.
+### Generalized convolution
 
-### How `production` works
+$\mathcal{K}$ need not be a box, and $\mathcal{C}^{\text{out}}$ need not
+be derived from $\mathcal{C}^{\text{in}}$ by stride or generative
+expansion. The most general form takes both as user-specified sets:
 
-Unlike per-offset and grouped backends that launch separate work per
-offset, the `production` kernel processes **all K offsets in a single
-launch**. For each output row:
+$$
+\bigl(\,\mathcal{C}^{\text{in}},\ \mathcal{C}^{\text{out}},\ \mathcal{K}\,\bigr) \;\text{arbitrary}.
+$$
 
-1. Look up which offsets are active via a bitmask (`pair_mask`).
-2. For each active offset, gather from input and accumulate with the
-   offset's weight.
-3. Write output directly — no atomicAdd needed since each output row is
-   exclusive.
+![Generalized convolution animation](img/sparse_conv_generalized.gif)
 
-For dgrad, a reverse pair_table is constructed so the same forward
-kernel can be reused with swapped dimensions, avoiding atomicAdd entirely
-(~2x speedup over the old atomicAdd dgrad).
+WarpConvNet uses this internally for transposed convolutions and for
+cross-attention-style custom kernel maps.
 
-### Picking an algorithm
+## How $\mathcal{C}^{\text{out}}$ is chosen
 
-Empirically, no single backend wins across all shapes. Picking by hand is
-infeasible. **WarpConvNet auto-tunes per problem shape** — see the
-[Auto-Tuning](./autotune.md) page for candidate selection, modes,
-environment variables, and how to specify algorithms explicitly.
+Summary table — full details and code examples in [Variants & API](sparse_convolutions_variants.md).
 
-## Usage
-
-### Basic
-
-```python
-from warpconvnet.nn.modules.sparse_conv import SpatiallySparseConv
-
-# Auto mode (default) -- auto-tunes on first call, cached thereafter
-conv = SpatiallySparseConv(
-    in_channels=64,
-    out_channels=128,
-    kernel_size=3,
-)
-output = conv(input_voxels)
-```
-
-### Functional
-
-```python
-from warpconvnet.nn.functional import spatially_sparse_conv
-
-output = spatially_sparse_conv(
-    input_voxels,
-    weight,
-    kernel_size=3,
-)
-```
-
-### Depthwise
-
-```python
-from warpconvnet.nn.functional import spatially_sparse_depthwise_conv
-
-output = spatially_sparse_depthwise_conv(
-    input_features,
-    depthwise_weight,
-    kernel_map,
-    num_out_coords,
-)
-```
-
-For algorithm control (`fwd_algo`, `dgrad_algo`, `wgrad_algo`), env
-variables, and the strict algorithm-name filter, see
-[Auto-Tuning](./autotune.md).
+| Regime                    | Flags                         | $\mathcal{C}^{\text{out}}$                                   | Animation                                    |
+| ------------------------- | ----------------------------- | ------------------------------------------------------------ | -------------------------------------------- |
+| **stride=1**              | `stride=1`                    | $\mathcal{C}^{\text{in}}$                                    | [stride1](img/sparse_conv_stride1.gif)       |
+| **Downsampling**          | `stride>1`                    | Downsampled coordinates (one per stride cell)                | [sparse](img/sparse_conv_sparse.gif)         |
+| **Generative (stride=1)** | `generative=True`, `stride=1` | $\mathcal{C}^{\text{in}}$ **expanded by the kernel support** | [generative](img/sparse_conv_generative.gif) |
+| **Generative (stride>1)** | `generative=True`, `stride>1` | Stride first, then expand                                    | (generalized form)                           |
+| **Transposed**            | `transposed=True`, `stride>1` | Upsampled coordinates by factor `stride`                     | (generalized form)                           |
 
 ## See also
 
-- [Auto-Tuning](./autotune.md) — per-shape algorithm selection, caching,
-  env variables.
-- [Accumulator Precision](./accumulator_precision.md) — fp32 vs fp16
-  accumulator in the mask GEMM.
-- [Adaptive GEMM Grouping](./adaptive_gemm_grouping.md) — how small
-  kernel offsets are batched into grouped GEMMs.
-- [Inspect Benchmark Cache](./inspect_benchmark_cache.md) — dump cached
-  autotune results.
-- [Pre-Populate Benchmark Cache](./populate_benchmark_cache.md) — fill
-  the cache ahead of production workloads.
-
-## Source files
-
-| File                                                              | Contents                                                           |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `warpconvnet/nn/functional/sparse_conv/detail/unified.py`         | Top-level dispatch, config construction.                           |
-| `warpconvnet/nn/functional/sparse_conv/detail/algo_params.py`     | Adaptive candidate selection, algorithm enums, F16Acc pool gating. |
-| `warpconvnet/nn/functional/sparse_conv/detail/autotune.py`        | Benchmark runners, cache init/merge.                               |
-| `warpconvnet/nn/functional/sparse_conv/detail/dispatch.py`        | Algorithm execution dispatch.                                      |
-| `warpconvnet/nn/functional/sparse_conv/detail/mask_gemm.py`       | Mask-based fused kernel dispatch, reverse pair_table.              |
-| `warpconvnet/nn/functional/sparse_conv/detail/cute_grouped.py`    | CuTe grouped GEMM (AB + AtB).                                      |
-| `warpconvnet/nn/functional/sparse_conv/detail/cutlass.py`         | CUTLASS per-offset gather-scatter.                                 |
-| `warpconvnet/nn/functional/sparse_conv/detail/explicit.py`        | Explicit GEMM via cuBLAS.                                          |
-| `warpconvnet/nn/functional/sparse_conv/detail/implicit_direct.py` | SIMT implicit GEMM.                                                |
-| `warpconvnet/utils/benchmark_cache.py`                            | Generic benchmark cache with persistence.                          |
-| `warpconvnet/constants.py`                                        | Environment variable parsing.                                      |
+- [Variants & API](sparse_convolutions_variants.md) — `SparseConv3d`,
+  group / depthwise variants, generative decoders, usage examples.
+- [Internals](sparse_convolutions_internals.md) — the three math kernels
+  per layer (AB / ABt / AtB), algorithm taxonomy, source files.
+- [Auto-Tuning](autotune.md) — per-shape algorithm selection and caching.
+- [Bilateral & Permutohedral Filters](bilateral_permutohedral_filters.md)
+  — sparse convolution lifted to high-dimensional lattices.
 
 ## References
 

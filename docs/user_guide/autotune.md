@@ -4,7 +4,7 @@
 **Edited**: 2026-04-18 17:02:44
 
 WarpConvNet's spatially sparse convolution has many backend algorithms
-(see [Spatially Sparse Convolutions — Algorithms](./sparse_convolutions.md#algorithms-overview)).
+(see [Sparse Convolution Internals — Algorithm taxonomy](./sparse_convolutions_internals.md#algorithm-taxonomy)).
 None of them wins across all problem shapes: the optimal pick depends on
 coordinate count, input/output channels, kernel volume, dtype, and the
 GPU. This page describes how WarpConvNet chooses.
@@ -13,7 +13,7 @@ GPU. This page describes how WarpConvNet chooses.
 
 A single sparse-conv layer runs **three math kernels** per training step
 (forward = AB, dgrad = ABt, wgrad = AtB — see
-[Three math kernels per layer](./sparse_convolutions.md#three-math-kernels-per-layer)),
+[Three math kernels per layer](./sparse_convolutions_internals.md#three-math-kernels-per-layer)),
 each with its own optimal algorithm:
 
 - Relative winners shift dramatically with channel count (e.g. 64 vs 256).

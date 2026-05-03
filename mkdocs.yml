@@ -53,7 +53,11 @@ nav:
       - Geometry Types: user_guide/geometry_types.md
       - Geometry Tutorial: user_guide/geometry_tutorial.md
       - Network Tutorial: user_guide/network_tutorial.md
-      - Spatially Sparse Convolutions: user_guide/sparse_convolutions.md
+      - Spatially Sparse Convolutions:
+          - Overview: user_guide/sparse_convolutions_overview.md
+          - Concepts: user_guide/sparse_convolutions.md
+          - Variants & API: user_guide/sparse_convolutions_variants.md
+          - Internals: user_guide/sparse_convolutions_internals.md
       - Voxel Size Caveats: user_guide/voxel_size_caveats.md
       - Packed Hash Table: user_guide/packed_hash_table.md
       - Auto-Tuning: user_guide/autotune.md
