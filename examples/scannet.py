@@ -57,6 +57,7 @@ train:
   step_size: 20
   gamma: 0.7
   num_workers: 8
+  precision: "16-mixed"   # "32" (fp32) or "16-mixed" (fp16 forward + GradScaler for loss/grads)
 
 # Testing configuration
 test:
@@ -68,13 +69,20 @@ data:
   num_classes: 20
   voxel_size: 0.02
   ignore_index: 255
+  augmentations: false   # set true to apply geometric + chromatic augs to training data
 
 # Model configuration
 model:
-  _target_: mink_unet.MinkUNet18
+  _target_: mink_unet.MinkUNet34
   in_channels: 3
   out_channels: 20
   in_type: "voxel"
+
+# Visualization configuration
+viz:
+  enabled: false
+  port: 8080
+  interval_seconds: 10.0
 
 # General configuration
 device: "cuda"
@@ -98,13 +106,9 @@ class DataToTensor:
     ):
         self.device = device
 
-    def __call__(
-        self, batch_dict: Dict[str, Tensor]
-    ) -> Tuple[Geometry, Dict[str, Tensor]]:
+    def __call__(self, batch_dict: Dict[str, Tensor]) -> Tuple[Geometry, Dict[str, Tensor]]:
         # cat all features into a single tensor
-        cat_batch_dict = {
-            k: torch.cat(v, dim=0).to(self.device) for k, v in batch_dict.items()
-        }
+        cat_batch_dict = {k: torch.cat(v, dim=0).to(self.device) for k, v in batch_dict.items()}
         return (
             Points.from_list_of_coordinates(
                 batch_dict["coords"],
@@ -135,30 +139,51 @@ def confusion_matrix_to_metrics(conf_matrix: Tensor) -> Dict[str, float]:
     }
 
 
-@torch.amp.autocast(device_type="cuda", enabled=True)
 def train(
     model: nn.Module,
     train_loader: DataLoader,
     optimizer: optim.Optimizer,
+    scaler: Optional[torch.amp.GradScaler],
+    amp_enabled: bool,
     epoch: int,
     cfg: DictConfig,
+    visualizer=None,
 ):
+    """One training epoch.
+
+    AMP recipe matches lightning's ``precision="16-mixed"``:
+    - forward + loss inside ``torch.amp.autocast`` (fp16 matmul where safe)
+    - ``scaler.scale(loss).backward()`` so fp16 grads don't underflow
+    - ``scaler.step(optimizer)`` unscales + skips step if grads are inf/nan
+    - ``scaler.update()`` adapts the scale for next step
+
+    Without the scaler, fp16 gradients silently underflow to zero and
+    the loss never drops — that bug used to be in this example.
+    """
     model.train()
     bar = tqdm(train_loader)
     dict_to_data = DataToTensor(device=cfg.device)
-    for batch_dict in bar:
+    for step, batch_dict in enumerate(bar):
         start_time = time.time()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         st, batch_dict = dict_to_data(batch_dict)
-        output = model(st.to(cfg.device))
-        loss = F.cross_entropy(
-            output.features,
-            batch_dict["labels"].long().to(cfg.device),
-            reduction="mean",
-            ignore_index=cfg.data.ignore_index,
-        )
-        loss.backward()
-        optimizer.step()
+        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+            output = model(st.to(cfg.device))
+            loss = F.cross_entropy(
+                output.features,
+                batch_dict["labels"].long().to(cfg.device),
+                reduction="mean",
+                ignore_index=cfg.data.ignore_index,
+            )
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+
         bar.set_description(f"Train Epoch: {epoch} Loss: {loss.item(): .3f}")
         if cfg.use_wandb:
             wandb.log(
@@ -169,14 +194,25 @@ def train(
                     "epoch": epoch,
                 }
             )
+        if visualizer is not None:
+            off = st.offsets
+            s, e = int(off[0]), int(off[1])
+            visualizer.maybe_update(
+                coords=st.coordinate_tensor[s:e],
+                colors=st.feature_tensor[s:e],
+                gt_labels=batch_dict["labels"][s:e],
+                pred_labels=output.feature_tensor[s:e].argmax(dim=1),
+                epoch=epoch,
+                step=step,
+            )
 
 
-@torch.amp.autocast(device_type="cuda", enabled=True)
 @torch.inference_mode()
 def test(
     model: nn.Module,
     test_loader: DataLoader,
     cfg: DictConfig,
+    amp_enabled: bool,
     num_test_batches: Optional[int] = None,
 ):
     model.eval()
@@ -189,14 +225,15 @@ def test(
     dict_to_data = DataToTensor(device=cfg.device)
     for batch_dict in tqdm(test_loader):
         st, batch_dict = dict_to_data(batch_dict)
-        output = model(st.to(cfg.device))
-        labels = batch_dict["labels"].long().to(cfg.device)
-        test_loss += F.cross_entropy(
-            output.features,
-            labels,
-            reduction="mean",
-            ignore_index=cfg.data.ignore_index,
-        ).item()
+        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+            output = model(st.to(cfg.device))
+            labels = batch_dict["labels"].long().to(cfg.device)
+            test_loss += F.cross_entropy(
+                output.features,
+                labels,
+                reduction="mean",
+                ignore_index=cfg.data.ignore_index,
+            ).item()
         pred = output.features.argmax(dim=1)
         confusion_matrix.update(pred, labels)
         num_batches += 1
@@ -255,11 +292,20 @@ def main(cfg: DictConfig):
 
     device = torch.device(cfg.device)
 
+    train_dataset = ScanNetDataset(
+        cfg.paths.data_dir,
+        split="train",
+    )
+    if cfg.data.get("augmentations", False):
+        from scannet_augmentations import AugmentedScanNetDataset
+
+        train_dataset = AugmentedScanNetDataset(train_dataset)
+        print(
+            "[data] training augmentations: ENABLED (rotate-z, scale, flip, "
+            "translate, dropout, chromatic auto-contrast/translation/jitter/drop)"
+        )
     train_loader = DataLoader(
-        ScanNetDataset(
-            cfg.paths.data_dir,
-            split="train",
-        ),
+        train_dataset,
         batch_size=cfg.train.batch_size,
         num_workers=cfg.train.num_workers,
         shuffle=True,
@@ -291,17 +337,49 @@ def main(cfg: DictConfig):
     optimizer = optim.AdamW(model.parameters(), lr=cfg.train.lr)
     scheduler = StepLR(optimizer, step_size=cfg.train.step_size, gamma=cfg.train.gamma)
 
+    # Mixed-precision setup. Matches lightning's `precision="16-mixed"` —
+    # autocast wraps forward/loss and GradScaler scales the loss before
+    # backward to keep fp16 grads from underflowing. With autocast but
+    # without GradScaler, training silently fails to learn.
+    precision = str(cfg.train.get("precision", "16-mixed")).lower()
+    amp_enabled = precision in ("16-mixed", "16", "fp16", "mixed", "amp")
+    scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
+    print(
+        f"[train] precision={precision} (autocast={amp_enabled}, "
+        f"GradScaler={'on' if scaler is not None else 'off'})"
+    )
+
+    visualizer = None
+    if cfg.get("viz", None) is not None and cfg.viz.enabled:
+        from viser_scannet_visualizer import ScanNetViserVisualizer
+
+        visualizer = ScanNetViserVisualizer(
+            voxel_size=cfg.data.voxel_size,
+            num_classes=cfg.data.num_classes,
+            ignore_index=cfg.data.ignore_index,
+            port=cfg.viz.port,
+            interval_seconds=cfg.viz.interval_seconds,
+            color_range=(-1.0, 1.0),  # OpenScene-normalized RGB
+        )
+        print(
+            f"[viser] visualizer running at http://localhost:{cfg.viz.port} "
+            f"(refresh every {cfg.viz.interval_seconds:.1f}s)"
+        )
+
     # Test before training
-    metrics = test(model, test_loader, cfg, num_test_batches=5)
+    metrics = test(model, test_loader, cfg, amp_enabled=amp_enabled, num_test_batches=5)
     for epoch in range(1, cfg.train.epochs + 1):
         train(
             model,
             train_loader,
             optimizer,
+            scaler,
+            amp_enabled,
             epoch,
             cfg,
+            visualizer=visualizer,
         )
-        metrics = test(model, test_loader, cfg)
+        metrics = test(model, test_loader, cfg, amp_enabled=amp_enabled)
         scheduler.step()
 
     print(f"Final mIoU: {metrics['miou']: .2f}%")
