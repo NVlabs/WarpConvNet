@@ -1,7 +1,7 @@
 # Bilateral and Permutohedral Filters
 
 **Created**: 2026-04-30 19:55:27 PST
-**Edited**: 2026-04-30 22:55:12 PST
+**Edited**: 2026-05-03 12:00:00 PST
 
 WarpConvNet ships three families of edge-preserving filters for point clouds
 and high-dimensional feature volumes. They differ in the underlying spatial
@@ -10,9 +10,84 @@ the same separation between **lattice coordinates** (the bilateral guide:
 typically xyz + color) and the **feature being filtered** (color, labels,
 depth, anything per-point).
 
-The lattice-based variants (grid, permutohedral) build on
-[`PackedHashTable128`](packed_hash_table.md), the 128-bit packed hash table
-for high-dimensional integer coordinates ($D \le 7$, 17 bits per axis).
+## Why bilateral filters live in WarpConvNet
+
+A bilateral filter is a **spatially sparse convolution in a high-dimensional
+space**. The 3D voxel sparse convolution from
+[Spatially Sparse Convolutions](sparse_convolutions.md) operates on
+$\mathcal{C} \subset \mathbb{Z}^3$; a bilateral filter operates on
+$\mathcal{C} \subset \mathbb{Z}^{d_{\text{xyz}} + d_{\text{feat}}}$ where
+the extra axes encode range features (color, intensity, time). The bilateral
+*guide* is the lift into that high-D integer grid:
+
+$$
+\mathbf{p}_i = \bigl(\, \mathrm{xyz}_i / \sigma_{\text{xyz}}, \; \mathrm{feat}_i / \sigma_{\text{feat}} \,\bigr) \in \mathbb{R}^d
+\quad\xrightarrow{\text{round}}\quad \mathbf{u}_i \in \mathbb{Z}^d
+$$
+
+Two pixels with similar color end up at neighboring high-D coordinates and
+are summed; two pixels with the same xy but different color sit far apart
+in the lift and don't interact — this is what makes the filter
+edge-preserving.
+
+![1D signal lifted to 2D bilateral space](img/bilateral_lift_1d.svg)
+
+*Left: a 1D signal with two intensity regions and a sharp edge at $x{=}0.5$.
+Right: the 2D bilateral lift $(x/\sigma_x,\,I/\sigma_I)$. Points across the
+edge are spatially adjacent in $x$ but separated by a wide gap in
+$I/\sigma_I$, so the lifted convolution kernel never bridges them.*
+
+The same **spatial sparsity** that makes 3D voxel convolutions tractable is
+what makes high-D bilateral filtering tractable: even though the lifted
+grid has $\sim 10^{10}$ cells at $d{=}6$, only the cells touched by input
+points are materialized. The same building blocks back both:
+
+| Voxel sparse conv (3D)                                                     | Bilateral / permutohedral filter (high-D)                                         |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Coords: $(b, x, y, z) \in \mathbb{Z}^4$                                    | Coords: $(b, x, y, z, r, g, b) / \sigma \in \mathbb{Z}^{\le 8}$                   |
+| Hash: [`PackedHashTable`](packed_hash_table.md) (64-bit, 18 bits per axis) | Hash: `PackedHashTable128` (128-bit, 17 bits per axis, $D \le 7$)                 |
+| Kernel-map build → gather–GEMM–scatter                                     | Splat (gather) → separable blur → slice (scatter)                                 |
+| Kernel offsets $\mathcal{K} \subset \mathbb{Z}^3$ ($3^3$, $5^3$, $\ldots$) | Separable 3-tap Gaussian along each of $d$ (grid) or $d{+}1$ (permutohedral) axes |
+
+**Splat–blur–slice is sparse convolution.** Splat is the gather phase from
+[`spatially_sparse_conv`](sparse_convolutions.md); the blur is a
+**depthwise** sparse convolution applied separably along each lattice axis
+(the kernel weights are fixed Gaussian taps $[\tfrac14, \tfrac12, \tfrac14]$
+rather than learned, but the data motion is identical to
+[`spatially_sparse_depthwise_conv`](sparse_convolutions.md)); slice is the
+scatter back to per-point queries. The permutohedral variant additionally
+projects to a $(d{+}1)$-D simplicial lattice so neighbor count per cell is
+$d{+}1$ instead of $2^d$ — same idea, different tessellation.
+
+![Splat-blur-slice on a 2D bilateral grid](img/bilateral_bilinear.svg)
+
+*The three-stage pipeline on a 2D lifted grid. (a) **Splat**: a query
+distributes its value to the $2^d{=}4$ corners of its enclosing cell with
+bilinear weights $w_{ij}$. (b) **Blur**: a separable 3-tap Gaussian sweeps
+each lattice axis over only the populated cells — this is exactly a
+depthwise sparse convolution with fixed kernel taps. (c) **Slice**: the
+filtered cell values are bilinearly gathered back to the query point with
+the same weights as splat.*
+
+The permutohedral lattice swaps the cube tessellation for a simplicial one,
+shrinking neighbor count per cell from $2^d$ to $d{+}1$:
+
+![Permutohedral lattice in 2D](img/bilateral_permutohedral_2d.svg)
+
+*Left: a $d{=}2$ query splatting to a cube cell needs $2^d{=}4$ corner
+updates; the same query in a simplicial cell needs $d{+}1{=}3$ vertex
+updates. Right: the populated permutohedral lattice is stored sparsely in
+[`PackedHashTable128`](packed_hash_table.md) — empty triangles are never
+materialized. The savings compound rapidly with $d$: at $d{=}6$, $2^d{=}64$
+vs. $d{+}1{=}7$.*
+
+This is why bilateral filters ship with WarpConvNet rather than as a
+separate package: they reuse the
+[`PackedHashTable128`](packed_hash_table.md) coordinate index, the same
+gather/scatter primitives as voxel convolutions, and the same CUDA build
+infrastructure. If you already have a sparse-convolution pipeline, the
+bilateral filter is the same machinery applied to a higher-dimensional
+lattice.
 
 ## When to use which
 
@@ -79,7 +154,11 @@ to non-background sources.
 Splats each input to the $2^d$ corners of its enclosing voxel with
 $d$-linear barycentric weights, blurs with separable 3-tap kernels along
 each of the $d$ axes, slices back. Sparse storage: only voxels touched by
-at least one input are materialized.
+at least one input are materialized — exactly the spatial-sparsity regime
+of [`spatially_sparse_conv`](sparse_convolutions.md), lifted from $D{=}3$
+to $D = d_{\text{xyz}} + d_{\text{feat}}$. The blur is a fixed-weight
+depthwise sparse convolution; if you replaced the Gaussian taps with
+learned weights you would recover a high-D learned sparse convolution.
 
 ```python
 filt = wn.BilateralFilterGrid(sigma_xyz=0.05, sigma_feat=20.0)
@@ -104,7 +183,12 @@ out_labels = filt(label_onehot)
 The Adams–Baek–Davis (2010) lattice. Each input embeds into a $(d+1)$-D
 simplicial lattice; its feature distributes across the $(d{+}1)$ vertices
 of the enclosing simplex with barycentric weights. Blur is a separable
-3-tap Gaussian along each of the $(d{+}1)$ lattice axes.
+3-tap Gaussian along each of the $(d{+}1)$ lattice axes — i.e.
+$d{+}1$ depthwise sparse convolutions on the populated lattice vertices,
+indexed by the same [`PackedHashTable128`](packed_hash_table.md) used for
+3D voxel kernel maps. The simplicial tessellation is what makes the
+neighbor count $d{+}1$ instead of the $d$-cube's $2^d$, killing the
+exponential blow-up that limits `BilateralFilterGrid` past $d{=}4$.
 
 Complexity: $O(N \cdot d^2)$ for splat/slice and $O(V \cdot d^2)$ for
 blur where $V \le N(d{+}1)$ is the number of unique populated lattice
@@ -290,6 +374,19 @@ The workaround is version-locked. On torch upgrade, re-run the C-sweep
 in `tests/nn/bench_permutohedral_d6.py` (extend it) and the inline
 notes in `warpconvnet/nn/functional/permutohedral.py`. If the cliff is
 gone the pad path can be removed.
+
+## See also
+
+- [Spatially Sparse Convolutions](sparse_convolutions.md) — the 3D
+  voxel analog. Bilateral filters are the same gather → kernel-apply →
+  scatter pipeline lifted to a higher-dimensional lattice with fixed
+  Gaussian weights instead of learned ones.
+- [Packed Hash Table](packed_hash_table.md) — the coordinate index that
+  backs both voxel sparse conv (`PackedHashTable`, 64-bit) and the
+  lattice filters here (`PackedHashTable128`, 128-bit, $D \le 7$).
+- [Point Convolutions](point_convolutions.md) — continuous-coordinate
+  alternative for the KNN/radius regime; what `BilateralFilter` (mode
+  `knn`/`radius`) reduces to with Gaussian weights.
 
 ## Source
 
