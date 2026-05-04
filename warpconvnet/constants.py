@@ -163,7 +163,7 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
     "WARPCONVNET_BENCHMARK_CACHE_DIR", "~/.cache/warpconvnet"
 )
 
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 8.0
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 9.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory

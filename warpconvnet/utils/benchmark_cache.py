@@ -250,6 +250,88 @@ def _parse_version_to_major_minor(version_value: Any) -> Tuple[int, int]:
     return 1, 0
 
 
+# ---------------------------------------------------------------------------
+# Cache migrations: registered as (from_major, to_major, migrate_fn).
+# `migrate_fn` operates on the deserialized {namespace: {key: value}} dict and
+# returns the rewritten dict. Migrations chain to bring an older cache up to
+# the current `WARPCONVNET_BENCHMARK_CACHE_VERSION` instead of dropping it.
+# ---------------------------------------------------------------------------
+
+# v8 → v9: algo "production" → "mask_gemm" and "production_fwd_as_dgrad" →
+# "mask_gemm_fwd_as_dgrad" (commit 31d4ab0f). Stored values are lists of
+# (algo_str, params_dict, metric_float) tuples; only the algo string changes.
+_ALGO_RENAMES_V8_V9: Dict[str, str] = {
+    "production": "mask_gemm",
+    "production_fwd_as_dgrad": "mask_gemm_fwd_as_dgrad",
+}
+
+
+def _migrate_v8_v9(namespaces: Dict[str, Dict[Any, Any]]) -> Dict[str, Dict[Any, Any]]:
+    renamed = 0
+    for ns_dict in namespaces.values():
+        if not isinstance(ns_dict, dict):
+            continue
+        for cfg_key, value in list(ns_dict.items()):
+            if not isinstance(value, list):
+                continue
+            new_value: List[Any] = []
+            changed = False
+            for item in value:
+                if (
+                    isinstance(item, (list, tuple))
+                    and len(item) == 3
+                    and isinstance(item[0], str)
+                    and item[0] in _ALGO_RENAMES_V8_V9
+                ):
+                    new_value.append((_ALGO_RENAMES_V8_V9[item[0]], item[1], item[2]))
+                    changed = True
+                else:
+                    new_value.append(item)
+            if changed:
+                ns_dict[cfg_key] = new_value
+                renamed += 1
+    if renamed:
+        logger.info(f"Cache migration v8→v9 renamed {renamed} entries (production→mask_gemm)")
+    return namespaces
+
+
+# Ordered chain. Each step takes the cache from `from_major` to `to_major`.
+_CACHE_MIGRATIONS: List[
+    Tuple[int, int, Callable[[Dict[str, Dict[Any, Any]]], Dict[str, Dict[Any, Any]]]]
+] = [
+    (8, 9, _migrate_v8_v9),
+]
+
+
+def _try_migrate_cache(
+    namespaces: Dict[str, Dict[Any, Any]],
+    from_major: int,
+    to_major: int,
+) -> Optional[Dict[str, Dict[Any, Any]]]:
+    """Chain registered migrations to lift `namespaces` from `from_major` to `to_major`.
+
+    Returns the migrated dict, or None if no path exists / a step raises.
+    """
+    if from_major == to_major:
+        return namespaces
+    if from_major > to_major:
+        return None
+    current = namespaces
+    cur_major = from_major
+    while cur_major < to_major:
+        step = next((m for m in _CACHE_MIGRATIONS if m[0] == cur_major), None)
+        if step is None:
+            return None
+        _, next_major, fn = step
+        try:
+            current = fn(current)
+        except Exception as e:
+            logger.warning(f"Cache migration v{cur_major}→v{next_major} failed: {e}")
+            return None
+        cur_major = next_major
+    return current
+
+
 K = TypeVar("K")
 V = TypeVar("V")
 
@@ -384,6 +466,9 @@ class GenericBenchmarkCache(Generic[K, V]):
         self.last_save_time = 0.0
         self.pending_changes = False
         self._shutdown_requested = False
+        # Set by load_cache when an on-disk cache was migrated to current version;
+        # __init__ flips pending_changes so the background saver rewrites the file.
+        self._migrated_pending_save = False
 
         # Background thread
         self._save_thread = None
@@ -415,6 +500,12 @@ class GenericBenchmarkCache(Generic[K, V]):
         self._start_background_saver()
         atexit.register(self._save_on_exit)
         logger.debug(f"[Rank {current_rank}] Started background saver")
+
+        # If load_cache migrated an older on-disk version, persist the rewrite
+        # so subsequent processes see the current schema. mark_dirty must run
+        # AFTER the background saver thread is up so notify() wakes a waiter.
+        if self._migrated_pending_save and self._results:
+            self.mark_dirty()
 
     def register_on_merge_callback(self, callback: Callable[[str, Dict], None]) -> None:
         """Register a callback invoked after disk cache is merged into memory.
@@ -566,25 +657,37 @@ class GenericBenchmarkCache(Generic[K, V]):
                 WARPCONVNET_BENCHMARK_CACHE_VERSION
             )
 
-            if int(file_major) == int(expected_major):
-                raw_ns = cache_data.get("namespaces", {})
-                if not isinstance(raw_ns, dict):
-                    logger.warning("Generic cache 'namespaces' is not a dict; resetting to empty")
-                    return {}
-                result: Dict[str, Dict[K, V]] = {}
-                for ns_name, pairs in raw_ns.items():
-                    if isinstance(pairs, list):
-                        result[ns_name] = _namespace_from_msgpack(pairs)  # type: ignore[assignment]
-                    elif isinstance(pairs, dict):
-                        result[ns_name] = {
-                            _from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()
-                        }
-                return result
-            else:
-                logger.warning(
-                    f"Loaded generic benchmark cache v{file_major}.{file_minor}, but expected v{expected_major}.{expected_minor}. Resetting."
-                )
+            raw_ns = cache_data.get("namespaces", {})
+            if not isinstance(raw_ns, dict):
+                logger.warning("Generic cache 'namespaces' is not a dict; resetting to empty")
                 return {}
+            result: Dict[str, Dict[K, V]] = {}
+            for ns_name, pairs in raw_ns.items():
+                if isinstance(pairs, list):
+                    result[ns_name] = _namespace_from_msgpack(pairs)  # type: ignore[assignment]
+                elif isinstance(pairs, dict):
+                    result[ns_name] = {
+                        _from_msgpack(k): _from_msgpack(v) for k, v in pairs.items()
+                    }
+
+            if int(file_major) == int(expected_major):
+                return result
+
+            migrated = _try_migrate_cache(
+                result, int(file_major), int(expected_major)  # type: ignore[arg-type]
+            )
+            if migrated is not None:
+                logger.info(
+                    f"Migrated generic benchmark cache v{file_major}.{file_minor} → "
+                    f"v{expected_major}.{expected_minor}"
+                )
+                self._migrated_pending_save = True
+                return migrated  # type: ignore[return-value]
+            logger.warning(
+                f"Loaded generic benchmark cache v{file_major}.{file_minor}, but expected "
+                f"v{expected_major}.{expected_minor}. No migration path. Resetting."
+            )
+            return {}
         except Exception as e:
             logger.warning(
                 f"Failed to load generic benchmark cache: {e}. Starting with empty cache."

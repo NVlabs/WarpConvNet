@@ -78,6 +78,7 @@ nav:
       - Adaptive GEMM Grouping: user_guide/adaptive_gemm_grouping.md
       - Pre-Populate Benchmark Cache: user_guide/populate_benchmark_cache.md
       - Inspect Benchmark Cache: user_guide/inspect_benchmark_cache.md
+      - Migrate Benchmark Cache: user_guide/migrate_benchmark_cache.md
       - Troubleshooting: user_guide/troubleshooting.md
   - Diagrams:
       - Geometry Types: diagrams/geometry_types.md
