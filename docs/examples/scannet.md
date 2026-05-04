@@ -141,9 +141,10 @@ python examples/train/scannet.py data.voxel_size=0.05 train.lr=0.01
 
 ## Data augmentations
 
-Set `data.augmentations=true` to wrap the training dataset with
-[`AugmentedScanNetDataset`](https://github.com/nvlabs/warpconvnet/blob/main/examples/scannet_augmentations.py).
-The default recipe is a port of the SpatioTemporalSegmentation recipe
+Set `data.augmentations=true` to construct
+[`default_train_augmentations(colors_in_unit_range=True)`](https://github.com/nvlabs/warpconvnet/blob/main/warpconvnet/dataset/transforms.py)
+and pass it via `ScanNetDataset(transform=...)`. The default recipe is a
+port of the SpatioTemporalSegmentation recipe
 ([chrischoy/SpatioTemporalSegmentation](https://github.com/chrischoy/SpatioTemporalSegmentation)),
 applied **per training sample**, before voxelization:
 
@@ -158,7 +159,7 @@ applied **per training sample**, before voxelization:
 | `ChromaticAutoContrast`                    | 0.20        | per-scene auto-contrast, blended                      |
 | `ChromaticTranslation(0.10)`               | 0.95        | scene-wide RGB tint, ±10 % of range                   |
 | `ChromaticJitter(σ=0.01)`                  | 0.95        | per-point Gaussian RGB noise                          |
-| `ChromaticDrop`                            | 0.20        | replace all RGB with mid-gray                         |
+| `ChromaticDrop`                            | 0.05        | replace all RGB with mid-gray                         |
 
 Test-time data is **not** augmented (test loader uses the bare
 `ScanNetDataset`).
@@ -171,9 +172,10 @@ python examples/train/scannet.py
 python examples/train/scannet.py data.augmentations=true
 ```
 
-To customize the pipeline, write your own `Compose([...])` and pass it as
-the `transform` argument to `AugmentedScanNetDataset`. See
-`examples/scannet_augmentations.py` for the available transform classes.
+To customize the pipeline, build your own `Compose([...])` and pass it as
+the `transform` argument to `ScanNetDataset`. See
+[`warpconvnet/dataset/transforms.py`](https://github.com/nvlabs/warpconvnet/blob/main/warpconvnet/dataset/transforms.py)
+for the available transform classes.
 
 !!! note "About `ElasticDistortion`"
 Needs `scipy` and is the slowest transform in the recipe (~0.4 s per

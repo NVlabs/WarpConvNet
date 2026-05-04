@@ -3,11 +3,13 @@
 
 import glob
 import os
-from typing import Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+SampleTransform = Callable[[Dict[str, Any]], Dict[str, Any]]
 
 from warpconvnet.dataset.scannet200_constants import (
     VALID_CLASS_IDS_20,
@@ -30,6 +32,7 @@ class ScanNetDataset(Dataset):
         voxel_size: Optional[float] = None,
         out_type: Literal["point", "voxel"] = "voxel",
         min_coord: Optional[Tuple[float, float, float]] = None,
+        transform: Optional[SampleTransform] = None,
     ):
         super().__init__()
         self.root = root
@@ -39,6 +42,7 @@ class ScanNetDataset(Dataset):
         if min_coord is not None:
             min_coord = torch.tensor(min_coord)
         self.min_coord = min_coord
+        self.transform = transform
         self.prepare_data()
 
     def prepare_data(self):
@@ -72,17 +76,20 @@ class ScanNetDataset(Dataset):
             unique_coords, to_unique_indices = voxel_downsample_np(coords, self.voxel_size)
             if self.out_type == "point":
                 unique_coords = coords[to_unique_indices]
-            return {
+            sample = {
                 "coords": unique_coords,
                 "colors": colors[to_unique_indices],
                 "labels": labels[to_unique_indices],
             }
         else:
-            return {
+            sample = {
                 "coords": coords,
                 "colors": colors,
                 "labels": labels,
             }
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
 
 
 class ScanNetInstanceDataset(Dataset):
@@ -132,6 +139,7 @@ class ScanNetInstanceDataset(Dataset):
         split: Union[str, Sequence[str]] = "train",
         label_set: Literal["scannet20", "scannet200"] = "scannet200",
         voxel_size: Optional[float] = None,
+        transform: Optional[SampleTransform] = None,
     ):
         super().__init__()
         if label_set not in ("scannet20", "scannet200"):
@@ -140,6 +148,7 @@ class ScanNetInstanceDataset(Dataset):
         self.split = split
         self.label_set = label_set
         self.voxel_size = voxel_size
+        self.transform = transform
         self._segment_asset = "segment20" if label_set == "scannet20" else "segment200"
         self.class2id = np.array(
             VALID_CLASS_IDS_20 if label_set == "scannet20" else VALID_CLASS_IDS_200
@@ -201,4 +210,6 @@ class ScanNetInstanceDataset(Dataset):
             for k in ("coords", "colors", "normals", "segment", "instance"):
                 out[k] = out[k][keep]
             out["coord_int"] = int_coords
+        if self.transform is not None:
+            out = self.transform(out)
         return out

@@ -61,6 +61,13 @@ data:
   label_set: scannet20       # scannet20 (20 classes, faster) or scannet200 (198 fine-grained)
   voxel_size: 0.01
   ignore_index: -1
+  # Train-time transform applied per scene. Override the whole node with
+  # `data.train_transform=null` to disable augs, or replace with a custom
+  # Compose. See warpconvnet.dataset.transforms for available ops.
+  train_transform:
+    _target_: warpconvnet.dataset.transforms.default_train_augmentations
+    crop_size: 6.0            # metric box crop side length (m); null disables cropping
+    min_points: 5000          # skip the crop if it would leave fewer than this
 
 model:
   hidden_dim: 96
@@ -357,11 +364,18 @@ def main(cfg: DictConfig):
     device = cfg.device
     num_classes = ScanNetInstanceDataset.NUM_CLASSES[cfg.data.label_set]
 
+    train_transform = (
+        hydra.utils.instantiate(cfg.data.train_transform)
+        if cfg.data.get("train_transform")
+        else None
+    )
+
     train_ds = ScanNetInstanceDataset(
         root=cfg.paths.data_dir,
         split="train",
         label_set=cfg.data.label_set,
         voxel_size=cfg.data.voxel_size,
+        transform=train_transform,
     )
     val_ds = ScanNetInstanceDataset(
         root=cfg.paths.data_dir,

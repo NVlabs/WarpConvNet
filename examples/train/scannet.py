@@ -5,8 +5,7 @@
 # python scannet.py model._target=warpconvnet.models.MinkUNet34 train.batch_size=12
 
 # WARNING: This is a simple example of how to use the warpconvnet library.
-# The data loader does NOT apply any augmentation to the point cloud.
-# Please create your own data augmentation pipeline for high-quality training.
+# Tune the default train-time augmentation pipeline for high-quality training.
 from typing import Dict, List, Optional, Tuple
 import yaml
 
@@ -69,7 +68,12 @@ data:
   num_classes: 20
   voxel_size: 0.02
   ignore_index: 255
-  augmentations: false   # set true to apply geometric + chromatic augs to training data
+  # Train-time transform applied per scene. Override the whole node with
+  # `data.train_transform=null` to disable augs, or replace with a custom
+  # Compose. See warpconvnet.dataset.transforms for available ops.
+  train_transform:
+    _target_: warpconvnet.dataset.transforms.default_train_augmentations
+    colors_in_unit_range: true # OpenScene ScanNet colors are normalized to [-1, 1]
 
 # Model configuration
 model:
@@ -292,18 +296,17 @@ def main(cfg: DictConfig):
 
     device = torch.device(cfg.device)
 
+    train_transform = (
+        hydra.utils.instantiate(cfg.data.train_transform)
+        if cfg.data.get("train_transform")
+        else None
+    )
+
     train_dataset = ScanNetDataset(
         cfg.paths.data_dir,
         split="train",
+        transform=train_transform,
     )
-    if cfg.data.get("augmentations", False):
-        from examples.utils.scannet_augmentations import AugmentedScanNetDataset
-
-        train_dataset = AugmentedScanNetDataset(train_dataset)
-        print(
-            "[data] training augmentations: ENABLED (rotate-z, scale, flip, "
-            "translate, dropout, chromatic auto-contrast/translation/jitter/drop)"
-        )
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.train.batch_size,
