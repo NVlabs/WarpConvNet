@@ -75,9 +75,16 @@ def test_mask_gemm_fp32_precision():
         w = torch.randn(K, C_in, C_out, device="cuda", dtype=torch.float32)
         f = torch.randn(N, C_in, device="cuda", dtype=torch.float32)
 
-        # Production: internally downcasts to fp16
-        out_prod = torch.zeros(N, C_out, dtype=torch.float32, device="cuda")
-        status = _C.mask_gemm.fwd(f, w, out_prod, pt, pm, ms, K, tile, 1.0)
+        # mask_gemm requires fp16/bf16 inputs; cast in Python (mirrors dispatch.py).
+        f_h = f.half()
+        w_h = w.half()
+        out_prod_h = torch.zeros(N, C_out, dtype=torch.float16, device="cuda")
+        mask_words = 1  # K=27 → MW=1
+        identity_offset = K // 2  # submanifold: center offset maps each voxel to itself
+        status = _C.mask_gemm.fwd(
+            f_h, w_h, out_prod_h, pt, pm, ms, K, tile, mask_words, identity_offset, 1.0, 1
+        )
+        out_prod = out_prod_h.float()
 
         # Reference: explicit_gemm in fp32
         out_ref = _explicit_gemm_forward_logic(f, w, kmap, N, torch.float32)
@@ -139,7 +146,9 @@ def test_mask_gemm_fp16_precision():
 
         # Production: native fp16
         out_prod = torch.zeros(N, C_out, dtype=torch.float16, device="cuda")
-        _C.mask_gemm.fwd(f, w, out_prod, pt, pm, ms, K, tile, 1.0)
+        mask_words = 1
+        identity_offset = K // 2
+        _C.mask_gemm.fwd(f, w, out_prod, pt, pm, ms, K, tile, mask_words, identity_offset, 1.0, 1)
 
         # Reference: explicit_gemm in fp16
         out_ref = _explicit_gemm_forward_logic(f, w, kmap, N, torch.float16)

@@ -52,6 +52,13 @@ def _mask_gemm_backend():
 # These have MW=1 instantiations only; K>32 configs must route elsewhere.
 _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
 
+# Forward tiles with no MW>1 instantiation in mask_gemm_bindings.cu.
+# Routing K>32 to these silently falls back to MW=1 → kernel asserts
+# `(K) <= int(MaskWords) * 32`, which is a device-side abort that kills the
+# CUDA context for the whole process. Guard at Python level so autotune skips
+# these candidates instead of crashing the device.
+_MW1_ONLY_FWD_TILES = frozenset({40}) | _PCOFF_FWD_TILES
+
 # Lazy imports for optional backends
 if _HAS_CUTE_BACKEND:
     from .cute import (
@@ -274,13 +281,14 @@ def _execute_forward(
 
         out_dtype = torch.float32 if use_f32_out_tile else _in.dtype
 
-        # Pcoff tiles (warpgemm 54/55/56/57/58/59/63) are MW=1 only — MW>1 kernels
-        # are not yet instantiated. Guard so autotune discards these candidates at K>32
-        # instead of silently producing zeros.
-        if mask_words > 1 and tile_id in _PCOFF_FWD_TILES:
+        # Tiles with no MW>1 instantiation (tile 40 _32x32x32_F16Acc, pcoff 54-63)
+        # would silently fall back to MW=1 in the binding, causing the kernel to
+        # device-side assert `K <= MaskWords * 32`. Raise here so autotune catches
+        # it as a Python RuntimeError and skips the candidate.
+        if mask_words > 1 and tile_id in _MW1_ONLY_FWD_TILES:
             raise RuntimeError(
-                f"Pcoff tile {tile_id} only supports mask_words==1 (got {mask_words}). "
-                "Use a non-pcoff tile for K>32."
+                f"Tile {tile_id} only supports mask_words==1 (got {mask_words}). "
+                "Use a tile with MW>1 instantiation for K>32."
             )
 
         # Single launch handles groups=1 and groups>1 via grid.z
@@ -576,9 +584,14 @@ def _execute_backward(
                         dgrad_tile = 71
                     else:
                         dgrad_tile = 72
-                elif mask_words > 1 and dgrad_tile in _PCOFF_FWD_TILES:
-                    # Pcoff tiles are MW=1 only — reroute to MW-capable aligned tile 41.
-                    dgrad_tile = 41
+                elif mask_words > 1 and dgrad_tile in _MW1_ONLY_FWD_TILES:
+                    # MW=1-only tiles (32x32 F16Acc, pcoff) cannot dispatch K>32.
+                    # Skip candidate so autotune moves on; routing to a different
+                    # tile would benchmark the wrong kernel under this algo name.
+                    raise RuntimeError(
+                        f"fwd_as_dgrad tile {dgrad_tile} only supports mask_words==1 "
+                        f"(got {mask_words}). Use an MW-capable tile for K>32."
+                    )
 
                 backend = _mask_gemm_backend()
                 dgrad_fn = backend.fwd
