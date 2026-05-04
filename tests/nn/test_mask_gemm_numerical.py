@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Numerical correctness of the "production" sparse-conv kernel path.
+"""Numerical correctness of the "mask_gemm" sparse-conv kernel path.
 
 Motivation. A ScanNet training run (wandb nvr-lpr/scannet-segmentation/y26vckgf)
 plateaus at val/miou ~5% vs ~53% on historical runs. The asymmetry
@@ -9,7 +9,7 @@ plateaus at val/miou ~5% vs ~53% on historical runs. The asymmetry
 numerical bug in fwd / dgrad / wgrad would produce once training degrades the
 discriminative features.
 
-These tests pin each of the three production kernels against the trusted
+These tests pin each of the three mask_gemm kernels against the trusted
 `_explicit_gemm_*_logic` reference (called directly to bypass autotune). They
 exercise:
   - C_in != C_out (dgrad stride swap; commit 64a6e3db)
@@ -57,7 +57,7 @@ def _rdiff(a, b):
 
 def _kmap_for(voxels: Voxels, kernel_size, stride, out_voxels=None):
     """Build a kernel map. For stride>1, pass `out_voxels` (typically the
-    production's output Voxels) so the reference uses the same out-coord
+    mask_gemm's output Voxels) so the reference uses the same out-coord
     ordering — `spatially_sparse_conv` builds out_coords internally and the
     ordering does not match an external `stride_coords()` call.
     """
@@ -102,7 +102,7 @@ def _ref_bwd(grad_out, voxels, weight, kmap, amp_dtype=None):
 
 
 def _prod_fwd_bwd(voxels, weight, kernel_size=(3, 3, 3), stride=1, amp_dtype=None):
-    """Run production conv; returns (out_voxels, feats_with_grad, weight_with_grad).
+    """Run mask_gemm conv; returns (out_voxels, feats_with_grad, weight_with_grad).
 
     For stride>1, callers should use `out_voxels.coordinate_tensor` as the
     reference's out_coords — see _kmap_for.
@@ -117,9 +117,9 @@ def _prod_fwd_bwd(voxels, weight, kernel_size=(3, 3, 3), stride=1, amp_dtype=Non
             w,
             kernel_size=kernel_size,
             stride=stride,
-            fwd_algo="production",
-            dgrad_algo="production",
-            wgrad_algo="production",
+            fwd_algo="mask_gemm",
+            dgrad_algo="mask_gemm",
+            wgrad_algo="mask_gemm",
         )
     return out, feats, w
 
@@ -149,10 +149,10 @@ class _null:
     ],
     ids=["s1_16_32", "s1_32_16", "s1_96_128", "s1_128_96", "s2_16_32", "s2_32_64"],
 )
-def test_production_fwd(C_in, C_out, stride):
+def test_mask_gemm_fwd(C_in, C_out, stride):
     voxels = _make_voxels(C_in=C_in, seed=1)
     weight = torch.randn(27, C_in, C_out, device="cuda")
-    # Run production first; for stride>1 use its out_coords for the reference
+    # Run mask_gemm first; for stride>1 use its out_coords for the reference
     # so both paths emit results in the same row order.
     out_prod_v, _, _ = _prod_fwd_bwd(voxels, weight, stride=stride)
     out_ref, _, _ = _ref_fwd(voxels, weight, stride=stride, out_voxels=out_prod_v)
@@ -177,14 +177,14 @@ def test_production_fwd(C_in, C_out, stride):
     ],
     ids=["s1_16_32", "s1_32_16", "s1_96_128", "s1_128_96", "s2_16_32", "s2_32_64"],
 )
-def test_production_dgrad(C_in, C_out, stride):
+def test_mask_gemm_dgrad(C_in, C_out, stride):
     voxels = _make_voxels(C_in=C_in, seed=2)
     weight = torch.randn(27, C_in, C_out, device="cuda")
 
     out_prod_v, feats, w = _prod_fwd_bwd(voxels, weight, stride=stride)
     out_ref, kmap, _ = _ref_fwd(voxels, weight, stride=stride, out_voxels=out_prod_v)
     torch.manual_seed(42)
-    # g is in production's row order (same as out_ref via shared out_voxels)
+    # g is in mask_gemm's row order (same as out_ref via shared out_voxels)
     g = torch.randn_like(out_ref)
     grad_in_ref, _ = _ref_bwd(g, voxels, weight, kmap)
 
@@ -210,7 +210,7 @@ def test_production_dgrad(C_in, C_out, stride):
     ],
     ids=["s1_16_32", "s1_32_16", "s1_96_128", "s2_16_32"],
 )
-def test_production_wgrad(C_in, C_out, stride):
+def test_mask_gemm_wgrad(C_in, C_out, stride):
     voxels = _make_voxels(C_in=C_in, seed=3)
     weight = torch.randn(27, C_in, C_out, device="cuda")
 
@@ -237,7 +237,7 @@ def test_production_wgrad(C_in, C_out, stride):
     [(32, 64, 1), (32, 64, 2)],
     ids=["s1", "s2"],
 )
-def test_production_amp_fwd(C_in, C_out, stride):
+def test_mask_gemm_amp_fwd(C_in, C_out, stride):
     voxels = _make_voxels(C_in=C_in, seed=5)
     weight = torch.randn(27, C_in, C_out, device="cuda")
     out_prod_v, _, _ = _prod_fwd_bwd(voxels, weight, stride=stride, amp_dtype=torch.float16)

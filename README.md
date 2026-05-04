@@ -100,7 +100,7 @@ Forward, dgrad, and wgrad are auto-tuned independently. They have separate algor
 
 ```
 Auto-tuning sparse convolution algorithms. The first few iterations will be slow...
-Auto-tune forward complete: production (mma_tile=3) — 0.21ms
+Auto-tune forward complete: mask_gemm (mma_tile=3) — 0.21ms
 ```
 
 ### Algorithm Selection Modes
@@ -129,8 +129,8 @@ Each direction supports the same selection modes via `WARPCONVNET_FWD_ALGO_MODE`
 export WARPCONVNET_AUTOTUNE_LOG=false
 
 # Pin a specific algorithm (skip auto-tuning entirely)
-export WARPCONVNET_FWD_ALGO_MODE=production
-export WARPCONVNET_DGRAD_ALGO_MODE=production
+export WARPCONVNET_FWD_ALGO_MODE=mask_gemm
+export WARPCONVNET_DGRAD_ALGO_MODE=mask_gemm
 export WARPCONVNET_WGRAD_ALGO_MODE=cute_grouped
 
 # Exhaustive search (slow, for benchmarking)
@@ -139,8 +139,8 @@ export WARPCONVNET_DGRAD_ALGO_MODE=all
 export WARPCONVNET_WGRAD_ALGO_MODE=all
 
 # Benchmark only specific algorithms
-export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
-export WARPCONVNET_DGRAD_ALGO_MODE="[production,cute_grouped]"
+export WARPCONVNET_FWD_ALGO_MODE="[mask_gemm,cutlass_implicit_gemm]"
+export WARPCONVNET_DGRAD_ALGO_MODE="[mask_gemm,cute_grouped]"
 export WARPCONVNET_WGRAD_ALGO_MODE="[cute_grouped,cutlass_grouped_hybrid]"
 
 # Enable fp16 accumulator globally (faster, lower precision)
@@ -152,13 +152,13 @@ You can also set algorithms per module:
 ```python
 conv = SparseConv3d(
     64, 128, kernel_size=3,
-    fwd_algo="production",
-    dgrad_algo="production",
+    fwd_algo="mask_gemm",
+    dgrad_algo="mask_gemm",
     wgrad_algo="cute_grouped",
 )
 ```
 
-Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`, `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`, `production`.
+Available algorithms: `explicit_gemm`, `implicit_gemm`, `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`, `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`, `mask_gemm`.
 
 ### Pre-Populating the Cache
 
@@ -272,7 +272,7 @@ To eliminate first-run auto-tuning latency, you can pre-populate the cache for c
 # Quick smoke test (~1 minute)
 python scripts/populate_benchmark_cache.py --preset quick
 
-# Full grid for production (364 configs — takes longer)
+# Full deployment grid (364 configs — takes longer)
 python scripts/populate_benchmark_cache.py
 ```
 

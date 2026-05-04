@@ -7,7 +7,7 @@
 // warpconvnet/csrc/cutlass_cute_gemm_grouped_sm90.cu (existing instantiations)
 // and by warpgemm-generated offset_gemm TUs that invoke
 // INSTANTIATE_SM90_STAGED_GROUPED / INSTANTIATE_SM90_GROUPED_SIMPLE for the
-// production tier.
+// stable tier.
 
 #pragma once
 

@@ -65,7 +65,7 @@ def _generate_warpgemm_codegen():
         csrc/mask_gemm/include/ (warpgemm.codegen.write_mask_to)
 
     Refresh the snapshot by setting WARPGEMM_REGEN=1 (and having warpgemm
-    importable). Honors WARPGEMM_TILES (default 'production'). Drift is
+    importable). Honors WARPGEMM_TILES (default 'stable'). Drift is
     detected by tests/csrc/test_warpgemm_drift.py when warpgemm is installed.
     """
 
@@ -350,14 +350,14 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/bindings/sampling_bindings.cpp",
                 "warpconvnet/csrc/farthest_point_sampling.cu",
                 "warpconvnet/csrc/bindings/coords_bindings.cpp",
-                "warpconvnet/csrc/bindings/production_bindings.cu",
+                "warpconvnet/csrc/bindings/mask_gemm_bindings.cu",
                 "warpconvnet/csrc/coords_launch.cu",
                 "warpconvnet/csrc/morton_code.cu",
                 "warpconvnet/csrc/find_first_gt_bsearch.cu",
                 "warpconvnet/csrc/radius_search_kernels.cu",
-                "warpconvnet/csrc/production_mask_kernels_fwd.cu",
-                "warpconvnet/csrc/production_mask_kernels_dgrad.cu",
-                "warpconvnet/csrc/production_mask_kernels_wgrad.cu",
+                "warpconvnet/csrc/mask_gemm_kernels_fwd.cu",
+                "warpconvnet/csrc/mask_gemm_kernels_dgrad.cu",
+                "warpconvnet/csrc/mask_gemm_kernels_wgrad.cu",
                 "warpconvnet/csrc/window_grouping_kernels.cu",
                 "warpconvnet/csrc/bindings/cuhash_bindings.cpp",
                 "warpconvnet/csrc/cuhash_hash_table.cu",

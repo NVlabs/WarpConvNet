@@ -757,7 +757,7 @@ def test_group_conv_correctness():
             weight,
             kernel_size=(3, 3, 3),
             groups=groups,
-            fwd_algo="production",
+            fwd_algo="mask_gemm",
         )
 
     # Reference: per-group explicit_gemm in fp32
@@ -897,7 +897,7 @@ def _make_voxels_k125(N=3000, C=3, device="cuda"):
     ],
 )
 def test_k125_forward_correctness(C_in, C_out):
-    """K=125 (5x5x5, mask_words=4) fwd: production matches explicit_gemm."""
+    """K=125 (5x5x5, mask_words=4) fwd: mask_gemm matches explicit_gemm."""
     voxels = _make_voxels_k125(N=3000, C=C_in)
     torch.manual_seed(42)
     weight = torch.randn(125, C_in, C_out, device="cuda") * 0.05
@@ -908,13 +908,13 @@ def test_k125_forward_correctness(C_in, C_out):
             voxels, weight, kernel_size=(5, 5, 5), fwd_algo="explicit_gemm"
         ).feature_tensor.float()
         out_p = spatially_sparse_conv(
-            voxels, weight, kernel_size=(5, 5, 5), fwd_algo="production"
+            voxels, weight, kernel_size=(5, 5, 5), fwd_algo="mask_gemm"
         ).feature_tensor.float()
 
     # Every channel must have non-zero variance (catches zero-output bug)
     per_chan_std = out_p.std(dim=0)
     assert (per_chan_std > 1e-4).all(), (
-        f"C_in={C_in} C_out={C_out}: production produced near-constant output "
+        f"C_in={C_in} C_out={C_out}: mask_gemm produced near-constant output "
         f"per_chan_std={per_chan_std.tolist()}"
     )
 
@@ -946,7 +946,7 @@ def test_k125_compute_dtype(compute_dtype):
 
 
 def test_k125_backward_correctness():
-    """K=125 full fwd+bwd: production matches explicit_gemm for grad_input and grad_weight."""
+    """K=125 full fwd+bwd: mask_gemm matches explicit_gemm for grad_input and grad_weight."""
     C_in, C_out = 3, 32
     voxels = _make_voxels_k125(N=3000, C=C_in)
 
@@ -971,13 +971,13 @@ def test_k125_backward_correctness():
 
     # Run explicit_gemm first to avoid caching issues with autotune
     gi_e, gw_e = run("explicit_gemm")
-    gi_p, gw_p = run("production")
+    gi_p, gw_p = run("mask_gemm")
 
     gi_rdiff = (gi_p - gi_e).abs().mean() / (gi_e.abs().mean() + 1e-8)
     gw_rdiff = (gw_p - gw_e).abs().mean() / (gw_e.abs().mean() + 1e-8)
 
-    assert not torch.isnan(gi_p).any(), "production dgrad produced NaN"
-    assert not torch.isnan(gw_p).any(), "production wgrad produced NaN"
+    assert not torch.isnan(gi_p).any(), "mask_gemm dgrad produced NaN"
+    assert not torch.isnan(gw_p).any(), "mask_gemm wgrad produced NaN"
     assert gi_rdiff < 0.02, f"K=125 dgrad rel_diff={gi_rdiff:.5f}"
     assert gw_rdiff < 0.02, f"K=125 wgrad rel_diff={gw_rdiff:.5f}"
 
@@ -1017,7 +1017,7 @@ def _make_voxels_k343(N=4000, C=3, device="cuda"):
 
 @pytest.mark.parametrize("C_in, C_out", [(8, 32), (16, 32)])
 def test_k343_forward_correctness(C_in, C_out):
-    """K=343 (7x7x7, MW=11 rounds to DISPATCH_MW=12) fwd: production matches explicit_gemm.
+    """K=343 (7x7x7, MW=11 rounds to DISPATCH_MW=12) fwd: mask_gemm matches explicit_gemm.
 
     MW=12 template instantiation is warpconvnet-side only (warpgemm ships MW<=4);
     this test is the primary correctness gate for that binding-layer extension.
@@ -1031,12 +1031,12 @@ def test_k343_forward_correctness(C_in, C_out):
             voxels, weight, kernel_size=(7, 7, 7), fwd_algo="explicit_gemm"
         ).feature_tensor.float()
         out_p = spatially_sparse_conv(
-            voxels, weight, kernel_size=(7, 7, 7), fwd_algo="production"
+            voxels, weight, kernel_size=(7, 7, 7), fwd_algo="mask_gemm"
         ).feature_tensor.float()
 
     per_chan_std = out_p.std(dim=0)
     assert (per_chan_std > 1e-4).all(), (
-        f"C_in={C_in} C_out={C_out}: production K=343 produced near-constant output "
+        f"C_in={C_in} C_out={C_out}: mask_gemm K=343 produced near-constant output "
         f"per_chan_std={per_chan_std.tolist()}"
     )
 
@@ -1045,7 +1045,7 @@ def test_k343_forward_correctness(C_in, C_out):
 
 
 def test_k343_backward_correctness():
-    """K=343 full fwd+bwd via MW=12 path: production matches explicit_gemm."""
+    """K=343 full fwd+bwd via MW=12 path: mask_gemm matches explicit_gemm."""
     C_in, C_out = 8, 32
     voxels = _make_voxels_k343(N=4000, C=C_in)
 
@@ -1069,13 +1069,13 @@ def test_k343_backward_correctness():
         return feat.grad.float(), weight.grad.float()
 
     gi_e, gw_e = run("explicit_gemm")
-    gi_p, gw_p = run("production")
+    gi_p, gw_p = run("mask_gemm")
 
     gi_rdiff = (gi_p - gi_e).abs().mean() / (gi_e.abs().mean() + 1e-8)
     gw_rdiff = (gw_p - gw_e).abs().mean() / (gw_e.abs().mean() + 1e-8)
 
-    assert not torch.isnan(gi_p).any(), "production K=343 dgrad produced NaN"
-    assert not torch.isnan(gw_p).any(), "production K=343 wgrad produced NaN"
+    assert not torch.isnan(gi_p).any(), "mask_gemm K=343 dgrad produced NaN"
+    assert not torch.isnan(gw_p).any(), "mask_gemm K=343 wgrad produced NaN"
     assert gi_rdiff < 0.02, f"K=343 dgrad rel_diff={gi_rdiff:.5f}"
     assert gw_rdiff < 0.02, f"K=343 wgrad rel_diff={gw_rdiff:.5f}"
 
@@ -1103,11 +1103,11 @@ def test_k8_tile3_pipeline_drain(seed, stride):
     """
     import warpconvnet.nn.functional.sparse_conv.detail.algo_params as ap
 
-    orig_f32 = ap._AB_PRODUCTION_F32ACC
-    orig_f16 = ap._AB_PRODUCTION_F16ACC
-    ap._AB_PRODUCTION_F32ACC = [("production", {"tile_id": 43})]
-    ap._AB_PRODUCTION_F16ACC = []
-    ap._AB_PRODUCTION = ap._AB_PRODUCTION_F32ACC
+    orig_f32 = ap._AB_MASK_GEMM_F32ACC
+    orig_f16 = ap._AB_MASK_GEMM_F16ACC
+    ap._AB_MASK_GEMM_F32ACC = [("mask_gemm", {"tile_id": 43})]
+    ap._AB_MASK_GEMM_F16ACC = []
+    ap._AB_MASK_GEMM = ap._AB_MASK_GEMM_F32ACC
 
     try:
         vox = _make_voxels_k8(N=400_000, C=64)
@@ -1127,18 +1127,18 @@ def test_k8_tile3_pipeline_drain(seed, stride):
                 weight,
                 kernel_size=(2, 2, 2),
                 stride=(stride, stride, stride),
-                fwd_algo="production",
+                fwd_algo="mask_gemm",
             ).feature_tensor.float()
 
         assert torch.isfinite(
             out_p
-        ).all(), f"K=8 tile=43 seed={seed} stride={stride}: production produced NaN"
+        ).all(), f"K=8 tile=43 seed={seed} stride={stride}: mask_gemm produced NaN"
         rdiff = (out_p - out_e).abs().mean() / (out_e.abs().mean() + 1e-8)
         assert rdiff < 0.02, (
             f"K=8 tile=43 seed={seed} stride={stride}: rel_diff={rdiff:.5f} "
             f"(p_max={out_p.abs().max():.3f} e_max={out_e.abs().max():.3f})"
         )
     finally:
-        ap._AB_PRODUCTION_F32ACC = orig_f32
-        ap._AB_PRODUCTION_F16ACC = orig_f16
-        ap._AB_PRODUCTION = orig_f32 + orig_f16
+        ap._AB_MASK_GEMM_F32ACC = orig_f32
+        ap._AB_MASK_GEMM_F16ACC = orig_f16
+        ap._AB_MASK_GEMM = orig_f32 + orig_f16

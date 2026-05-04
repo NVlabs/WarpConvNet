@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Wgrad kernel instantiations split out of production_mask_kernels.cu.
+// Wgrad kernel instantiations split out of mask_gemm_kernels.cu.
 
-#include "production_mask_kernels_common.h"
+#include "mask_gemm_kernels_common.h"
 
 // Wgrad kernels
 #include "mask_gemm/include/MaskGemm_wgrad_64x64x32_2s_f32.h"
@@ -59,12 +59,12 @@ WCN_PROD_INSTANTIATE_WGRAD(MaskGemm_wgrad_64x64x32_2s_f32, cutlass::bfloat16_t, 
     dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
+      auto err = cudaFuncSetAttribute(mask_gemm_wgrad_kernel_entry<Kernel>,        \
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, \
                                       smem);                                       \
       if (err != cudaSuccess) return -1;                                           \
     }                                                                              \
-    production_wgrad_kernel_entry<Kernel>                                          \
+    mask_gemm_wgrad_kernel_entry<Kernel>                                           \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
                                                              (const ElemIn *)b,    \
                                                              (float *)d,           \
@@ -121,12 +121,12 @@ INST_WGRAD_ATOMIC(64x128,
     dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
+      auto err = cudaFuncSetAttribute(mask_gemm_wgrad_kernel_entry<Kernel>,        \
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, \
                                       smem);                                       \
       if (err != cudaSuccess) return -1;                                           \
     }                                                                              \
-    production_wgrad_kernel_entry<Kernel>                                          \
+    mask_gemm_wgrad_kernel_entry<Kernel>                                           \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
                                                              (const ElemIn *)b,    \
                                                              (float *)d,           \
@@ -188,12 +188,12 @@ INST_WGRAD_ATOMIC_3S(cutlass::bfloat16_t)
     dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
+      auto err = cudaFuncSetAttribute(mask_gemm_wgrad_kernel_entry<Kernel>,        \
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, \
                                       smem);                                       \
       if (err != cudaSuccess) return -1;                                           \
     }                                                                              \
-    production_wgrad_kernel_entry<Kernel>                                          \
+    mask_gemm_wgrad_kernel_entry<Kernel>                                           \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
                                                              (const ElemIn *)b,    \
                                                              (float *)d,           \
@@ -266,12 +266,12 @@ INST_WGRAD_WORKSPACE(64x128,
     dim3 grid(m_tiles *n_tiles, groups *K, split_k);                               \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_wgrad_kernel_entry<Kernel>,       \
+      auto err = cudaFuncSetAttribute(mask_gemm_wgrad_kernel_entry<Kernel>,        \
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, \
                                       smem);                                       \
       if (err != cudaSuccess) return -1;                                           \
     }                                                                              \
-    production_wgrad_kernel_entry<Kernel>                                          \
+    mask_gemm_wgrad_kernel_entry<Kernel>                                           \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
                                                              (const ElemIn *)b,    \
                                                              (ElemOut *)d,         \

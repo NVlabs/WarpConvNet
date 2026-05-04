@@ -7,7 +7,7 @@
 // warpconvnet/csrc/cutlass_cute_gemm_gather_scatter.cu (existing
 // instantiations) and by warpgemm-generated offset_gemm TUs that invoke
 // INSTANTIATE_CUTE_AD_GS / INSTANTIATE_CUTE_TRAB / INSTANTIATE_CUTE_GROUPED /
-// INSTANTIATE_CUTE_GROUPED_TRAB for the production tier.
+// INSTANTIATE_CUTE_GROUPED_TRAB for the stable tier.
 
 #pragma once
 

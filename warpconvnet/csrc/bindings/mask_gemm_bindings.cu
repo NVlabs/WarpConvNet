@@ -14,58 +14,58 @@
 namespace warpconvnet {
 namespace cute_gemm {
 
-// Forward declarations (from production_mask_kernels.cu)
+// Forward declarations (from mask_gemm_kernels.cu)
 template <typename ElementInput, typename TileTag, typename ElementOutput>
-int launch_production_fwd(const void *a,
-                          const void *b,
-                          void *d,
-                          const int *pair_table,
-                          const uint32_t *pair_mask,
-                          const int *mask_argsort,
-                          int N_in,
-                          int N_out,
-                          int C_in,
-                          int C_out,
-                          int K,
-                          float alpha,
-                          int groups,
-                          int identity_offset,
-                          cudaStream_t stream);
+int launch_mask_gemm_fwd(const void *a,
+                         const void *b,
+                         void *d,
+                         const int *pair_table,
+                         const uint32_t *pair_mask,
+                         const int *mask_argsort,
+                         int N_in,
+                         int N_out,
+                         int C_in,
+                         int C_out,
+                         int K,
+                         float alpha,
+                         int groups,
+                         int identity_offset,
+                         cudaStream_t stream);
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
-int launch_production_dgrad(const void *a,
-                            const void *b,
-                            void *d,
-                            const int *pair_table,
-                            const uint32_t *pair_mask,
-                            const int *mask_argsort,
-                            int N_in,
-                            int N_out,
-                            int C_in,
-                            int C_out,
-                            int K,
-                            float alpha,
-                            int groups,
-                            int identity_offset,
-                            cudaStream_t stream);
+int launch_mask_gemm_dgrad(const void *a,
+                           const void *b,
+                           void *d,
+                           const int *pair_table,
+                           const uint32_t *pair_mask,
+                           const int *mask_argsort,
+                           int N_in,
+                           int N_out,
+                           int C_in,
+                           int C_out,
+                           int K,
+                           float alpha,
+                           int groups,
+                           int identity_offset,
+                           cudaStream_t stream);
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
-int launch_production_wgrad(const void *a,
-                            const void *b,
-                            void *d,
-                            const int *pair_table,
-                            const uint32_t *pair_mask,
-                            const int *mask_argsort,
-                            const uint32_t *reduced_mask,
-                            int N_in,
-                            int N_out,
-                            int C_in,
-                            int C_out,
-                            int K,
-                            int split_k,
-                            float alpha,
-                            int groups,
-                            cudaStream_t stream);
+int launch_mask_gemm_wgrad(const void *a,
+                           const void *b,
+                           void *d,
+                           const int *pair_table,
+                           const uint32_t *pair_mask,
+                           const int *mask_argsort,
+                           const uint32_t *reduced_mask,
+                           int N_in,
+                           int N_out,
+                           int C_in,
+                           int C_out,
+                           int K,
+                           int split_k,
+                           float alpha,
+                           int groups,
+                           cudaStream_t stream);
 
 // Workspace wgrad launchers: write to [split_k, K, G, C_in_g, C_out_g] fp32
 // workspace buffer. Caller owns workspace allocation + post-launch reduction
@@ -222,37 +222,37 @@ int launch_scalar_dgrad_sb_se(const void *,
 
 // MaskWords>1 forward/dgrad launch functions (K>32)
 template <typename ElemIn, int MaskWords>
-int launch_production_fwd_mw(const void *,
-                             const void *,
-                             void *,
-                             const int *,
-                             const uint32_t *,
-                             const int *,
-                             int,
-                             int,
-                             int,
-                             int,
-                             int,
-                             float,
-                             int,
-                             int,
-                             cudaStream_t);
+int launch_mask_gemm_fwd_mw(const void *,
+                            const void *,
+                            void *,
+                            const int *,
+                            const uint32_t *,
+                            const int *,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            float,
+                            int,
+                            int,
+                            cudaStream_t);
 template <typename ElemIn, int MaskWords>
-int launch_production_dgrad_mw(const void *,
-                               const void *,
-                               void *,
-                               const int *,
-                               const uint32_t *,
-                               const int *,
-                               int,
-                               int,
-                               int,
-                               int,
-                               int,
-                               float,
-                               int,
-                               int,
-                               cudaStream_t);
+int launch_mask_gemm_dgrad_mw(const void *,
+                              const void *,
+                              void *,
+                              const int *,
+                              const uint32_t *,
+                              const int *,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              float,
+                              int,
+                              int,
+                              cudaStream_t);
 
 // Pipelined dgrad launch functions
 template <typename ElemIn, typename ElemOut>
@@ -404,39 +404,23 @@ int launch_scalar_dgrad_sb_se_mw(const void *,
 
 // fp32 output launch functions
 template <typename ElemIn>
-int launch_production_fwd_f32out(const void *,
-                                 const void *,
-                                 void *,
-                                 const int *,
-                                 const uint32_t *,
-                                 const int *,
-                                 int,
-                                 int,
-                                 int,
-                                 int,
-                                 int,
-                                 float,
-                                 int,
-                                 int,
-                                 cudaStream_t);
+int launch_mask_gemm_fwd_f32out(const void *,
+                                const void *,
+                                void *,
+                                const int *,
+                                const uint32_t *,
+                                const int *,
+                                int,
+                                int,
+                                int,
+                                int,
+                                int,
+                                float,
+                                int,
+                                int,
+                                cudaStream_t);
 template <typename ElemIn>
-int launch_production_fwd_f32out_sb(const void *,
-                                    const void *,
-                                    void *,
-                                    const int *,
-                                    const uint32_t *,
-                                    const int *,
-                                    int,
-                                    int,
-                                    int,
-                                    int,
-                                    int,
-                                    float,
-                                    int,
-                                    int,
-                                    cudaStream_t);
-template <typename ElemIn>
-int launch_production_dgrad_f32out(const void *,
+int launch_mask_gemm_fwd_f32out_sb(const void *,
                                    const void *,
                                    void *,
                                    const int *,
@@ -451,42 +435,42 @@ int launch_production_dgrad_f32out(const void *,
                                    int,
                                    int,
                                    cudaStream_t);
+template <typename ElemIn>
+int launch_mask_gemm_dgrad_f32out(const void *,
+                                  const void *,
+                                  void *,
+                                  const int *,
+                                  const uint32_t *,
+                                  const int *,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  int,
+                                  float,
+                                  int,
+                                  int,
+                                  cudaStream_t);
 
 // fp32 output MW>1 launch functions (tiles 80, 81, 82)
 template <typename ElemIn, int MW>
-int launch_production_fwd_f32out_mw(const void *,
-                                    const void *,
-                                    void *,
-                                    const int *,
-                                    const uint32_t *,
-                                    const int *,
-                                    int,
-                                    int,
-                                    int,
-                                    int,
-                                    int,
-                                    float,
-                                    int,
-                                    int,
-                                    cudaStream_t);
+int launch_mask_gemm_fwd_f32out_mw(const void *,
+                                   const void *,
+                                   void *,
+                                   const int *,
+                                   const uint32_t *,
+                                   const int *,
+                                   int,
+                                   int,
+                                   int,
+                                   int,
+                                   int,
+                                   float,
+                                   int,
+                                   int,
+                                   cudaStream_t);
 template <typename ElemIn, int MW>
-int launch_production_fwd_f32out_sb_mw(const void *,
-                                       const void *,
-                                       void *,
-                                       const int *,
-                                       const uint32_t *,
-                                       const int *,
-                                       int,
-                                       int,
-                                       int,
-                                       int,
-                                       int,
-                                       float,
-                                       int,
-                                       int,
-                                       cudaStream_t);
-template <typename ElemIn, int MW>
-int launch_production_dgrad_f32out_mw(const void *,
+int launch_mask_gemm_fwd_f32out_sb_mw(const void *,
                                       const void *,
                                       void *,
                                       const int *,
@@ -501,56 +485,72 @@ int launch_production_dgrad_f32out_mw(const void *,
                                       int,
                                       int,
                                       cudaStream_t);
+template <typename ElemIn, int MW>
+int launch_mask_gemm_dgrad_f32out_mw(const void *,
+                                     const void *,
+                                     void *,
+                                     const int *,
+                                     const uint32_t *,
+                                     const int *,
+                                     int,
+                                     int,
+                                     int,
+                                     int,
+                                     int,
+                                     float,
+                                     int,
+                                     int,
+                                     cudaStream_t);
 
 // Vectorized MW>1 forward launch functions (tiles 42/43/44)
 template <int MW>
-int launch_production_fwd_64x128_f16acc_mw(const void *,
-                                           const void *,
-                                           void *,
-                                           const int *,
-                                           const uint32_t *,
-                                           const int *,
-                                           int,
-                                           int,
-                                           int,
-                                           int,
-                                           int,
-                                           float,
-                                           int,
-                                           int,
-                                           cudaStream_t);
+int launch_mask_gemm_fwd_64x128_f16acc_mw(const void *,
+                                          const void *,
+                                          void *,
+                                          const int *,
+                                          const uint32_t *,
+                                          const int *,
+                                          int,
+                                          int,
+                                          int,
+                                          int,
+                                          int,
+                                          float,
+                                          int,
+                                          int,
+                                          cudaStream_t);
 template <typename ElemIn, int MW>
-int launch_production_fwd_64x128_3s_mw(const void *,
-                                       const void *,
-                                       void *,
-                                       const int *,
-                                       const uint32_t *,
-                                       const int *,
-                                       int,
-                                       int,
-                                       int,
-                                       int,
-                                       int,
-                                       float,
-                                       int,
-                                       int,
-                                       cudaStream_t);
+int launch_mask_gemm_fwd_64x128_3s_mw(const void *,
+                                      const void *,
+                                      void *,
+                                      const int *,
+                                      const uint32_t *,
+                                      const int *,
+                                      int,
+                                      int,
+                                      int,
+                                      int,
+                                      int,
+                                      float,
+                                      int,
+                                      int,
+                                      cudaStream_t);
 template <typename ElemIn, int MW>
-int launch_production_fwd_128x64_mw(const void *,
-                                    const void *,
-                                    void *,
-                                    const int *,
-                                    const uint32_t *,
-                                    const int *,
-                                    int,
-                                    int,
-                                    int,
-                                    int,
-                                    int,
-                                    float,
-                                    int,
-                                    int,
-                                    cudaStream_t);
+int launch_mask_gemm_fwd_128x64_mw(const void *,
+                                   const void *,
+                                   void *,
+                                   const int *,
+                                   const uint32_t *,
+                                   const int *,
+                                   int,
+                                   int,
+                                   int,
+                                   int,
+                                   int,
+                                   float,
+                                   int,
+                                   int,
+                                   cudaStream_t);
 
 // Atomic wgrad launch functions
 template <typename ElemIn, typename ElemOut>
@@ -634,13 +634,13 @@ using namespace warpconvnet;
 // =============================================================================
 
 #define LAUNCH_FWD(ElemIn, TileTag, ElemOut, ...) \
-  cute_gemm::launch_production_fwd<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
+  cute_gemm::launch_mask_gemm_fwd<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
 
 #define LAUNCH_DGRAD(ElemIn, TileTag, ElemOut, ...) \
-  cute_gemm::launch_production_dgrad<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
+  cute_gemm::launch_mask_gemm_dgrad<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
 
 #define LAUNCH_WGRAD(ElemIn, TileTag, ElemOut, ...) \
-  cute_gemm::launch_production_wgrad<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
+  cute_gemm::launch_mask_gemm_wgrad<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
 
 #define LAUNCH_SCALAR_FWD(suffix, ElemIn, ElemOut, ...) \
   cute_gemm::launch_scalar_fwd_##suffix<ElemIn, ElemOut>(__VA_ARGS__)
@@ -652,21 +652,21 @@ using namespace warpconvnet;
 // Forward dispatch
 // =============================================================================
 
-int production_fwd(torch::Tensor input,
-                   torch::Tensor weight,
-                   torch::Tensor output,
-                   torch::Tensor pair_table,
-                   torch::Tensor pair_mask,
-                   torch::Tensor mask_argsort,
-                   int K,
-                   int tile_id,
-                   int mask_words,
-                   int identity_offset,
-                   float alpha,
-                   int groups) {
+int mask_gemm_fwd(torch::Tensor input,
+                  torch::Tensor weight,
+                  torch::Tensor output,
+                  torch::Tensor pair_table,
+                  torch::Tensor pair_mask,
+                  torch::Tensor mask_argsort,
+                  int K,
+                  int tile_id,
+                  int mask_words,
+                  int identity_offset,
+                  float alpha,
+                  int groups) {
   TORCH_CHECK(input.is_cuda() && weight.is_cuda() && output.is_cuda());
   TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
-              "production_fwd requires fp16 or bf16 input (cast in Python before calling)");
+              "mask_gemm_fwd requires fp16 or bf16 input (cast in Python before calling)");
   input = input.contiguous();
   weight = weight.contiguous();
   output = output.contiguous();
@@ -720,38 +720,38 @@ int production_fwd(torch::Tensor input,
 
   // fp32 output tiles (fp16/bf16 input, f32 output — for non-AMP)
   // Tile 80 (f32out aligned) and 82 (f32out scalar B) support MW>1 via dispatch.
-#define FWD_F32OUT_MW(In)                                                                       \
-  DISPATCH_MW(                                                                                  \
-      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_f32out<In>(a...); }, \
-                 args),                                                                         \
-      std::apply(                                                                               \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 2>(a...); },  \
-          args),                                                                                \
-      std::apply(                                                                               \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 4>(a...); },  \
-          args),                                                                                \
-      std::apply(                                                                               \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 8>(a...); },  \
-          args),                                                                                \
-      std::apply(                                                                               \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_mw<In, 12>(a...); }, \
+#define FWD_F32OUT_MW(In)                                                                      \
+  DISPATCH_MW(                                                                                 \
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out<In>(a...); }, \
+                 args),                                                                        \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_mw<In, 2>(a...); },  \
+          args),                                                                               \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_mw<In, 4>(a...); },  \
+          args),                                                                               \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_mw<In, 8>(a...); },  \
+          args),                                                                               \
+      std::apply(                                                                              \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_mw<In, 12>(a...); }, \
           args))
 
-#define FWD_F32OUT_SB_MW(In)                                                                       \
-  DISPATCH_MW(                                                                                     \
-      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb<In>(a...); }, \
-                 args),                                                                            \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 2>(a...); },  \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 4>(a...); },  \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 8>(a...); },  \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_f32out_sb_mw<In, 12>(a...); }, \
+#define FWD_F32OUT_SB_MW(In)                                                                      \
+  DISPATCH_MW(                                                                                    \
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_sb<In>(a...); }, \
+                 args),                                                                           \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_sb_mw<In, 2>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_sb_mw<In, 4>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_sb_mw<In, 8>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_sb_mw<In, 12>(a...); }, \
           args))
 
   if (tile == gemm::ProdFwdTile::_64x64x32_f32out ||
@@ -839,34 +839,33 @@ int production_fwd(torch::Tensor input,
   DISPATCH_MW(                                                                                     \
       std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile64x64x32, ElemIn, a...); },       \
                  args),                                                                            \
-      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 2>(a...); }, \
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_mw<ElemIn, 2>(a...); },  \
                  args),                                                                            \
-      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 4>(a...); }, \
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_mw<ElemIn, 4>(a...); },  \
                  args),                                                                            \
-      std::apply([](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 8>(a...); }, \
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_mw<ElemIn, 8>(a...); },  \
                  args),                                                                            \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_mw<ElemIn, 12>(a...); },       \
-          args))
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_mw<ElemIn, 12>(a...); }, \
+                 args))
 
-#define FWD_64x128_F16ACC_MW_DISP()                                                                \
-  DISPATCH_MW(                                                                                     \
-      std::apply(                                                                                  \
-          [](auto &&...a) {                                                                        \
-            return LAUNCH_FWD(cutlass::half_t, Tile64x128x32_F16Accum, cutlass::half_t, a...);     \
-          },                                                                                       \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<2>(a...); },  \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<4>(a...); },  \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<8>(a...); },  \
-          args),                                                                                   \
-      std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_64x128_f16acc_mw<12>(a...); }, \
+#define FWD_64x128_F16ACC_MW_DISP()                                                               \
+  DISPATCH_MW(                                                                                    \
+      std::apply(                                                                                 \
+          [](auto &&...a) {                                                                       \
+            return LAUNCH_FWD(cutlass::half_t, Tile64x128x32_F16Accum, cutlass::half_t, a...);    \
+          },                                                                                      \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_64x128_f16acc_mw<2>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_64x128_f16acc_mw<4>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_64x128_f16acc_mw<8>(a...); },  \
+          args),                                                                                  \
+      std::apply(                                                                                 \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_64x128_f16acc_mw<12>(a...); }, \
           args))
 
 #define FWD_64x128_3S_MW(ElemIn)                                                              \
@@ -875,22 +874,22 @@ int production_fwd(torch::Tensor input,
                  args),                                                                       \
       std::apply(                                                                             \
           [](auto &&...a) {                                                                   \
-            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 2>(a...);            \
+            return cute_gemm::launch_mask_gemm_fwd_64x128_3s_mw<ElemIn, 2>(a...);             \
           },                                                                                  \
           args),                                                                              \
       std::apply(                                                                             \
           [](auto &&...a) {                                                                   \
-            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 4>(a...);            \
+            return cute_gemm::launch_mask_gemm_fwd_64x128_3s_mw<ElemIn, 4>(a...);             \
           },                                                                                  \
           args),                                                                              \
       std::apply(                                                                             \
           [](auto &&...a) {                                                                   \
-            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 8>(a...);            \
+            return cute_gemm::launch_mask_gemm_fwd_64x128_3s_mw<ElemIn, 8>(a...);             \
           },                                                                                  \
           args),                                                                              \
       std::apply(                                                                             \
           [](auto &&...a) {                                                                   \
-            return cute_gemm::launch_production_fwd_64x128_3s_mw<ElemIn, 12>(a...);           \
+            return cute_gemm::launch_mask_gemm_fwd_64x128_3s_mw<ElemIn, 12>(a...);            \
           },                                                                                  \
           args))
 
@@ -899,18 +898,16 @@ int production_fwd(torch::Tensor input,
       std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile128x64x32, ElemIn, a...); },      \
                  args),                                                                            \
       std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 2>(a...); }, \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_128x64_mw<ElemIn, 2>(a...); },  \
           args),                                                                                   \
       std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 4>(a...); }, \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_128x64_mw<ElemIn, 4>(a...); },  \
           args),                                                                                   \
       std::apply(                                                                                  \
-          [](auto &&...a) { return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 8>(a...); }, \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_128x64_mw<ElemIn, 8>(a...); },  \
           args),                                                                                   \
       std::apply(                                                                                  \
-          [](auto &&...a) {                                                                        \
-            return cute_gemm::launch_production_fwd_128x64_mw<ElemIn, 12>(a...);                   \
-          },                                                                                       \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_128x64_mw<ElemIn, 12>(a...); }, \
           args))
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
@@ -984,7 +981,7 @@ int production_fwd(torch::Tensor input,
 #undef FWD_64x128_F16ACC_MW_DISP
 #undef FWD_64x128_3S_MW
 #undef FWD_128x64_MW
-  TORCH_CHECK(false, "Unsupported tile_id/dtype for production_fwd: tile=", tile_id);
+  TORCH_CHECK(false, "Unsupported tile_id/dtype for mask_gemm_fwd: tile=", tile_id);
   return -1;
 }
 
@@ -992,22 +989,22 @@ int production_fwd(torch::Tensor input,
 // Dgrad dispatch
 // =============================================================================
 
-int production_dgrad(torch::Tensor grad_output,
-                     torch::Tensor weight_T,
-                     torch::Tensor grad_input,
-                     torch::Tensor pair_table,
-                     torch::Tensor pair_mask,
-                     torch::Tensor mask_argsort,
-                     int K,
-                     int tile_id,
-                     int mask_words,
-                     int identity_offset,
-                     float alpha,
-                     int groups) {
+int mask_gemm_dgrad(torch::Tensor grad_output,
+                    torch::Tensor weight_T,
+                    torch::Tensor grad_input,
+                    torch::Tensor pair_table,
+                    torch::Tensor pair_mask,
+                    torch::Tensor mask_argsort,
+                    int K,
+                    int tile_id,
+                    int mask_words,
+                    int identity_offset,
+                    float alpha,
+                    int groups) {
   TORCH_CHECK(grad_output.is_cuda() && weight_T.is_cuda() && grad_input.is_cuda());
   TORCH_CHECK(
       grad_output.scalar_type() == torch::kFloat16 || grad_output.scalar_type() == torch::kBFloat16,
-      "production_dgrad requires fp16 or bf16 input (cast in Python before calling)");
+      "mask_gemm_dgrad requires fp16 or bf16 input (cast in Python before calling)");
   grad_output = grad_output.contiguous();
   weight_T = weight_T.contiguous();
 
@@ -1037,21 +1034,21 @@ int production_dgrad(torch::Tensor grad_output,
                               stream);
 
   // fp32 output dgrad tile (supports MW=1,2,4,8,12)
-#define DGRAD_F32OUT_MW(In)                                                                       \
-  DISPATCH_MW(                                                                                    \
-      std::apply([](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out<In>(a...); }, \
-                 args),                                                                           \
-      std::apply(                                                                                 \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 2>(a...); },  \
-          args),                                                                                  \
-      std::apply(                                                                                 \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 4>(a...); },  \
-          args),                                                                                  \
-      std::apply(                                                                                 \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 8>(a...); },  \
-          args),                                                                                  \
-      std::apply(                                                                                 \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_f32out_mw<In, 12>(a...); }, \
+#define DGRAD_F32OUT_MW(In)                                                                      \
+  DISPATCH_MW(                                                                                   \
+      std::apply([](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_f32out<In>(a...); }, \
+                 args),                                                                          \
+      std::apply(                                                                                \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_f32out_mw<In, 2>(a...); },  \
+          args),                                                                                 \
+      std::apply(                                                                                \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_f32out_mw<In, 4>(a...); },  \
+          args),                                                                                 \
+      std::apply(                                                                                \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_f32out_mw<In, 8>(a...); },  \
+          args),                                                                                 \
+      std::apply(                                                                                \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_f32out_mw<In, 12>(a...); }, \
           args))
 
   if (tile == gemm::ProdDgradTile::_64x64x32_f32out) {
@@ -1125,16 +1122,16 @@ int production_dgrad(torch::Tensor grad_output,
       std::apply([](auto &&...a) { return LAUNCH_DGRAD(ElemIn, Tile64x64x32, ElemIn, a...); }, \
                  args),                                                                        \
       std::apply(                                                                              \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 2>(a...); },  \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_mw<ElemIn, 2>(a...); },   \
           args),                                                                               \
       std::apply(                                                                              \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 4>(a...); },  \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_mw<ElemIn, 4>(a...); },   \
           args),                                                                               \
       std::apply(                                                                              \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 8>(a...); },  \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_mw<ElemIn, 8>(a...); },   \
           args),                                                                               \
       std::apply(                                                                              \
-          [](auto &&...a) { return cute_gemm::launch_production_dgrad_mw<ElemIn, 12>(a...); }, \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_mw<ElemIn, 12>(a...); },  \
           args))
 
   if (si == torch::kFloat16 && so == torch::kFloat16) {
@@ -1199,7 +1196,7 @@ int production_dgrad(torch::Tensor grad_output,
   }
 #endif
 #undef DGRAD_64x64_MW
-  TORCH_CHECK(false, "Unsupported tile_id/dtype for production_dgrad: tile=", tile_id);
+  TORCH_CHECK(false, "Unsupported tile_id/dtype for mask_gemm_dgrad: tile=", tile_id);
   return -1;
 }
 
@@ -1207,21 +1204,21 @@ int production_dgrad(torch::Tensor grad_output,
 // Wgrad dispatch
 // =============================================================================
 
-int production_wgrad(torch::Tensor input,
-                     torch::Tensor grad_output,
-                     torch::Tensor grad_weight,
-                     torch::Tensor pair_table,
-                     torch::Tensor pair_mask,
-                     torch::Tensor mask_argsort,
-                     torch::Tensor reduced_mask,
-                     int K,
-                     int tile_id,
-                     int split_k,
-                     float alpha,
-                     int groups) {
+int mask_gemm_wgrad(torch::Tensor input,
+                    torch::Tensor grad_output,
+                    torch::Tensor grad_weight,
+                    torch::Tensor pair_table,
+                    torch::Tensor pair_mask,
+                    torch::Tensor mask_argsort,
+                    torch::Tensor reduced_mask,
+                    int K,
+                    int tile_id,
+                    int split_k,
+                    float alpha,
+                    int groups) {
   TORCH_CHECK(input.is_cuda() && grad_output.is_cuda() && grad_weight.is_cuda());
   TORCH_CHECK(input.scalar_type() == torch::kFloat16 || input.scalar_type() == torch::kBFloat16,
-              "production_wgrad requires fp16 or bf16 input (cast in Python before calling)");
+              "mask_gemm_wgrad requires fp16 or bf16 input (cast in Python before calling)");
   input = input.contiguous();
   grad_output = grad_output.contiguous();
 
@@ -1285,23 +1282,23 @@ int production_wgrad(torch::Tensor input,
   }
 
   // Vectorized wgrad dispatch — direct, atomic 64x64, or atomic 64x128
-#define WGRAD_DISPATCH(ElemIn, TileTag)                                                    \
-  cute_gemm::launch_production_wgrad<ElemIn, gemm::TileTag, float>(input.data_ptr(),       \
-                                                                   grad_output.data_ptr(), \
-                                                                   grad_weight.data_ptr(), \
-                                                                   pt_ptr,                 \
-                                                                   pm_ptr,                 \
-                                                                   ms_ptr,                 \
-                                                                   rm_ptr,                 \
-                                                                   N_in,                   \
-                                                                   N_out,                  \
-                                                                   C_in,                   \
-                                                                   C_out,                  \
-                                                                   K,                      \
-                                                                   split_k,                \
-                                                                   alpha,                  \
-                                                                   groups,                 \
-                                                                   stream)
+#define WGRAD_DISPATCH(ElemIn, TileTag)                                                   \
+  cute_gemm::launch_mask_gemm_wgrad<ElemIn, gemm::TileTag, float>(input.data_ptr(),       \
+                                                                  grad_output.data_ptr(), \
+                                                                  grad_weight.data_ptr(), \
+                                                                  pt_ptr,                 \
+                                                                  pm_ptr,                 \
+                                                                  ms_ptr,                 \
+                                                                  rm_ptr,                 \
+                                                                  N_in,                   \
+                                                                  N_out,                  \
+                                                                  C_in,                   \
+                                                                  C_out,                  \
+                                                                  K,                      \
+                                                                  split_k,                \
+                                                                  alpha,                  \
+                                                                  groups,                 \
+                                                                  stream)
 
 #define WGRAD_ATOMIC(ElemIn, suffix)                                             \
   cute_gemm::launch_wgrad_atomic_##suffix<ElemIn, float>(input.data_ptr(),       \
@@ -1398,7 +1395,7 @@ int production_wgrad(torch::Tensor input,
 #undef WGRAD_DISPATCH
 #undef WGRAD_ATOMIC
 #undef WGRAD_WORKSPACE_CASE
-  TORCH_CHECK(false, "Unsupported dtype for production_wgrad");
+  TORCH_CHECK(false, "Unsupported dtype for mask_gemm_wgrad");
   return -1;
 }
 
@@ -1459,11 +1456,11 @@ torch::Tensor build_reduced_mask(torch::Tensor pair_mask,
 
 namespace warpconvnet {
 namespace bindings {
-void register_production(py::module &m) {
-  auto prod = m.def_submodule("production", "Production mask GEMM kernels");
+void register_mask_gemm(py::module &m) {
+  auto prod = m.def_submodule("mask_gemm", "Masked GEMM kernels (mask-based fused sparse conv)");
 
   prod.def("fwd",
-           &production_fwd,
+           &mask_gemm_fwd,
            py::arg("input"),
            py::arg("weight"),
            py::arg("output"),
@@ -1478,7 +1475,7 @@ void register_production(py::module &m) {
            py::arg("groups") = 1);
 
   prod.def("dgrad",
-           &production_dgrad,
+           &mask_gemm_dgrad,
            py::arg("grad_output"),
            py::arg("weight_T"),
            py::arg("grad_input"),
@@ -1493,7 +1490,7 @@ void register_production(py::module &m) {
            py::arg("groups") = 1);
 
   prod.def("wgrad",
-           &production_wgrad,
+           &mask_gemm_wgrad,
            py::arg("input"),
            py::arg("grad_output"),
            py::arg("grad_weight"),

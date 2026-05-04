@@ -98,7 +98,7 @@ class SPARSE_CONV_AB_ALGO_MODE(Enum):
     CUTE_GROUPED = "cute_grouped"
     CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
     CUTE_GROUPED_SM90 = "cute_grouped_sm90"
-    PRODUCTION = "production"
+    MASK_GEMM = "mask_gemm"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
     TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
@@ -115,7 +115,7 @@ class SPARSE_CONV_ATB_ALGO_MODE(Enum):
     CUTE_GROUPED = "cute_grouped"
     CUTE_IMPLICIT_GEMM_SM90 = "cute_implicit_gemm_sm90"
     CUTE_GROUPED_SM90 = "cute_grouped_sm90"
-    PRODUCTION = "production"
+    MASK_GEMM = "mask_gemm"
     AUTO = "auto"  # Benchmark and select the best algorithm
     ALL = "all"  # Benchmark ALL candidates (slow, exhaustive)
     TRIMMED = "trimmed"  # Benchmark reduced set (excludes dead-weight)
@@ -232,25 +232,25 @@ _AB_CUTE_GROUPED = (
     ]
 )
 
-# Production kernel candidates (warp shuffle + precomp rows + double-buffered MMA)
-# Dispatched through _C.production.*, NOT _C.gemm.*
-_HAS_PRODUCTION = False
+# mask_gemm kernel candidates (warp shuffle + precomp rows + double-buffered MMA)
+# Dispatched through _C.mask_gemm.*, NOT _C.gemm.*
+_HAS_MASK_GEMM = False
 try:
     import warpconvnet._C as _test_C
 
-    _HAS_PRODUCTION = hasattr(_test_C, "production")
+    _HAS_MASK_GEMM = hasattr(_test_C, "mask_gemm")
 except ImportError:
     pass
 
 # F32-accumulator tiles: fp32 accumulation over C_in partial products.
 # Measured rd ~2e-5 against explicit_gemm, constant across C_in (8..256).
-_AB_PRODUCTION_F32ACC = (
+_AB_MASK_GEMM_F32ACC = (
     [
-        ("production", {"tile_id": 41}),  # 64x64
-        ("production", {"tile_id": 43}),  # 64x128 3-stage
-        ("production", {"tile_id": 44}),  # 128x64
+        ("mask_gemm", {"tile_id": 41}),  # 64x64
+        ("mask_gemm", {"tile_id": 43}),  # 64x128 3-stage
+        ("mask_gemm", {"tile_id": 44}),  # 128x64
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
@@ -262,12 +262,12 @@ _AB_PRODUCTION_F32ACC = (
 # on MinkUNet18 ScanNet AMP training: tile 40 picked for ci>=64 deep layers,
 # loss curve trails v1.7.0 REF by measurable margin). Kept available under
 # WARPCONVNET_AB_ALGO_MODE=all for inference benchmarks where speed dominates.
-_AB_PRODUCTION_F16ACC = (
+_AB_MASK_GEMM_F16ACC = (
     [
-        ("production", {"tile_id": 40}),  # 32x32 F16Acc
-        ("production", {"tile_id": 42}),  # 64x128 F16Acc
+        ("mask_gemm", {"tile_id": 40}),  # 32x32 F16Acc
+        ("mask_gemm", {"tile_id": 42}),  # 64x128 F16Acc
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
@@ -278,28 +278,28 @@ _AB_PRODUCTION_F16ACC = (
 # F arc (58/59/63) dissolves SM_89 pathologies of their non-E1 ancestors.
 # MW=1 only for now; K>32 configs route through non-pcoff tiles until
 # MW>1 instantiations land.
-_AB_PRODUCTION_PCOFF = (
+_AB_MASK_GEMM_PCOFF = (
     [
-        ("production", {"tile_id": 54}),  # 64x64 flat_pcoff (F16Acc, Ada winner)
-        ("production", {"tile_id": 55}),  # 64x64 flat_pcoff (F16K8)
-        ("production", {"tile_id": 56}),  # 64x128 flat_pcoff (F16K8, A100 flagship)
-        ("production", {"tile_id": 57}),  # 64x128 flat_pcoff (F16Acc)
-        ("production", {"tile_id": 58}),  # 64x64 3s_pcoff
-        ("production", {"tile_id": 59}),  # 64x64 warp_spec_pcoff
-        ("production", {"tile_id": 63}),  # 64x128 warp_spec_pcoff
+        ("mask_gemm", {"tile_id": 54}),  # 64x64 flat_pcoff (F16Acc, Ada winner)
+        ("mask_gemm", {"tile_id": 55}),  # 64x64 flat_pcoff (F16K8)
+        ("mask_gemm", {"tile_id": 56}),  # 64x128 flat_pcoff (F16K8, A100 flagship)
+        ("mask_gemm", {"tile_id": 57}),  # 64x128 flat_pcoff (F16Acc)
+        ("mask_gemm", {"tile_id": 58}),  # 64x64 3s_pcoff
+        ("mask_gemm", {"tile_id": 59}),  # 64x64 warp_spec_pcoff
+        ("mask_gemm", {"tile_id": 63}),  # 64x128 warp_spec_pcoff
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
-# Full production pool (F32Acc + F16Acc + Pcoff). Referenced by _AB_PARAMS_AUTO
-# so env-var overrides like WARPCONVNET_AB_ALGO_MODE=["production"] can still
+# Full mask_gemm pool (F32Acc + F16Acc + Pcoff). Referenced by _AB_PARAMS_AUTO
+# so env-var overrides like WARPCONVNET_AB_ALGO_MODE=["mask_gemm"] can still
 # opt into F16Acc and pcoff tiles.
-_AB_PRODUCTION = _AB_PRODUCTION_F32ACC + _AB_PRODUCTION_F16ACC + _AB_PRODUCTION_PCOFF
+_AB_MASK_GEMM = _AB_MASK_GEMM_F32ACC + _AB_MASK_GEMM_F16ACC + _AB_MASK_GEMM_PCOFF
 
 # Dgrad-namespace tile ids for fwd-kernel-reused-as-dgrad. These live in the
 # ProdDgradTile C++ enum (83-94). Dispatch translates each back to its source
-# ProdFwdTile id before invoking _C.production.fwd. Autotune cache therefore
+# ProdFwdTile id before invoking _C.mask_gemm.fwd. Autotune cache therefore
 # stores dgrad picks under dgrad-namespace ids rather than fwd-namespace ids.
 WT_TILE_TO_FWD_TILE = {
     # f32 accumulate
@@ -319,46 +319,46 @@ WT_TILE_TO_FWD_TILE = {
     94: 63,  # Prod_Dgrad_Pcoff_64x128x32_2s_warp_spec_wt
 }
 
-_AB_PRODUCTION_FWD_AS_DGRAD_PCOFF = (
+_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF = (
     [
-        ("production_fwd_as_dgrad", {"tile_id": 88}),
-        ("production_fwd_as_dgrad", {"tile_id": 89}),
-        ("production_fwd_as_dgrad", {"tile_id": 90}),
-        ("production_fwd_as_dgrad", {"tile_id": 91}),
-        ("production_fwd_as_dgrad", {"tile_id": 92}),
-        ("production_fwd_as_dgrad", {"tile_id": 93}),
-        ("production_fwd_as_dgrad", {"tile_id": 94}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 88}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 89}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 90}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 91}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 92}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 93}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 94}),
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
-_AB_PRODUCTION_FWD_AS_DGRAD_F32ACC = (
+_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC = (
     [
-        ("production_fwd_as_dgrad", {"tile_id": 83}),
-        ("production_fwd_as_dgrad", {"tile_id": 84}),
-        ("production_fwd_as_dgrad", {"tile_id": 85}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 83}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 84}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 85}),
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
-_AB_PRODUCTION_FWD_AS_DGRAD_F16ACC = (
+_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC = (
     [
-        ("production_fwd_as_dgrad", {"tile_id": 86}),
-        ("production_fwd_as_dgrad", {"tile_id": 87}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 86}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 87}),
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
-_AB_PRODUCTION_FWD_AS_DGRAD = (
-    _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC
-    + _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC
-    + _AB_PRODUCTION_FWD_AS_DGRAD_PCOFF
+_AB_MASK_GEMM_FWD_AS_DGRAD = (
+    _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC
+    + _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC
+    + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF
 )
 
-_ATB_PRODUCTION = (
+_ATB_MASK_GEMM = (
     [
         # tile_id=60 (Prod_Wgrad_64x64x32_f32, direct store) epilogue was
         # numerically wrong at split_k>1 (non-atomic race); fixed upstream by
@@ -366,28 +366,28 @@ _ATB_PRODUCTION = (
         # store at split_k=1. Kept in the candidate set at both split_k=1
         # (its fast path) and split_k=32 (atomicAdd path) so autotune can
         # pick whichever wins for a given shape.
-        ("production", {"tile_id": 60, "split_k": 1}),  # Direct store, no split-K
-        ("production", {"tile_id": 60, "split_k": 32}),  # Direct store w/ atomic fallback
-        ("production", {"tile_id": 61, "split_k": 128}),  # Atomic 64x64, high split_k
-        ("production", {"tile_id": 61, "split_k": 32}),  # Atomic 64x64, low split_k
-        ("production", {"tile_id": 62, "split_k": 64}),  # Atomic 64x128, high split_k
-        ("production", {"tile_id": 62, "split_k": 16}),  # Atomic 64x128, low split_k
-        ("production", {"tile_id": 63, "split_k": 128}),  # 3-stage atomic, high split_k
-        ("production", {"tile_id": 63, "split_k": 32}),  # 3-stage atomic, low split_k
+        ("mask_gemm", {"tile_id": 60, "split_k": 1}),  # Direct store, no split-K
+        ("mask_gemm", {"tile_id": 60, "split_k": 32}),  # Direct store w/ atomic fallback
+        ("mask_gemm", {"tile_id": 61, "split_k": 128}),  # Atomic 64x64, high split_k
+        ("mask_gemm", {"tile_id": 61, "split_k": 32}),  # Atomic 64x64, low split_k
+        ("mask_gemm", {"tile_id": 62, "split_k": 64}),  # Atomic 64x128, high split_k
+        ("mask_gemm", {"tile_id": 62, "split_k": 16}),  # Atomic 64x128, low split_k
+        ("mask_gemm", {"tile_id": 63, "split_k": 128}),  # 3-stage atomic, high split_k
+        ("mask_gemm", {"tile_id": 63, "split_k": 32}),  # 3-stage atomic, low split_k
         # Workspace tiles: allocate [split_k, K, G, Cig, Cog] fp32 buffer, no
         # atomic contention, post-kernel sum reduction. Win at small per-group
         # C + large K*G where atomic tiles thrash (e.g. K=343 g=4 Cig=Cog=16).
         # Upper split_k capped at 32 per warpgemm valid_split_k recommendation
         # (workspace memory = split_k * K * G * Cig * Cog * 4 bytes; 32 is a
         # good perf/memory compromise for typical UNet shapes).
-        ("production", {"tile_id": 64, "split_k": 16}),  # Workspace 64x64 2s
-        ("production", {"tile_id": 64, "split_k": 32}),  # Workspace 64x64 2s
-        ("production", {"tile_id": 65, "split_k": 16}),  # Workspace 64x64 3s
-        ("production", {"tile_id": 65, "split_k": 32}),  # Workspace 64x64 3s
-        ("production", {"tile_id": 66, "split_k": 16}),  # Workspace 64x128 2s
-        ("production", {"tile_id": 66, "split_k": 32}),  # Workspace 64x128 2s
+        ("mask_gemm", {"tile_id": 64, "split_k": 16}),  # Workspace 64x64 2s
+        ("mask_gemm", {"tile_id": 64, "split_k": 32}),  # Workspace 64x64 2s
+        ("mask_gemm", {"tile_id": 65, "split_k": 16}),  # Workspace 64x64 3s
+        ("mask_gemm", {"tile_id": 65, "split_k": 32}),  # Workspace 64x64 3s
+        ("mask_gemm", {"tile_id": 66, "split_k": 16}),  # Workspace 64x128 2s
+        ("mask_gemm", {"tile_id": 66, "split_k": 32}),  # Workspace 64x128 2s
     ]
-    if _HAS_PRODUCTION
+    if _HAS_MASK_GEMM
     else []
 )
 
@@ -426,17 +426,17 @@ def _get_adaptive_AB_params(
 
     Auto picks only the dominant winner per region. 4-5 candidates.
 
-    ``use_fp16_accum``: when True, add the F16Acc production tiles (40/42)
+    ``use_fp16_accum``: when True, add the F16Acc mask_gemm tiles (40/42)
     to the pool so autotune can pick them for ~15% speedup at lower
     precision. Off by default because the precision loss degrades training
-    convergence (see ``_AB_PRODUCTION_F16ACC`` docstring).
+    convergence (see ``_AB_MASK_GEMM_F16ACC`` docstring).
     """
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    _ab_prod = list(_AB_PRODUCTION_F32ACC)
+    _ab_prod = list(_AB_MASK_GEMM_F32ACC)
     if use_fp16_accum:
-        _ab_prod.extend(_AB_PRODUCTION_F16ACC)
+        _ab_prod.extend(_AB_MASK_GEMM_F16ACC)
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
@@ -500,9 +500,9 @@ def _get_trimmed_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    _ab_prod = list(_AB_PRODUCTION_F32ACC)
+    _ab_prod = list(_AB_MASK_GEMM_F32ACC)
     if use_fp16_accum:
-        _ab_prod.extend(_AB_PRODUCTION_F16ACC)
+        _ab_prod.extend(_AB_MASK_GEMM_F16ACC)
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
@@ -549,6 +549,8 @@ def _get_trimmed_AB_params(
 # Exhaustive AB benchmark candidates ("all"): every algorithm and
 # parameter combination. Nothing excluded.
 _ALL_AB_PARAMS = [
+    # mask_gemm fused mask kernels
+    *_AB_MASK_GEMM,
     # Explicit GEMM (per-offset matmul via cuBLAS)
     ("explicit_gemm", {}),
     *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
@@ -621,7 +623,7 @@ _ALL_AB_PARAMS = [
 
 # Static AtB auto superset (union of all _get_adaptive_AtB_params branches).
 _ATB_PARAMS_AUTO = [
-    *_ATB_PRODUCTION,
+    *_ATB_MASK_GEMM,
     *_AB_CUTE_GROUPED,
     *_AB_CUTLASS_GROUPED,
     *_ATB_EXPLICIT,
@@ -657,7 +659,7 @@ def _get_adaptive_AtB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    _atb_prod = _ATB_PRODUCTION
+    _atb_prod = _ATB_MASK_GEMM
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
     if kernel_volume >= 64:
@@ -750,7 +752,7 @@ def _get_trimmed_AtB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    _atb_prod = _ATB_PRODUCTION
+    _atb_prod = _ATB_MASK_GEMM
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
@@ -804,6 +806,8 @@ def _get_trimmed_AtB_params(
 # Exhaustive AtB benchmark candidates ("all"): every algorithm and
 # parameter combination. Nothing excluded.
 _ALL_ATB_PARAMS = [
+    # mask_gemm fused mask kernels
+    *_ATB_MASK_GEMM,
     # Explicit GEMM
     ("explicit_gemm", {}),
     *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],
@@ -875,7 +879,7 @@ _ALL_ATB_PARAMS = [
 # Static superset of all AB "auto" candidates (union of all adaptive branches).
 # Used by _get_filtered_AB_params for env var filtering.
 _AB_PARAMS_AUTO = [
-    *_AB_PRODUCTION,
+    *_AB_MASK_GEMM,
     *_AB_CUTLASS_IMPLICIT,
     *_AB_CUTLASS_GROUPED,
     *_AB_CUTE_GROUPED,

@@ -25,7 +25,7 @@ Two encodings:
 
 - **`pair_table`**: dense per-offset list of (input_row, output_row).
 - **`pair_mask`**: per-output-row bitmask over $\mathcal{K}$ flagging
-  which offsets are active for that row. Used by the `production`
+  which offsets are active for that row. Used by the `mask_gemm`
   backend to avoid per-offset launches.
 
 Built once per `(C^in, C^out, K)` shape via the
@@ -122,7 +122,7 @@ its own winner per shape.
 | `cute_implicit_gemm`     | CuTe 3.x fused kernel with `cp.async` vectorized A-loads.                             | Competitive at small-medium channels.                                      |
 | `cute_grouped`           | CuTe 3.x grouped GEMM — all offsets in one launch via binary-search dispatch.         | Small-N medium-channel; winner for $C > 256$ at small $N$.                 |
 | `cutlass_grouped_hybrid` | CUTLASS for large offsets + `torch.bmm` for grouped small offsets.                    | Strong at large $N$ + medium-large channels.                               |
-| `production`             | Mask-based fused kernel — iterates all $K^D$ offsets per output row via bitmask skip. | Dominant AB/ABt winner on most shapes. No atomicAdd. CuTe tensor-core MMA. |
+| `mask_gemm`              | Mask-based fused kernel — iterates all $K^D$ offsets per output row via bitmask skip. | Dominant AB/ABt winner on most shapes. No atomicAdd. CuTe tensor-core MMA. |
 
 ### AtB backends (wgrad)
 
@@ -130,10 +130,10 @@ Same name list as above, but implementing the
 $\mathbf{A}^{\!\top}\,\mathbf{dY}$ gather-gather pattern. `cute_grouped`
 wins the majority of wgrad shapes empirically.
 
-### How `production` works
+### How `mask_gemm` works
 
 Unlike per-offset and grouped backends that launch separate work per
-offset, the `production` kernel processes **all $|\mathcal{K}|$ offsets
+offset, the `mask_gemm` kernel processes **all $|\mathcal{K}|$ offsets
 in a single launch**. For each output row $r^{\text{out}}$:
 
 1. Load `pair_mask[r_out]` — a bitmask of length $|\mathcal{K}|$ flagging
@@ -170,7 +170,7 @@ variables, and how to specify algorithms explicitly.
 - [Inspect Benchmark Cache](inspect_benchmark_cache.md) — dump cached
   autotune results.
 - [Pre-Populate Benchmark Cache](populate_benchmark_cache.md) — fill the
-  cache ahead of production workloads.
+  cache ahead of deployment workloads.
 - [Packed Hash Table](packed_hash_table.md) — coordinate index that
   backs the kernel-map build.
 

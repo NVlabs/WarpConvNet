@@ -43,6 +43,11 @@ from .algo_params import (
 
 logger = get_logger(__name__)
 
+
+def _mask_gemm_backend():
+    return _C.mask_gemm
+
+
 # Pcoff forward tile IDs (warpgemm catalog, mirrored in ProdFwdTile enum).
 # These have MW=1 instantiations only; K>32 configs must route elsewhere.
 _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
@@ -86,9 +91,9 @@ def _execute_forward(
     use_fp16_accum: bool = False,
 ) -> Tensor:
     """Dispatch forward pass to the selected algorithm."""
-    if groups > 1 and algo != "production":
+    if groups > 1 and algo != "mask_gemm":
         raise ValueError(
-            f"Group convolution (groups={groups}) only supported with algo='production', "
+            f"Group convolution (groups={groups}) only supported with algo='mask_gemm', "
             f"got '{algo}'"
         )
     if groups > 1:
@@ -206,7 +211,7 @@ def _execute_forward(
                 f"cute_grouped_sm90 fwd error: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result))}"
             )
         return result
-    elif algo == "production":
+    elif algo == "mask_gemm":
         from .mask_gemm import _get_mask_data
 
         K = len(kernel_map)
@@ -235,7 +240,7 @@ def _execute_forward(
             C_in_g = weight.shape[1]
             C_out_g = weight.shape[2]
 
-        # Cast to fp16 if needed (production kernels require fp16/bf16)
+        # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16)
         orig_dtype = in_features.dtype
         use_f32_output = orig_dtype == torch.float32
         if orig_dtype == torch.float32:
@@ -283,7 +288,8 @@ def _execute_forward(
         output = torch.zeros(
             (num_out_coords, C_out_total), dtype=out_dtype, device=in_features.device
         )
-        status = _C.production.fwd(
+        backend = _mask_gemm_backend()
+        status = backend.fwd(
             _in,
             _w,
             output,
@@ -298,7 +304,7 @@ def _execute_forward(
             groups,
         )
         if status != 0:
-            raise RuntimeError(f"production fwd failed: status={status}, tile={tile_id}")
+            raise RuntimeError(f"mask_gemm fwd failed: status={status}, tile={tile_id}")
 
         return output.to(dtype=orig_dtype)
     else:
@@ -477,10 +483,10 @@ def _execute_backward(
                 f"cute_grouped_sm90 bwd error: {_C.gemm.gemm_status_to_string(_C.gemm.GemmStatus(result[0]))}"
             )
         return result
-    elif algo in ("production", "production_fwd_as_dgrad"):
+    elif algo in ("mask_gemm", "mask_gemm_fwd_as_dgrad"):
         from .mask_gemm import _get_mask_data, _get_reverse_mask_data
 
-        use_fwd_for_dgrad = algo == "production_fwd_as_dgrad"
+        use_fwd_for_dgrad = algo == "mask_gemm_fwd_as_dgrad"
 
         K = weight.shape[0]
         from .mask_gemm import _dispatched_mask_words
@@ -508,7 +514,7 @@ def _execute_backward(
             C_in_g = C_in
             C_out_g = C_out
 
-        # Cast to fp16 if needed (production kernels require fp16/bf16)
+        # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16)
         orig_dtype = grad_output.dtype
         use_f32_output = orig_dtype == torch.float32
         if orig_dtype == torch.float32:
@@ -530,9 +536,9 @@ def _execute_backward(
                 kernel_map, N_in, num_out_coords, grad_output.device
             )
 
-            # Native production.dgrad reads W[K, G, Cin, Cout] with a stride-transpose
+            # Native mask_gemm.dgrad reads W[K, G, Cin, Cout] with a stride-transpose
             # in shared memory so MMA reduces over Cout (correct for dX = dY @ W^T).
-            # production_fwd_as_dgrad reuses the fwd kernel, whose B-loader reduces
+            # mask_gemm_fwd_as_dgrad reuses the fwd kernel, whose B-loader reduces
             # over the first channel axis — so W must be pre-transposed to swap the
             # axes before the kernel sees it. .contiguous() is mandatory: fwd's
             # vectorized cp.async needs 16-byte-aligned strides and a .transpose()
@@ -574,7 +580,8 @@ def _execute_backward(
                     # Pcoff tiles are MW=1 only — reroute to MW-capable aligned tile 41.
                     dgrad_tile = 41
 
-                dgrad_fn = _C.production.fwd
+                backend = _mask_gemm_backend()
+                dgrad_fn = backend.fwd
             else:
                 cin_aligned = C_in_g % vec_width == 0
                 cout_aligned = C_out_g % vec_width == 0
@@ -592,7 +599,7 @@ def _execute_backward(
                     # instantiations in warpconvnet bindings. Route MW>1 to
                     # scalar tile 70 (SAB_SE MW) which supports up to MW=12.
                     # For better perf at MW>1 aligned shapes, prefer the
-                    # production_fwd_as_dgrad algo in the pool.
+                    # mask_gemm_fwd_as_dgrad algo in the pool.
                     dgrad_tile = 70
                 elif use_f32_out_tile:
                     dgrad_tile = 81
@@ -606,7 +613,8 @@ def _execute_backward(
                     else:
                         dgrad_tile = 54 if is_fp16 else 52
 
-                dgrad_fn = _C.production.dgrad
+                backend = _mask_gemm_backend()
+                dgrad_fn = backend.dgrad
 
             # Single launch handles groups=1 and groups>1 via grid.z
             C_in_total = C_in_g * groups
@@ -628,19 +636,21 @@ def _execute_backward(
                 groups,
             )
             if status != 0:
-                raise RuntimeError(f"production dgrad failed: status={status}")
+                raise RuntimeError(f"mask_gemm dgrad failed: status={status}")
 
             grad_in = grad_in.to(dtype=orig_dtype)
 
         if needs_input_grad[1]:
-            # Wgrad via production wgrad kernel with reduced_mask
+            backend = _mask_gemm_backend()
+
+            # Wgrad via mask_gemm wgrad kernel with reduced_mask
             pair_table, pair_mask, mask_argsort = _get_mask_data(
                 kernel_map, num_out_coords, grad_output.device
             )
 
             # Build reduced_mask (cached on kernel_map)
             if not hasattr(kernel_map, "_reduced_mask") or kernel_map._reduced_mask is None:
-                kernel_map._reduced_mask = _C.production.build_reduced_mask(
+                kernel_map._reduced_mask = backend.build_reduced_mask(
                     pair_mask, mask_argsort, 32, mask_words
                 )
 
@@ -662,7 +672,7 @@ def _execute_backward(
                     dtype=torch.float32,
                     device=grad_output.device,
                 )
-            status = _C.production.wgrad(
+            status = backend.wgrad(
                 _in,
                 _go,
                 grad_weight,
@@ -677,7 +687,7 @@ def _execute_backward(
                 groups,
             )
             if status != 0:
-                raise RuntimeError(f"production wgrad failed: status={status}")
+                raise RuntimeError(f"mask_gemm wgrad failed: status={status}")
             grad_weight = grad_weight.to(dtype=weight.dtype)
 
         return grad_in, grad_weight

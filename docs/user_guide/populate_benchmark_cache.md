@@ -131,4 +131,4 @@ export WARPCONVNET_BENCHMARK_CACHE_DIR=/shared/warpconvnet_cache
 python scripts/populate_benchmark_cache.py
 ```
 
-The `--algo-mode` flag sets both `WARPCONVNET_FWD_ALGO_MODE` (AB gather-scatter) and `WARPCONVNET_BWD_ALGO_MODE` (AtB gather-gather) internally. Options: `auto` (adaptive), `trimmed` (default, excludes dead-weight), `all` (exhaustive). See [Sparse Convolutions](./sparse_convolutions.md) for details.
+The `--algo-mode` flag sets `WARPCONVNET_FWD_ALGO_MODE` (AB gather-scatter), `WARPCONVNET_DGRAD_ALGO_MODE` (ABt gather-scatter), and `WARPCONVNET_WGRAD_ALGO_MODE` (AtB gather-gather) internally. Options: `auto` (adaptive), `trimmed` (default, excludes dead-weight), `all` (exhaustive). See [Sparse Convolutions](./sparse_convolutions.md) for details.

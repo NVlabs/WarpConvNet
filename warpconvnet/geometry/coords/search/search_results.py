@@ -79,7 +79,7 @@ class IntSearchResult:
         # Built on first use, then reused for all subsequent calls.
         self._mask_data: Optional[Tuple[Tensor, Tensor, Tensor]] = None
         self._reverse_mask_data: Optional[Tuple[Tensor, Tensor, Tensor]] = None
-        self._reduced_mask: Optional[Tensor] = None  # For production wgrad
+        self._reduced_mask: Optional[Tensor] = None  # For mask_gemm wgrad
         # Lazy-computed grouped GEMM params (depend only on offsets).
         # Dict keyed by (tile_m,) for AB params or "trAB" for AtB params.
         self._grouped_params_cache: dict = {}

@@ -57,11 +57,11 @@ analysis of 148 configs on SM 8.9 with cuBLAS 12.9.1.4:
 the same candidate pool — 7-11 candidates per op; each op is tuned
 independently against its own cache namespace:
 
-| $N$ range                             | $ch \le 256$                                      | $ch > 256$                               |
-| ------------------------------------- | ------------------------------------------------- | ---------------------------------------- |
-| Small ($N \le 10{,}000$)              | `production` (92-100%)                            | `cute_grouped` (58%), `production` (25%) |
-| Medium ($10{,}000 < N \le 100{,}000$) | `production` (69%), `cutlass_implicit_gemm` (27%) | `cutlass_grouped_hybrid` (67%)           |
-| Large ($N > 100{,}000$)               | `production` / `cutlass_grouped` / `cutlass`      | `cutlass_implicit_gemm` (100%)           |
+| $N$ range                             | $ch \le 256$                                     | $ch > 256$                              |
+| ------------------------------------- | ------------------------------------------------ | --------------------------------------- |
+| Small ($N \le 10{,}000$)              | `mask_gemm` (92-100%)                            | `cute_grouped` (58%), `mask_gemm` (25%) |
+| Medium ($10{,}000 < N \le 100{,}000$) | `mask_gemm` (69%), `cutlass_implicit_gemm` (27%) | `cutlass_grouped_hybrid` (67%)          |
+| Large ($N > 100{,}000$)               | `mask_gemm` / `cutlass_grouped` / `cutlass`      | `cutlass_implicit_gemm` (100%)          |
 
 **AtB gather-gather (wgrad)** — 5-8 candidates:
 
@@ -75,11 +75,11 @@ independently against its own cache namespace:
 
 Three global modes for the AB and AtB candidate sets:
 
-| Mode             |   AB candidates | AtB candidates | When to use                                                                       |
-| ---------------- | --------------: | -------------: | --------------------------------------------------------------------------------- |
-| `auto` (default) | 7-11 (adaptive) | 5-8 (adaptive) | Normal training / inference. Covers every winning algorithm at its optimal shape. |
-| `trimmed`        |              11 |             27 | Broader search. Includes slower-converging alternatives but excludes dead-weight. |
-| `all`            |              23 |             35 | Exhaustive. For benchmarking new hardware or new backends; slowest first run.     |
+| Mode             | Candidate set       | When to use                                                                       |
+| ---------------- | ------------------- | --------------------------------------------------------------------------------- |
+| `auto` (default) | Adaptive per shape. | Normal training / inference. Covers every winning algorithm at its optimal shape. |
+| `trimmed`        | Broader pool.       | Broader search. Includes slower-converging alternatives but excludes dead-weight. |
+| `all`            | Full pool.          | Exhaustive. For benchmarking new hardware or new backends; slowest first run.     |
 
 ```bash
 # Default: adaptive reduced set (recommended)
@@ -89,10 +89,10 @@ export WARPCONVNET_FWD_ALGO_MODE=auto
 export WARPCONVNET_FWD_ALGO_MODE=all
 
 # Specific algorithm (no benchmarking, just use it)
-export WARPCONVNET_FWD_ALGO_MODE=production
+export WARPCONVNET_FWD_ALGO_MODE=mask_gemm
 
 # Algorithm list (benchmark only these)
-export WARPCONVNET_FWD_ALGO_MODE="[production,cutlass_implicit_gemm]"
+export WARPCONVNET_FWD_ALGO_MODE="[mask_gemm,cutlass_implicit_gemm]"
 ```
 
 The same options apply to `WARPCONVNET_DGRAD_ALGO_MODE` (dgrad ABt
@@ -108,16 +108,16 @@ from warpconvnet.nn.functional import spatially_sparse_conv
 # Different algorithms for each op
 output = spatially_sparse_conv(
     input_voxels, weight, kernel_size=3,
-    fwd_algo="production",       # AB for forward
-    dgrad_algo="production",     # AB for dgrad
+    fwd_algo="mask_gemm",        # AB for forward
+    dgrad_algo="mask_gemm",      # AB for dgrad
     wgrad_algo="cute_grouped",   # AtB for wgrad
 )
 
 # Algorithm list -- benchmark only these
 output = spatially_sparse_conv(
     input_voxels, weight, kernel_size=3,
-    fwd_algo=["production", "cutlass_implicit_gemm"],
-    dgrad_algo=["production", "cute_grouped"],
+    fwd_algo=["mask_gemm", "cutlass_implicit_gemm"],
+    dgrad_algo=["mask_gemm", "cute_grouped"],
     wgrad_algo=["cute_grouped", "cutlass_grouped_hybrid"],
 )
 ```
@@ -158,7 +158,7 @@ single algorithm name, or a bracket list like `[algo1,algo2]`.
 Valid algorithm names: `explicit_gemm`, `implicit_gemm`,
 `cutlass_implicit_gemm`, `cute_implicit_gemm`, `explicit_gemm_grouped`,
 `implicit_gemm_grouped`, `cutlass_grouped_hybrid`, `cute_grouped`,
-`production`. Unknown names raise `ValueError`.
+`mask_gemm`. Unknown names raise `ValueError`.
 
 ## Cache
 
@@ -183,13 +183,13 @@ python scripts/inspect_benchmark_cache.py namespace=ABt_gather_scatter --best-on
 python scripts/inspect_benchmark_cache.py namespace=AtB_gather_gather --best-only   # wgrad
 
 # Analyze win rates and margins across all configs
-python scripts/analyze_autotune_cache.py --markdown --output analysis.md
+python scripts/analyze_benchmark_cache.py --markdown --output analysis.md
 ```
 
 See [Inspect Benchmark Cache](./inspect_benchmark_cache.md) for the full
 inspector CLI and
 [Pre-Populate Benchmark Cache](./populate_benchmark_cache.md) for
-filling the cache ahead of production.
+filling the cache ahead of deployment.
 
 ## Performance characteristics
 
@@ -197,7 +197,7 @@ Based on empirical analysis on RTX 6000 Ada with cuBLAS 12.9.1.4:
 
 | Condition                      | Best AB backend         | Best AtB backend                           |
 | ------------------------------ | ----------------------- | ------------------------------------------ |
-| $ch \le 256$, any $N$          | `production`            | `cute_grouped`                             |
+| $ch \le 256$, any $N$          | `mask_gemm`             | `cute_grouped`                             |
 | $ch > 256$, small $N$          | `cute_grouped`          | `cute_grouped`                             |
 | $ch > 256$, large $N$          | `cutlass_implicit_gemm` | `cute_grouped`                             |
 | $ch \le 64$, small $N$ (wgrad) | —                       | `implicit_gemm` or `explicit_gemm_grouped` |
@@ -222,7 +222,7 @@ the cache with `rm -rf ~/.cache/warpconvnet/` when switching hardware.
 capability. Fall back with an explicit list:
 
 ```bash
-export WARPCONVNET_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm,production]"
+export WARPCONVNET_FWD_ALGO_MODE="[explicit_gemm,implicit_gemm,mask_gemm]"
 ```
 
 **`ValueError: Unknown algorithm(s) in filter`**: you passed a name

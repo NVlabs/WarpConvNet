@@ -3,7 +3,7 @@
 **Created**: 2026-04-15 14:00:00
 **Edited**: 2026-04-18 16:35:57
 
-WarpConvNet's production mask GEMM kernels use tensor core MMA instructions that support two accumulator modes:
+WarpConvNet's mask_gemm kernels use tensor core MMA instructions that support two accumulator modes:
 
 | Mode                 | MMA Atom                       | Throughput | Precision | Default |
 | -------------------- | ------------------------------ | ---------- | --------- | ------- |
@@ -80,10 +80,10 @@ output = spatially_sparse_conv(
 
 When `use_fp16_accum=True` is resolved (per-module, global, or env):
 
-1. **Production pool**: F16Acc tiles (40/42 forward, equivalent dgrad variants) are **added** to the autotune candidate pool. When the flag is unset, only F32Acc production tiles are benchmarked.
+1. **mask_gemm pool**: F16Acc tiles (40/42 forward, equivalent dgrad variants) are **added** to the autotune candidate pool. When the flag is unset, only F32Acc mask_gemm tiles are benchmarked.
 2. **CUTLASS pool**: Every CUTLASS entry's `accumulator_type` parameter is rewritten to `torch.float16`. Without the flag, CUTLASS runs with its default fp32 accumulator.
 
-Both the adaptive (`auto`) and trimmed pools default to F32Acc only. Setting `WARPCONVNET_AB_ALGO_MODE=all` or explicitly naming `production` via the env config includes F16Acc tiles regardless of the flag; the flag is the normal gate for adaptive/trimmed pools.
+Both the adaptive (`auto`) and trimmed pools default to F32Acc only. Setting `WARPCONVNET_FWD_ALGO_MODE=all` / `WARPCONVNET_DGRAD_ALGO_MODE=all`, or explicitly naming `mask_gemm` via the env config, includes F16Acc tiles regardless of the flag; the flag is the normal gate for adaptive/trimmed pools.
 
 ## Which Tiles Use FP16 Accumulator
 

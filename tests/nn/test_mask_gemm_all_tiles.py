@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-tile correctness pins for every production kernel.
+"""Per-tile correctness pins for every mask_gemm kernel.
 
 Exercises every (op, algo, tile_id[, split_k]) triple in the autotune
 candidate pool and compares against the ``_explicit_gemm_*_logic`` reference.
@@ -15,10 +15,10 @@ directly on tile_id via ``_execute_forward`` / ``_execute_backward`` so every
 tile runs on every CI GPU, with no autotune timing in the loop.
 
 Structure:
-  - test_fwd_all_tiles            — every _AB_PRODUCTION entry
-  - test_dgrad_fwd_as_dgrad_tiles — every _AB_PRODUCTION_FWD_AS_DGRAD_* entry
+  - test_fwd_all_tiles            — every _AB_MASK_GEMM entry
+  - test_dgrad_fwd_as_dgrad_tiles — every _AB_MASK_GEMM_FWD_AS_DGRAD_* entry
   - test_dgrad_native_by_C        — dgrad tile chosen inside dispatch by C range
-  - test_wgrad_all_tiles          — every _ATB_PRODUCTION (tile_id, split_k) entry
+  - test_wgrad_all_tiles          — every _ATB_MASK_GEMM (tile_id, split_k) entry
 """
 
 from contextlib import nullcontext
@@ -34,9 +34,9 @@ from warpconvnet.nn.functional.sparse_conv import (
     _explicit_gemm_forward_logic,
 )
 from warpconvnet.nn.functional.sparse_conv.detail.algo_params import (
-    _AB_PRODUCTION,
-    _AB_PRODUCTION_FWD_AS_DGRAD,
-    _ATB_PRODUCTION,
+    _AB_MASK_GEMM,
+    _AB_MASK_GEMM_FWD_AS_DGRAD,
+    _ATB_MASK_GEMM,
     WT_TILE_TO_FWD_TILE,
 )
 from warpconvnet.nn.functional.sparse_conv.detail.dispatch import (
@@ -49,7 +49,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 # ---------------------------------------------------------------------------
 # Tolerances — tuned against rdiff observed between explicit_gemm and
-# production under matching compute_dtype. F16Acc tiles accumulate loss with
+# mask_gemm under matching compute_dtype. F16Acc tiles accumulate loss with
 # C_in, hence the looser bound.
 # ---------------------------------------------------------------------------
 _RTOL_F32ACC_FP32 = 5e-3
@@ -130,11 +130,11 @@ def _skip_if_unsupported(tile_id: int, C_in: int, C_out: int, K: int, dtype: tor
 
 
 # ---------------------------------------------------------------------------
-# Forward — every entry in _AB_PRODUCTION
+# Forward — every entry in _AB_MASK_GEMM
 # ---------------------------------------------------------------------------
 
 # Flatten (tile_id, split_k_or_none) to canonical parametrize ids.
-_FWD_PARAMS = [(e[1]["tile_id"], e[1].get("split_k")) for e in _AB_PRODUCTION]
+_FWD_PARAMS = [(e[1]["tile_id"], e[1].get("split_k")) for e in _AB_MASK_GEMM]
 
 
 @pytest.mark.parametrize("tile_id,split_k", _FWD_PARAMS, ids=[f"tile{t[0]}" for t in _FWD_PARAMS])
@@ -144,8 +144,8 @@ _FWD_PARAMS = [(e[1]["tile_id"], e[1].get("split_k")) for e in _AB_PRODUCTION]
     ids=["32_32", "64_64", "64_128", "128_64", "128_128"],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"])
-def test_production_fwd_all_tiles(tile_id, split_k, C_in, C_out, dtype):
-    """Every production fwd tile must match explicit_gemm on aligned symmetric shapes."""
+def test_mask_gemm_fwd_all_tiles(tile_id, split_k, C_in, C_out, dtype):
+    """Every mask_gemm fwd tile must match explicit_gemm on aligned symmetric shapes."""
     kernel_size = (3, 3, 3)
     K = 27
     _skip_if_unsupported(tile_id, C_in, C_out, K, dtype)
@@ -161,7 +161,7 @@ def test_production_fwd_all_tiles(tile_id, split_k, C_in, C_out, dtype):
 
     try:
         out_prod = _execute_forward(
-            "production", params, in_feats, weight, kmap, num_out, dtype, None
+            "mask_gemm", params, in_feats, weight, kmap, num_out, dtype, None
         )
     except RuntimeError as e:
         if "kErrorUnsupportedConfig" in str(e) or "Unsupported" in str(e):
@@ -176,11 +176,11 @@ def test_production_fwd_all_tiles(tile_id, split_k, C_in, C_out, dtype):
 
 
 # ---------------------------------------------------------------------------
-# Dgrad via fwd kernel (production_fwd_as_dgrad) — every _wt tile 83-94.
+# Dgrad via fwd kernel (mask_gemm_fwd_as_dgrad) — every _wt tile 83-94.
 # These are the tiles that silently computed wrong gradients before b6782be6.
 # ---------------------------------------------------------------------------
 
-_WT_PARAMS = [e[1]["tile_id"] for e in _AB_PRODUCTION_FWD_AS_DGRAD]
+_WT_PARAMS = [e[1]["tile_id"] for e in _AB_MASK_GEMM_FWD_AS_DGRAD]
 
 
 @pytest.mark.parametrize("tile_id", _WT_PARAMS, ids=[f"wt{t}" for t in _WT_PARAMS])
@@ -190,7 +190,7 @@ _WT_PARAMS = [e[1]["tile_id"] for e in _AB_PRODUCTION_FWD_AS_DGRAD]
     ids=["32_32", "64_64", "96_96", "128_128"],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"])
-def test_production_dgrad_fwd_as_dgrad_tiles(tile_id, C_in, C_out, dtype):
+def test_mask_gemm_dgrad_fwd_as_dgrad_tiles(tile_id, C_in, C_out, dtype):
     """Every fwd_as_dgrad _wt tile must produce dgrad matching explicit_gemm."""
     kernel_size = (3, 3, 3)
     K = 27
@@ -208,7 +208,7 @@ def test_production_dgrad_fwd_as_dgrad_tiles(tile_id, C_in, C_out, dtype):
 
     try:
         grad_in_prod, _ = _execute_backward(
-            "production_fwd_as_dgrad",
+            "mask_gemm_fwd_as_dgrad",
             {"tile_id": tile_id},
             grad_out,
             in_feats,
@@ -236,12 +236,12 @@ def test_production_dgrad_fwd_as_dgrad_tiles(tile_id, C_in, C_out, dtype):
 
 
 # ---------------------------------------------------------------------------
-# Dgrad native (production algo). Dispatch picks tile 50/51/52/53/54 based on
+# Dgrad native (mask_gemm algo). Dispatch picks tile 50/51/52/53/54 based on
 # C_out_g and compute_dtype. Exercise each tile via a targeted shape.
 # ---------------------------------------------------------------------------
 
 # (C_in, C_out, dtype, expected_tile_bucket) — descriptive only; the dispatch
-# actually chooses the tile internally. We run all shapes under production algo
+# actually chooses the tile internally. We run all shapes under mask_gemm algo
 # and assert correctness; which internal tile fires is covered by code review +
 # dispatch.py tile-selection matrix.
 _NATIVE_DGRAD_SHAPES = [
@@ -261,8 +261,8 @@ _NATIVE_DGRAD_SHAPES = [
     _NATIVE_DGRAD_SHAPES,
     ids=[f"{ci}x{co}_{str(d).split('.')[-1]}" for ci, co, d in _NATIVE_DGRAD_SHAPES],
 )
-def test_production_dgrad_native_by_C(C_in, C_out, dtype):
-    """Native production dgrad path across C ranges that select different tiles."""
+def test_mask_gemm_dgrad_native_by_C(C_in, C_out, dtype):
+    """Native mask_gemm dgrad path across C ranges that select different tiles."""
     kernel_size = (3, 3, 3)
     voxels = _make_voxels(C_in=C_in, seed=3)
     weight = torch.randn(27, C_in, C_out, device="cuda", dtype=dtype)
@@ -273,7 +273,7 @@ def test_production_dgrad_native_by_C(C_in, C_out, dtype):
     grad_out = torch.randn(num_out, C_out, device="cuda", dtype=dtype)
 
     grad_in_prod, _ = _execute_backward(
-        "production",
+        "mask_gemm",
         {},  # native dgrad picks tile inside dispatch, no tile_id needed
         grad_out,
         in_feats,
@@ -294,10 +294,10 @@ def test_production_dgrad_native_by_C(C_in, C_out, dtype):
 
 
 # ---------------------------------------------------------------------------
-# Wgrad — every (tile_id, split_k) in _ATB_PRODUCTION.
+# Wgrad — every (tile_id, split_k) in _ATB_MASK_GEMM.
 # ---------------------------------------------------------------------------
 
-_WGRAD_PARAMS = [(e[1]["tile_id"], e[1]["split_k"]) for e in _ATB_PRODUCTION]
+_WGRAD_PARAMS = [(e[1]["tile_id"], e[1]["split_k"]) for e in _ATB_MASK_GEMM]
 
 
 @pytest.mark.parametrize(
@@ -309,7 +309,7 @@ _WGRAD_PARAMS = [(e[1]["tile_id"], e[1]["split_k"]) for e in _ATB_PRODUCTION]
     ids=["32_32", "64_64", "96_96", "128_128"],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"])
-def test_production_wgrad_all_tiles(tile_id, split_k, C_in, C_out, dtype):
+def test_mask_gemm_wgrad_all_tiles(tile_id, split_k, C_in, C_out, dtype):
     """Every wgrad tile x split_k must produce grad_weight matching explicit_gemm."""
     kernel_size = (3, 3, 3)
     K = 27
@@ -325,7 +325,7 @@ def test_production_wgrad_all_tiles(tile_id, split_k, C_in, C_out, dtype):
 
     try:
         _, grad_w_prod = _execute_backward(
-            "production",
+            "mask_gemm",
             {"tile_id": tile_id, "split_k": split_k},
             grad_out,
             in_feats,
@@ -385,7 +385,7 @@ def test_regression_fwd_as_dgrad_symmetric_fp16(C):
     _skip_if_unsupported(WT_TILE_TO_FWD_TILE[tile_id], C, C, K, dtype)
 
     grad_in_prod, _ = _execute_backward(
-        "production_fwd_as_dgrad",
+        "mask_gemm_fwd_as_dgrad",
         {"tile_id": tile_id},
         grad_out,
         in_feats,

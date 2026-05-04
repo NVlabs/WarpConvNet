@@ -1,10 +1,12 @@
 #!/usr/bin/env python
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """
-Test production kernel numerical precision for fp32 inputs.
+Test mask_gemm kernel numerical precision for fp32 inputs.
 
-BUG: production_fwd outputs ALL ZEROS when called with fp32 inputs.
+BUG: mask_gemm_fwd outputs ALL ZEROS when called with fp32 inputs.
 
-Root cause (production_bindings.cu line 222):
+Root cause (mask_gemm_bindings.cu line 222):
     output = output.to(torch::kFloat16);
 
 This creates a NEW fp16 tensor instead of converting in-place. The CUDA
@@ -22,11 +24,11 @@ FIX: Either:
 
 HOW TO RUN:
     source .venv/bin/activate
-    python tests/csrc/test_production_fp32_precision.py
+    python tests/csrc/test_mask_gemm_fp32_precision.py
 
 EXPECTED OUTPUT:
-    fp32 input: production outputs ALL ZEROS (the bug)
-    fp16 input: production matches reference (no bug)
+    fp32 input: mask_gemm outputs ALL ZEROS (the bug)
+    fp16 input: mask_gemm matches reference (no bug)
 """
 
 import sys
@@ -34,8 +36,8 @@ import sys
 import torch
 
 
-def test_production_fp32_precision():
-    """Compare production (fp16 compute) vs explicit_gemm (fp32 compute)."""
+def test_mask_gemm_fp32_precision():
+    """Compare mask_gemm (fp16 compute) vs explicit_gemm (fp32 compute)."""
     import warpconvnet._C as _C
     from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import _get_mask_data
     from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
@@ -75,7 +77,7 @@ def test_production_fp32_precision():
 
         # Production: internally downcasts to fp16
         out_prod = torch.zeros(N, C_out, dtype=torch.float32, device="cuda")
-        status = _C.production.fwd(f, w, out_prod, pt, pm, ms, K, tile, 1.0)
+        status = _C.mask_gemm.fwd(f, w, out_prod, pt, pm, ms, K, tile, 1.0)
 
         # Reference: explicit_gemm in fp32
         out_ref = _explicit_gemm_forward_logic(f, w, kmap, N, torch.float32)
@@ -94,13 +96,13 @@ def test_production_fp32_precision():
         )
 
     print()
-    print("NOTE: Large diffs (>1.0) are expected — production uses fp16 compute")
+    print("NOTE: Large diffs (>1.0) are expected — mask_gemm uses fp16 compute")
     print("      while explicit_gemm uses fp32. This is the same as SpConv under AMP.")
-    print("      For pure fp32 workloads, production should NOT be selected.")
+    print("      For pure fp32 workloads, mask_gemm should NOT be selected.")
 
 
-def test_production_fp16_precision():
-    """Compare production (fp16) vs explicit_gemm (fp16) — should be close."""
+def test_mask_gemm_fp16_precision():
+    """Compare mask_gemm (fp16) vs explicit_gemm (fp16) — should be close."""
     import warpconvnet._C as _C
     from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import _get_mask_data
     from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
@@ -137,7 +139,7 @@ def test_production_fp16_precision():
 
         # Production: native fp16
         out_prod = torch.zeros(N, C_out, dtype=torch.float16, device="cuda")
-        _C.production.fwd(f, w, out_prod, pt, pm, ms, K, tile, 1.0)
+        _C.mask_gemm.fwd(f, w, out_prod, pt, pm, ms, K, tile, 1.0)
 
         # Reference: explicit_gemm in fp16
         out_ref = _explicit_gemm_forward_logic(f, w, kmap, N, torch.float16)
@@ -153,5 +155,5 @@ def test_production_fp16_precision():
 
 
 if __name__ == "__main__":
-    test_production_fp32_precision()
-    test_production_fp16_precision()
+    test_mask_gemm_fp32_precision()
+    test_mask_gemm_fp16_precision()

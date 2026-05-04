@@ -96,9 +96,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
         def _to_algo_str_list(
             x: Union[str, List[Union[str, Enum]], Enum],
         ) -> Union[str, List[str]]:
+            def _canonical_algo(a: Union[str, Enum]) -> str:
+                return a.value if isinstance(a, Enum) else str(a)
+
             if isinstance(x, list):
-                return [a.value if isinstance(a, Enum) else str(a) for a in x]
-            return x.value if isinstance(x, Enum) else str(x)
+                return [_canonical_algo(a) for a in x]
+            return _canonical_algo(x)
 
         fwd_algo = _to_algo_str_list(fwd_algo)
         dgrad_algo = _to_algo_str_list(dgrad_algo)
@@ -391,11 +394,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
         )
 
         def _normalize_algo(algo):
+            def _canonical_algo(a):
+                return str(a.value) if isinstance(a, Enum) else str(a)
+
             if isinstance(algo, list):
-                return [str(a.value) if isinstance(a, Enum) else str(a) for a in algo]
-            if isinstance(algo, Enum):
-                return str(algo.value)
-            return str(algo)
+                return [_canonical_algo(a) for a in algo]
+            return _canonical_algo(algo)
 
         dgrad_filter = _normalize_algo(initial_dgrad_algo)
         wgrad_filter = _normalize_algo(initial_wgrad_algo)
@@ -421,13 +425,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose).
         # F32Acc always included; F16Acc added when use_fp16_accum=True.
         from .algo_params import (
-            _AB_PRODUCTION_FWD_AS_DGRAD_F16ACC,
-            _AB_PRODUCTION_FWD_AS_DGRAD_F32ACC,
+            _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC,
+            _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC,
         )
 
-        dgrad_adaptive = list(dgrad_adaptive) + list(_AB_PRODUCTION_FWD_AS_DGRAD_F32ACC)
+        dgrad_adaptive = list(dgrad_adaptive) + list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
         if use_fp16_accum:
-            dgrad_adaptive += list(_AB_PRODUCTION_FWD_AS_DGRAD_F16ACC)
+            dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
         if wgrad_filter == "trimmed":
             wgrad_adaptive = _get_trimmed_AtB_params(
                 C_in_bwd,

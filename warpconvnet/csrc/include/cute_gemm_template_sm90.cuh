@@ -6,7 +6,7 @@
 // dependencies (launch_cute_gemm_sm90_ad_gather_scatter, create_tma_desc_B).
 // Included by warpconvnet/csrc/cutlass_cute_gemm_sm90.cu (existing
 // instantiations) and by warpgemm-generated offset_gemm TUs that invoke
-// INSTANTIATE_SM90_AD_GS for the production tier.
+// INSTANTIATE_SM90_AD_GS for the stable tier.
 
 #pragma once
 

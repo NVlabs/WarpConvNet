@@ -46,7 +46,7 @@ def _build_pair_table(
 def _dispatched_mask_words(K: int) -> int:
     """Round mask_words up to the next DISPATCH_MW template boundary.
 
-    production_bindings.cu's DISPATCH_MW macro picks templates at MW=1, 2,
+    mask_gemm_bindings.cu's DISPATCH_MW macro picks templates at MW=1, 2,
     4, 8, 12. Kernel templates use their compile-time MW as the stride
     when indexing ``pair_mask[row * MW + word]``. If the caller allocates
     pair_mask with a smaller stride than the dispatched MW, the kernel

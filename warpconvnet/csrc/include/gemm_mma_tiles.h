@@ -166,7 +166,7 @@ enum class ProdDgradTile : int {
   _64x64x32_f32out = 81,
   // fwd-kernel-reused-as-dgrad (weight pre-transposed by caller). These are
   // descriptive labels for autotune cache and logs; dispatch translates them
-  // to the underlying ProdFwdTile id before invoking launch_production_fwd.
+  // to the underlying ProdFwdTile id before invoking launch_mask_gemm_fwd.
   // See WT_TILE_TO_FWD_TILE in algo_params.py.
   _64x64x32_wt = 83,                     // -> ProdFwdTile::_64x64x32 (41)
   _64x128x32_3s_wt = 84,                 // -> ProdFwdTile::_64x128x32_3s (43)

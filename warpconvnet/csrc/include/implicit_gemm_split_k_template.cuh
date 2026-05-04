@@ -16,7 +16,7 @@
 // Template body header for run_split_k_implicit_gemm_templated. Included by
 // warpconvnet/csrc/implicit_gemm_split_k.cu (existing instantiations) and by
 // warpgemm-generated offset_gemm TUs that invoke INSTANTIATE_IMPLICIT_GEMM_SPLIT_K
-// for the production tier.
+// for the stable tier.
 
 #pragma once
 

@@ -84,7 +84,7 @@ def candidate_tiles(
     groups: int = 1,
     input_dtype: str = "f16",
     output_dtype: str = "f16",
-    tier: str = "production",
+    tier: str = "stable",
     acc_dtype: str | None = None,
 ) -> list:
     """Return tiles that will accept the runtime shape (correctness gate).
@@ -168,7 +168,7 @@ def explain(
 
     survivors = []
     for t in tiles:
-        if t.tier != "production":
+        if t.tier != "stable":
             out.append(f"  reject tile {t.tile_id:>3}: tier={t.tier}")
             continue
         if not t.supports_mask_words(mw_needed):

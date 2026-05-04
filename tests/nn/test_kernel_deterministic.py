@@ -567,11 +567,11 @@ class TestCuteGroupedSM90Fp16:
 
 
 @pytest.mark.skipif(
-    not hasattr(_C, "production"),
-    reason="production (mask) kernels not compiled",
+    not hasattr(_C, "mask_gemm"),
+    reason="mask_gemm (mask) kernels not compiled",
 )
 class TestMaskProductionFp16:
-    """Mask-fused production kernels via the dispatch wrapper.
+    """Mask-fused mask_gemm kernels via the dispatch wrapper.
 
     The wrapper picks a tile based on channel alignment + mask_words and
     handles fp32 ↔ fp16 casting. Test runs against fp16 inputs (the native
@@ -582,7 +582,7 @@ class TestMaskProductionFp16:
     def test_forward(self, problem):
         d = problem
         out = _execute_forward(
-            algo="production",
+            algo="mask_gemm",
             params={"tile_id": 41},
             in_features=d["in_feats_32"].half(),
             weight=d["weight_32"].half(),
@@ -591,12 +591,12 @@ class TestMaskProductionFp16:
             compute_dtype=torch.float16,
             fwd_block_size=None,
         )
-        _assert_close("production fwd", out, d["fwd_ref_64"], FP16_RTOL, FP16_ATOL)
+        _assert_close("mask_gemm fwd", out, d["fwd_ref_64"], FP16_RTOL, FP16_ATOL)
 
     def test_backward(self, problem):
         d = problem
         gi, gw = _execute_backward(
-            algo="production",
+            algo="mask_gemm",
             params={"tile_id": 60, "split_k": 64},
             grad_output=d["grad_out_32"].half(),
             in_features=d["in_feats_32"].half(),
@@ -607,8 +607,8 @@ class TestMaskProductionFp16:
             device=DEVICE,
             needs_input_grad=(True, True),
         )
-        _assert_close("production dgrad", gi, d["gi_ref_64"], FP16_RTOL, FP16_ATOL)
-        _assert_close("production wgrad", gw, d["gw_ref_64"], FP16_RTOL, FP16_ATOL)
+        _assert_close("mask_gemm dgrad", gi, d["gi_ref_64"], FP16_RTOL, FP16_ATOL)
+        _assert_close("mask_gemm wgrad", gw, d["gw_ref_64"], FP16_RTOL, FP16_ATOL)
 
 
 # ----------------------------------------------------------------------------
@@ -663,13 +663,13 @@ class TestLargeN:
         _assert_close("cute_fp16 fwd large", out, d["fwd_ref_64"], FP16_RTOL, FP16_ATOL)
 
     @pytest.mark.skipif(
-        not hasattr(_C, "production"),
-        reason="production (mask) kernels not compiled",
+        not hasattr(_C, "mask_gemm"),
+        reason="mask_gemm (mask) kernels not compiled",
     )
-    def test_production_fp16(self, large_problem):
+    def test_mask_gemm_fp16(self, large_problem):
         d = large_problem
         out = _execute_forward(
-            algo="production",
+            algo="mask_gemm",
             params={"tile_id": 41},
             in_features=d["in_feats_32"].half(),
             weight=d["weight_32"].half(),
@@ -678,4 +678,4 @@ class TestLargeN:
             compute_dtype=torch.float16,
             fwd_block_size=None,
         )
-        _assert_close("production fwd large", out, d["fwd_ref_64"], FP16_RTOL, FP16_ATOL)
+        _assert_close("mask_gemm fwd large", out, d["fwd_ref_64"], FP16_RTOL, FP16_ATOL)

@@ -3,7 +3,7 @@
 WarpConvNet benchmarks sparse convolution algorithms at runtime and caches the results for fast reuse across sessions. Two scripts are available:
 
 - `scripts/inspect_benchmark_cache.py` -- Pretty-prints cached results per configuration
-- `scripts/analyze_autotune_cache.py` -- Statistical analysis of algorithm win rates, margins, and coverage
+- `scripts/analyze_benchmark_cache.py` -- Statistical analysis of algorithm win rates, margins, and coverage
 
 ### What the cache contains
 
@@ -150,7 +150,7 @@ Results:
 For aggregate analysis across all cached configs (win rates, margins, per-channel breakdowns), use:
 
 ```bash
-python scripts/analyze_autotune_cache.py --markdown --output analysis.md
+python scripts/analyze_benchmark_cache.py --markdown --output analysis.md
 ```
 
 This generates:

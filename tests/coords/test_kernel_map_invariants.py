@@ -12,7 +12,7 @@ pair (in_maps[k][i], out_maps[k][i]):
 
 and conversely every valid (input, output, k) triple satisfying (*) must
 appear exactly once in the map. These tests verify (*) directly at 500K+
-voxels — the scale where a stride-2 bug we see in the production fwd test
+voxels — the scale where a stride-2 bug we see in the mask_gemm fwd test
 would actually bite training.
 
 Also verifies PackedHashTable behavior at large N: insert→search round-trips,

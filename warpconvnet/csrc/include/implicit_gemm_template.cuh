@@ -16,7 +16,7 @@
 // Template body header for run_implicit_gemm[_grouped]_templated. Included by
 // warpconvnet/csrc/implicit_gemm.cu (existing instantiations) and by
 // warpgemm-generated offset_gemm TUs that invoke INSTANTIATE_IMPLICIT_GEMM[_GROUPED]
-// for the production tier.
+// for the stable tier.
 
 #pragma once
 

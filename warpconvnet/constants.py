@@ -106,7 +106,7 @@ VALID_ALGOS = [
     "implicit_gemm_grouped",
     "cutlass_grouped_hybrid",
     "cute_grouped",
-    "production",
+    "mask_gemm",
     "auto",
     "all",
     "trimmed",
@@ -121,7 +121,7 @@ VALID_ALGOS = [
 #
 # Single algorithm examples:
 #   export WARPCONVNET_FWD_ALGO_MODE=implicit_gemm
-#   export WARPCONVNET_DGRAD_ALGO_MODE=production
+#   export WARPCONVNET_DGRAD_ALGO_MODE=mask_gemm
 #   export WARPCONVNET_WGRAD_ALGO_MODE=cutlass_implicit_gemm
 #   export WARPCONVNET_FWD_ALGO_MODE=auto  # (default) benchmark reduced candidate set
 #   export WARPCONVNET_FWD_ALGO_MODE=all   # benchmark ALL candidates (slow, exhaustive)
@@ -175,7 +175,7 @@ WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE = os.environ.get(
 # Set WARPCONVNET_AUTOTUNE_LOG=false (or 0) to suppress auto-tuning logs.
 WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
 
-# Accumulator precision for production mask GEMM kernels.
+# Accumulator precision for mask_gemm kernels.
 # When True, autotune prefers F16Accum tiles (2x tensor core throughput, lower precision).
 # When False (default), fp32 accumulator tiles are used for training stability.
 # Can be set via environment variable or at runtime via set_fp16_accum().

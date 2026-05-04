@@ -347,11 +347,11 @@ def _run_forward_benchmarks(
             )
             if isinstance(status, int) and status != 0:
                 return status
-        elif algo_mode == "production":
+        elif algo_mode == "mask_gemm":
             from .dispatch import _execute_forward
 
             result = _execute_forward(
-                "production",
+                algo_mode,
                 params_config,
                 in_features,
                 weight,
@@ -622,7 +622,7 @@ def _run_backward_benchmarks(
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]
-        elif algo_mode in ("production", "production_fwd_as_dgrad"):
+        elif algo_mode in ("mask_gemm", "mask_gemm_fwd_as_dgrad"):
             from .dispatch import _execute_backward
 
             _ = _execute_backward(

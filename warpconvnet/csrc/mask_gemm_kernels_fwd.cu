@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Forward kernel instantiations split out of production_mask_kernels.cu so
+// Forward kernel instantiations split out of mask_gemm_kernels.cu so
 // nvcc compiles each op (fwd / dgrad / wgrad) in its own translation unit.
 
-#include "production_mask_kernels_common.h"
+#include "mask_gemm_kernels_common.h"
 
 // Forward kernels
 #include "mask_gemm/include/MaskGemm_forward_128x64x32_2s_fused.h"
@@ -138,21 +138,21 @@ WCN_PROD_INSTANTIATE_FWD(MaskGemm_forward_64x128x32_2s_warp_spec_pcoff,  // tile
 // to avoid conflict with existing (half_t, Tile64x64x32, float) instantiation.
 #define INST_FWD_F32OUT(ElemIn)                                                 \
   template <>                                                                   \
-  int launch_production_fwd_f32out<ElemIn>(const void *a,                       \
-                                           const void *b,                       \
-                                           void *d,                             \
-                                           const int *pt,                       \
-                                           const uint32_t *pm,                  \
-                                           const int *ms,                       \
-                                           int N_in,                            \
-                                           int N_out,                           \
-                                           int C_in,                            \
-                                           int C_out,                           \
-                                           int K,                               \
-                                           float alpha,                         \
-                                           int groups,                          \
-                                           int identity_offset,                 \
-                                           cudaStream_t stream) {               \
+  int launch_mask_gemm_fwd_f32out<ElemIn>(const void *a,                        \
+                                          const void *b,                        \
+                                          void *d,                              \
+                                          const int *pt,                        \
+                                          const uint32_t *pm,                   \
+                                          const int *ms,                        \
+                                          int N_in,                             \
+                                          int N_out,                            \
+                                          int C_in,                             \
+                                          int C_out,                            \
+                                          int K,                                \
+                                          float alpha,                          \
+                                          int groups,                           \
+                                          int identity_offset,                  \
+                                          cudaStream_t stream) {                \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, float>;            \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
@@ -163,11 +163,11 @@ WCN_PROD_INSTANTIATE_FWD(MaskGemm_forward_64x128x32_2s_warp_spec_pcoff,  // tile
     dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
-      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+      if (cudaFuncSetAttribute(mask_gemm_kernel_entry<Kernel>,                  \
                                cudaFuncAttributeMaxDynamicSharedMemorySize,     \
                                smem) != cudaSuccess)                            \
         return -1;                                                              \
-    production_mask_kernel_entry<Kernel>                                        \
+    mask_gemm_kernel_entry<Kernel>                                              \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
                                                              (const ElemIn *)b, \
                                                              (float *)d,        \
@@ -193,21 +193,21 @@ INST_FWD_F32OUT(cutlass::bfloat16_t)
 // Forward: scalar B + fp32 output (unaligned C + non-AMP)
 #define INST_FWD_F32OUT_SB(ElemIn)                                              \
   template <>                                                                   \
-  int launch_production_fwd_f32out_sb<ElemIn>(const void *a,                    \
-                                              const void *b,                    \
-                                              void *d,                          \
-                                              const int *pt,                    \
-                                              const uint32_t *pm,               \
-                                              const int *ms,                    \
-                                              int N_in,                         \
-                                              int N_out,                        \
-                                              int C_in,                         \
-                                              int C_out,                        \
-                                              int K,                            \
-                                              float alpha,                      \
-                                              int groups,                       \
-                                              int identity_offset,              \
-                                              cudaStream_t stream) {            \
+  int launch_mask_gemm_fwd_f32out_sb<ElemIn>(const void *a,                     \
+                                             const void *b,                     \
+                                             void *d,                           \
+                                             const int *pt,                     \
+                                             const uint32_t *pm,                \
+                                             const int *ms,                     \
+                                             int N_in,                          \
+                                             int N_out,                         \
+                                             int C_in,                          \
+                                             int C_out,                         \
+                                             int K,                             \
+                                             float alpha,                       \
+                                             int groups,                        \
+                                             int identity_offset,               \
+                                             cudaStream_t stream) {             \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat_direpi_sb<Config, float>;  \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
@@ -218,11 +218,11 @@ INST_FWD_F32OUT(cutlass::bfloat16_t)
     dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
-      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+      if (cudaFuncSetAttribute(mask_gemm_kernel_entry<Kernel>,                  \
                                cudaFuncAttributeMaxDynamicSharedMemorySize,     \
                                smem) != cudaSuccess)                            \
         return -1;                                                              \
-    production_mask_kernel_entry<Kernel>                                        \
+    mask_gemm_kernel_entry<Kernel>                                              \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
                                                              (const ElemIn *)b, \
                                                              (float *)d,        \
@@ -252,21 +252,21 @@ INST_FWD_F32OUT_SB(cutlass::bfloat16_t)
 
 #define INST_FWD_MW(ElemIn, MW)                                                 \
   template <>                                                                   \
-  int launch_production_fwd_mw<ElemIn, MW>(const void *a,                       \
-                                           const void *b,                       \
-                                           void *d,                             \
-                                           const int *pt,                       \
-                                           const uint32_t *pm,                  \
-                                           const int *ms,                       \
-                                           int N_in,                            \
-                                           int N_out,                           \
-                                           int C_in,                            \
-                                           int C_out,                           \
-                                           int K,                               \
-                                           float alpha,                         \
-                                           int groups,                          \
-                                           int identity_offset,                 \
-                                           cudaStream_t stream) {               \
+  int launch_mask_gemm_fwd_mw<ElemIn, MW>(const void *a,                        \
+                                          const void *b,                        \
+                                          void *d,                              \
+                                          const int *pt,                        \
+                                          const uint32_t *pm,                   \
+                                          const int *ms,                        \
+                                          int N_in,                             \
+                                          int N_out,                            \
+                                          int C_in,                             \
+                                          int C_out,                            \
+                                          int K,                                \
+                                          float alpha,                          \
+                                          int groups,                           \
+                                          int identity_offset,                  \
+                                          cudaStream_t stream) {                \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, ElemIn, MW>;       \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
@@ -277,11 +277,11 @@ INST_FWD_F32OUT_SB(cutlass::bfloat16_t)
     dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
-      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+      if (cudaFuncSetAttribute(mask_gemm_kernel_entry<Kernel>,                  \
                                cudaFuncAttributeMaxDynamicSharedMemorySize,     \
                                smem) != cudaSuccess)                            \
         return -1;                                                              \
-    production_mask_kernel_entry<Kernel>                                        \
+    mask_gemm_kernel_entry<Kernel>                                              \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
                                                              (const ElemIn *)b, \
                                                              (ElemIn *)d,       \
@@ -316,21 +316,21 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
 
 #define INST_FWD_F32OUT_MW(ElemIn, MW)                                          \
   template <>                                                                   \
-  int launch_production_fwd_f32out_mw<ElemIn, MW>(const void *a,                \
-                                                  const void *b,                \
-                                                  void *d,                      \
-                                                  const int *pt,                \
-                                                  const uint32_t *pm,           \
-                                                  const int *ms,                \
-                                                  int N_in,                     \
-                                                  int N_out,                    \
-                                                  int C_in,                     \
-                                                  int C_out,                    \
-                                                  int K,                        \
-                                                  float alpha,                  \
-                                                  int groups,                   \
-                                                  int identity_offset,          \
-                                                  cudaStream_t stream) {        \
+  int launch_mask_gemm_fwd_f32out_mw<ElemIn, MW>(const void *a,                 \
+                                                 const void *b,                 \
+                                                 void *d,                       \
+                                                 const int *pt,                 \
+                                                 const uint32_t *pm,            \
+                                                 const int *ms,                 \
+                                                 int N_in,                      \
+                                                 int N_out,                     \
+                                                 int C_in,                      \
+                                                 int C_out,                     \
+                                                 int K,                         \
+                                                 float alpha,                   \
+                                                 int groups,                    \
+                                                 int identity_offset,           \
+                                                 cudaStream_t stream) {         \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                  \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat<Config, float, MW>;        \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});          \
@@ -341,11 +341,11 @@ INST_FWD_MW(cutlass::bfloat16_t, 12)
     dim3 grid(m_tiles *n_tiles, 1, groups);                                     \
     size_t smem = Kernel::SharedStorageSize;                                    \
     if (smem > 48 * 1024)                                                       \
-      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,            \
+      if (cudaFuncSetAttribute(mask_gemm_kernel_entry<Kernel>,                  \
                                cudaFuncAttributeMaxDynamicSharedMemorySize,     \
                                smem) != cudaSuccess)                            \
         return -1;                                                              \
-    production_mask_kernel_entry<Kernel>                                        \
+    mask_gemm_kernel_entry<Kernel>                                              \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a, \
                                                              (const ElemIn *)b, \
                                                              (float *)d,        \
@@ -376,21 +376,21 @@ INST_FWD_F32OUT_MW(cutlass::bfloat16_t, 12)
 
 #define INST_FWD_F32OUT_SB_MW(ElemIn, MW)                                          \
   template <>                                                                      \
-  int launch_production_fwd_f32out_sb_mw<ElemIn, MW>(const void *a,                \
-                                                     const void *b,                \
-                                                     void *d,                      \
-                                                     const int *pt,                \
-                                                     const uint32_t *pm,           \
-                                                     const int *ms,                \
-                                                     int N_in,                     \
-                                                     int N_out,                    \
-                                                     int C_in,                     \
-                                                     int C_out,                    \
-                                                     int K,                        \
-                                                     float alpha,                  \
-                                                     int groups,                   \
-                                                     int identity_offset,          \
-                                                     cudaStream_t stream) {        \
+  int launch_mask_gemm_fwd_f32out_sb_mw<ElemIn, MW>(const void *a,                 \
+                                                    const void *b,                 \
+                                                    void *d,                       \
+                                                    const int *pt,                 \
+                                                    const uint32_t *pm,            \
+                                                    const int *ms,                 \
+                                                    int N_in,                      \
+                                                    int N_out,                     \
+                                                    int C_in,                      \
+                                                    int C_out,                     \
+                                                    int K,                         \
+                                                    float alpha,                   \
+                                                    int groups,                    \
+                                                    int identity_offset,           \
+                                                    cudaStream_t stream) {         \
     using Config = CuteTileConfig<ElemIn, gemm::Tile64x64x32>;                     \
     using Kernel = MaskGemm_forward_64x64x32_1s_flat_direpi_sb<Config, float, MW>; \
     constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
@@ -401,11 +401,11 @@ INST_FWD_F32OUT_MW(cutlass::bfloat16_t, 12)
     dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
     size_t smem = Kernel::SharedStorageSize;                                       \
     if (smem > 48 * 1024)                                                          \
-      if (cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,               \
+      if (cudaFuncSetAttribute(mask_gemm_kernel_entry<Kernel>,                     \
                                cudaFuncAttributeMaxDynamicSharedMemorySize,        \
                                smem) != cudaSuccess)                               \
         return -1;                                                                 \
-    production_mask_kernel_entry<Kernel>                                           \
+    mask_gemm_kernel_entry<Kernel>                                                 \
         <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
                                                              (const ElemIn *)b,    \
                                                              (float *)d,           \
@@ -441,56 +441,55 @@ INST_FWD_F32OUT_SB_MW(cutlass::bfloat16_t, 12)
 // =============================================================================
 
 // Tile 42: 64x128 F16Accum fused (half-only)
-#define INST_FWD_64x128_F16ACC_MW(MW)                                              \
-  template <>                                                                      \
-  int launch_production_fwd_64x128_f16acc_mw<MW>(const void *a,                    \
-                                                 const void *b,                    \
-                                                 void *d,                          \
-                                                 const int *pt,                    \
-                                                 const uint32_t *pm,               \
-                                                 const int *ms,                    \
-                                                 int N_in,                         \
-                                                 int N_out,                        \
-                                                 int C_in,                         \
-                                                 int C_out,                        \
-                                                 int K,                            \
-                                                 float alpha,                      \
-                                                 int groups,                       \
-                                                 int identity_offset,              \
-                                                 cudaStream_t stream) {            \
-    using ElemIn = cutlass::half_t;                                                \
-    using Config = CuteTileConfig<ElemIn, gemm::Tile64x128x32_F16Accum>;           \
-    using Kernel = MaskGemm_forward_64x128x32_2s_fused<Config, ElemIn, MW>;        \
-    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
-    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
-    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
-    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
-    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
-    size_t smem = Kernel::SharedStorageSize;                                       \
-    if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
-                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
-                                      smem);                                       \
-      if (err != cudaSuccess) return -1;                                           \
-    }                                                                              \
-    production_mask_kernel_entry<Kernel>                                           \
-        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
-                                                             (const ElemIn *)b,    \
-                                                             (ElemIn *)d,          \
-                                                             pt,                   \
-                                                             pm,                   \
-                                                             ms,                   \
-                                                             N_in,                 \
-                                                             N_out,                \
-                                                             C_in,                 \
-                                                             C_out,                \
-                                                             K,                    \
-                                                             alpha,                \
-                                                             C_in * groups,        \
-                                                             C_out * groups,       \
-                                                             identity_offset);     \
-    return 0;                                                                      \
+#define INST_FWD_64x128_F16ACC_MW(MW)                                                         \
+  template <>                                                                                 \
+  int launch_mask_gemm_fwd_64x128_f16acc_mw<MW>(const void *a,                                \
+                                                const void *b,                                \
+                                                void *d,                                      \
+                                                const int *pt,                                \
+                                                const uint32_t *pm,                           \
+                                                const int *ms,                                \
+                                                int N_in,                                     \
+                                                int N_out,                                    \
+                                                int C_in,                                     \
+                                                int C_out,                                    \
+                                                int K,                                        \
+                                                float alpha,                                  \
+                                                int groups,                                   \
+                                                int identity_offset,                          \
+                                                cudaStream_t stream) {                        \
+    using ElemIn = cutlass::half_t;                                                           \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x128x32_F16Accum>;                      \
+    using Kernel = MaskGemm_forward_64x128x32_2s_fused<Config, ElemIn, MW>;                   \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});                        \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});                        \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                                      \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                                \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                                   \
+    size_t smem = Kernel::SharedStorageSize;                                                  \
+    if (smem > 48 * 1024) {                                                                   \
+      auto err = cudaFuncSetAttribute(                                                        \
+          mask_gemm_kernel_entry<Kernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
+      if (err != cudaSuccess) return -1;                                                      \
+    }                                                                                         \
+    mask_gemm_kernel_entry<Kernel>                                                            \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,               \
+                                                             (const ElemIn *)b,               \
+                                                             (ElemIn *)d,                     \
+                                                             pt,                              \
+                                                             pm,                              \
+                                                             ms,                              \
+                                                             N_in,                            \
+                                                             N_out,                           \
+                                                             C_in,                            \
+                                                             C_out,                           \
+                                                             K,                               \
+                                                             alpha,                           \
+                                                             C_in * groups,                   \
+                                                             C_out * groups,                  \
+                                                             identity_offset);                \
+    return 0;                                                                                 \
   }
 
 INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC_MW(8)
@@ -498,55 +497,54 @@ INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC
 #undef INST_FWD_64x128_F16ACC_MW
 
 // Tile 43: 64x128 3-stage (half + bfloat16)
-#define INST_FWD_64x128_3S_MW(ElemIn, MW)                                          \
-  template <>                                                                      \
-  int launch_production_fwd_64x128_3s_mw<ElemIn, MW>(const void *a,                \
-                                                     const void *b,                \
-                                                     void *d,                      \
-                                                     const int *pt,                \
-                                                     const uint32_t *pm,           \
-                                                     const int *ms,                \
-                                                     int N_in,                     \
-                                                     int N_out,                    \
-                                                     int C_in,                     \
-                                                     int C_out,                    \
-                                                     int K,                        \
-                                                     float alpha,                  \
-                                                     int groups,                   \
-                                                     int identity_offset,          \
-                                                     cudaStream_t stream) {        \
-    using Config = CuteTileConfig<ElemIn, gemm::Tile64x128x32>;                    \
-    using Kernel = MaskGemm_forward_64x128x32_3s<Config, ElemIn, MW>;              \
-    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
-    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
-    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
-    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
-    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
-    size_t smem = Kernel::SharedStorageSize;                                       \
-    if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
-                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
-                                      smem);                                       \
-      if (err != cudaSuccess) return -1;                                           \
-    }                                                                              \
-    production_mask_kernel_entry<Kernel>                                           \
-        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
-                                                             (const ElemIn *)b,    \
-                                                             (ElemIn *)d,          \
-                                                             pt,                   \
-                                                             pm,                   \
-                                                             ms,                   \
-                                                             N_in,                 \
-                                                             N_out,                \
-                                                             C_in,                 \
-                                                             C_out,                \
-                                                             K,                    \
-                                                             alpha,                \
-                                                             C_in * groups,        \
-                                                             C_out * groups,       \
-                                                             identity_offset);     \
-    return 0;                                                                      \
+#define INST_FWD_64x128_3S_MW(ElemIn, MW)                                                     \
+  template <>                                                                                 \
+  int launch_mask_gemm_fwd_64x128_3s_mw<ElemIn, MW>(const void *a,                            \
+                                                    const void *b,                            \
+                                                    void *d,                                  \
+                                                    const int *pt,                            \
+                                                    const uint32_t *pm,                       \
+                                                    const int *ms,                            \
+                                                    int N_in,                                 \
+                                                    int N_out,                                \
+                                                    int C_in,                                 \
+                                                    int C_out,                                \
+                                                    int K,                                    \
+                                                    float alpha,                              \
+                                                    int groups,                               \
+                                                    int identity_offset,                      \
+                                                    cudaStream_t stream) {                    \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile64x128x32>;                               \
+    using Kernel = MaskGemm_forward_64x128x32_3s<Config, ElemIn, MW>;                         \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});                        \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});                        \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                                      \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                                \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                                   \
+    size_t smem = Kernel::SharedStorageSize;                                                  \
+    if (smem > 48 * 1024) {                                                                   \
+      auto err = cudaFuncSetAttribute(                                                        \
+          mask_gemm_kernel_entry<Kernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
+      if (err != cudaSuccess) return -1;                                                      \
+    }                                                                                         \
+    mask_gemm_kernel_entry<Kernel>                                                            \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,               \
+                                                             (const ElemIn *)b,               \
+                                                             (ElemIn *)d,                     \
+                                                             pt,                              \
+                                                             pm,                              \
+                                                             ms,                              \
+                                                             N_in,                            \
+                                                             N_out,                           \
+                                                             C_in,                            \
+                                                             C_out,                           \
+                                                             K,                               \
+                                                             alpha,                           \
+                                                             C_in * groups,                   \
+                                                             C_out * groups,                  \
+                                                             identity_offset);                \
+    return 0;                                                                                 \
   }
 
         INST_FWD_64x128_3S_MW(cutlass::half_t, 2) INST_FWD_64x128_3S_MW(cutlass::half_t, 4)
@@ -558,55 +556,54 @@ INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC
 #undef INST_FWD_64x128_3S_MW
 
 // Tile 44: 128x64 fused (half + bfloat16)
-#define INST_FWD_128x64_MW(ElemIn, MW)                                             \
-  template <>                                                                      \
-  int launch_production_fwd_128x64_mw<ElemIn, MW>(const void *a,                   \
-                                                  const void *b,                   \
-                                                  void *d,                         \
-                                                  const int *pt,                   \
-                                                  const uint32_t *pm,              \
-                                                  const int *ms,                   \
-                                                  int N_in,                        \
-                                                  int N_out,                       \
-                                                  int C_in,                        \
-                                                  int C_out,                       \
-                                                  int K,                           \
-                                                  float alpha,                     \
-                                                  int groups,                      \
-                                                  int identity_offset,             \
-                                                  cudaStream_t stream) {           \
-    using Config = CuteTileConfig<ElemIn, gemm::Tile128x64x32>;                    \
-    using Kernel = MaskGemm_forward_128x64x32_2s_fused<Config, ElemIn, MW>;        \
-    constexpr int TileM = cute::size<0>(typename Config::TileShape{});             \
-    constexpr int TileN = cute::size<1>(typename Config::TileShape{});             \
-    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                           \
-    int m_tiles = (N_out + TileM - 1) / TileM;                                     \
-    int n_tiles = (C_out + TileN - 1) / TileN;                                     \
-    dim3 grid(m_tiles *n_tiles, 1, groups);                                        \
-    size_t smem = Kernel::SharedStorageSize;                                       \
-    if (smem > 48 * 1024) {                                                        \
-      auto err = cudaFuncSetAttribute(production_mask_kernel_entry<Kernel>,        \
-                                      cudaFuncAttributeMaxDynamicSharedMemorySize, \
-                                      smem);                                       \
-      if (err != cudaSuccess) return -1;                                           \
-    }                                                                              \
-    production_mask_kernel_entry<Kernel>                                           \
-        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,    \
-                                                             (const ElemIn *)b,    \
-                                                             (ElemIn *)d,          \
-                                                             pt,                   \
-                                                             pm,                   \
-                                                             ms,                   \
-                                                             N_in,                 \
-                                                             N_out,                \
-                                                             C_in,                 \
-                                                             C_out,                \
-                                                             K,                    \
-                                                             alpha,                \
-                                                             C_in * groups,        \
-                                                             C_out * groups,       \
-                                                             identity_offset);     \
-    return 0;                                                                      \
+#define INST_FWD_128x64_MW(ElemIn, MW)                                                        \
+  template <>                                                                                 \
+  int launch_mask_gemm_fwd_128x64_mw<ElemIn, MW>(const void *a,                               \
+                                                 const void *b,                               \
+                                                 void *d,                                     \
+                                                 const int *pt,                               \
+                                                 const uint32_t *pm,                          \
+                                                 const int *ms,                               \
+                                                 int N_in,                                    \
+                                                 int N_out,                                   \
+                                                 int C_in,                                    \
+                                                 int C_out,                                   \
+                                                 int K,                                       \
+                                                 float alpha,                                 \
+                                                 int groups,                                  \
+                                                 int identity_offset,                         \
+                                                 cudaStream_t stream) {                       \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile128x64x32>;                               \
+    using Kernel = MaskGemm_forward_128x64x32_2s_fused<Config, ElemIn, MW>;                   \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});                        \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});                        \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                                      \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                                \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                                   \
+    size_t smem = Kernel::SharedStorageSize;                                                  \
+    if (smem > 48 * 1024) {                                                                   \
+      auto err = cudaFuncSetAttribute(                                                        \
+          mask_gemm_kernel_entry<Kernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
+      if (err != cudaSuccess) return -1;                                                      \
+    }                                                                                         \
+    mask_gemm_kernel_entry<Kernel>                                                            \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,               \
+                                                             (const ElemIn *)b,               \
+                                                             (ElemIn *)d,                     \
+                                                             pt,                              \
+                                                             pm,                              \
+                                                             ms,                              \
+                                                             N_in,                            \
+                                                             N_out,                           \
+                                                             C_in,                            \
+                                                             C_out,                           \
+                                                             K,                               \
+                                                             alpha,                           \
+                                                             C_in * groups,                   \
+                                                             C_out * groups,                  \
+                                                             identity_offset);                \
+    return 0;                                                                                 \
   }
 
                             INST_FWD_128x64_MW(cutlass::half_t, 2)

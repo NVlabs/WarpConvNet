@@ -103,7 +103,7 @@ def test_fp16_accum_leaves_non_cutlass_entries_intact():
 
     f16 = _get_adaptive_AB_params(128, 128, 27, num_in_coords=50000, use_fp16_accum=True)
     for algo, params in f16:
-        if "cutlass" not in algo and algo != "production":
+        if "cutlass" not in algo and algo != "mask_gemm":
             assert "accumulator_type" not in params, f"{algo} unexpectedly got accum key: {params}"
 
 
@@ -116,7 +116,7 @@ def test_fp16_accum_flag_adds_f16acc_tiles_to_pool():
     f16_pool = _get_adaptive_AB_params(128, 128, 27, num_in_coords=50000, use_fp16_accum=True)
 
     def _tile_ids(pool):
-        return sorted(p["tile_id"] for algo, p in pool if algo == "production")
+        return sorted(p["tile_id"] for algo, p in pool if algo == "mask_gemm")
 
     f32_tiles = _tile_ids(f32_pool)
     f16_tiles = _tile_ids(f16_pool)
@@ -141,7 +141,7 @@ def test_spatially_sparse_conv_explicit_gemm_end_to_end():
     v = Voxels(coords, feats, device="cuda").unique()
     w = torch.nn.Parameter(torch.randn(27, 16, 16, device="cuda"))
 
-    # Clear benchmark cache so we don't read a prior production entry
+    # Clear benchmark cache so we don't read a prior mask_gemm entry
     _unified._BENCHMARK_AB_RESULTS.clear()
 
     # Forcing explicit_gemm: the cached tuple should be explicit_gemm.

@@ -893,7 +893,7 @@ void launch_postprocess_scatter(torch::Tensor found,
 }
 
 // ============================================================================
-// Mask data kernels for production masked GEMM
+// Mask data kernels for masked GEMM
 // ============================================================================
 
 // Convert CSR (in_maps, out_maps, offsets) to pair_table [K * N_out].
