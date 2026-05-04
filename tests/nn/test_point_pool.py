@@ -9,7 +9,7 @@ from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.point_pool import REDUCTIONS, point_pool
 from warpconvnet.nn.functional.point_unpool import FEATURE_UNPOOLING_MODE, point_unpool
 from warpconvnet.nn.modules.point_pool import PointMaxPool, PointAvgPool, PointSumPool, PointUnpool
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 from warpconvnet.utils.ravel import ravel_multi_index_auto_shape
 
 

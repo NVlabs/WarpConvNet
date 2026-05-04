@@ -57,7 +57,7 @@ classes) label sets.
 
 ```
 Points
-  └── PointToSparseWrapper(voxel_size=model.backbone_voxel_size)
+  └── PointToVoxel(voxel_size=model.backbone_voxel_size)
         └── <model.backbone._target_>(in_channels=3, out_channels=hidden_dim)
               ↓ per-point feature embeddings
               ├── mask_features_head(hidden_dim → hidden_dim)
@@ -70,7 +70,7 @@ Points
 
 - **Backbone** — any per-point feature encoder, instantiated from
   `model.backbone._target_` via Hydra (default `MinkUNet18`). Wrapped by
-  `PointToSparseWrapper` when `model.backbone_voxel_size` is set, so the
+  `PointToVoxel` when `model.backbone_voxel_size` is set, so the
   module can consume `Points` directly.
 - **Mask transformer** — `num_decoders` rounds of (self-attention over
   queries) → (cross-attention over scene features) → (FFN).
@@ -156,7 +156,7 @@ python examples/train/maskformer.py \
 
 The backbone is instantiated via Hydra's `_target_`. Any module that
 returns per-point features is valid; the example wraps the module with
-`PointToSparseWrapper(voxel_size=model.backbone_voxel_size)` so it can
+`PointToVoxel(voxel_size=model.backbone_voxel_size)` so it can
 consume `Points` directly. Set `model.backbone_voxel_size=null` for a
 backbone that already operates on `Points` (e.g. point-based encoders) —
 the wrapper will be skipped.
@@ -235,18 +235,18 @@ The viewer is throttled — refreshes happen at most once per
 
 **Model**
 
-| Key                           | Default                         | Description                                                        |
-| ----------------------------- | ------------------------------- | ------------------------------------------------------------------ |
-| `model.hidden_dim`            | `96`                            | Mask transformer / decoder width (must match the backbone output)  |
-| `model.num_queries`           | `100`                           | Set-prediction query count                                         |
-| `model.num_heads`             | `8`                             | Attention heads in decoder                                         |
-| `model.num_decoders`          | `6`                             | Transformer decoder layers                                         |
-| `model.dim_feedforward`       | `256`                           | FFN hidden width                                                   |
-| `model.dropout`               | `0.1`                           | Decoder dropout                                                    |
-| `model.backbone_voxel_size`   | `0.04`                          | Voxel size for `PointToSparseWrapper`; `null` disables the wrapper |
-| `model.backbone._target_`     | `warpconvnet.models.MinkUNet18` | Hydra target for the backbone — any per-point feature encoder      |
-| `model.backbone.in_channels`  | `3`                             | Backbone input channels (RGB by default)                           |
-| `model.backbone.out_channels` | `96`                            | Backbone output channels — must equal `model.hidden_dim`           |
+| Key                           | Default                         | Description                                                       |
+| ----------------------------- | ------------------------------- | ----------------------------------------------------------------- |
+| `model.hidden_dim`            | `96`                            | Mask transformer / decoder width (must match the backbone output) |
+| `model.num_queries`           | `100`                           | Set-prediction query count                                        |
+| `model.num_heads`             | `8`                             | Attention heads in decoder                                        |
+| `model.num_decoders`          | `6`                             | Transformer decoder layers                                        |
+| `model.dim_feedforward`       | `256`                           | FFN hidden width                                                  |
+| `model.dropout`               | `0.1`                           | Decoder dropout                                                   |
+| `model.backbone_voxel_size`   | `0.04`                          | Voxel size for `PointToVoxel`; `null` disables the wrapper        |
+| `model.backbone._target_`     | `warpconvnet.models.MinkUNet18` | Hydra target for the backbone — any per-point feature encoder     |
+| `model.backbone.in_channels`  | `3`                             | Backbone input channels (RGB by default)                          |
+| `model.backbone.out_channels` | `96`                            | Backbone output channels — must equal `model.hidden_dim`          |
 
 **Loss**
 

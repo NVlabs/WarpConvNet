@@ -11,7 +11,7 @@ between queries and per-point feature embeddings.
 
 - **Backbone** — any `BaseSpatialModel` that returns a per-point `Geometry`
   (e.g. `MinkUNet18`, `PointTransformerV3`, wrapped in
-  `PointToSparseWrapper` if voxelization is desired).
+  `PointToVoxel` if voxelization is desired).
 - **`MaskTransformer`** — `num_decoders` layers of self-attention over
   queries followed by cross-attention against scene features.
 - **`MaskFormer`** — couples the backbone, mask transformer, a class head,
@@ -49,7 +49,7 @@ import torch
 from warpconvnet.dataset.scannet import ScanNetInstanceDataset
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.models import MaskFormer, MinkUNet18
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
 device = "cuda"
 ds = ScanNetInstanceDataset(
@@ -64,7 +64,7 @@ pc = Points.from_list_of_coordinates(
     features=[torch.from_numpy(s["colors"]).float() / 255.0 for s in samples],
 ).to(device)
 
-backbone = PointToSparseWrapper(
+backbone = PointToVoxel(
     inner_module=MinkUNet18(in_channels=3, out_channels=96),
     voxel_size=0.04,
     concat_unpooled_pc=False,

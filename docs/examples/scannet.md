@@ -41,7 +41,7 @@ encoder and decoder blocks connected by skip connections. Available models:
 | `warpconvnet.models.MinkUNet101` | ResNet-101 style blocks     |
 
 Input points are voxelized at `voxel_size=0.02` and wrapped via
-`PointToSparseWrapper`, which handles the point-to-voxel conversion and
+`PointToVoxel`, which handles the point-to-voxel conversion and
 maps output features back to the original point resolution.
 
 The model outputs per-point logits with shape `(N, 20)`.
@@ -116,12 +116,12 @@ python examples/train/scannet.py data.voxel_size=0.05 train.lr=0.01
 
 **Model:**
 
-| Key                  | Default                         | Description                                                  |
-| -------------------- | ------------------------------- | ------------------------------------------------------------ |
-| `model._target_`     | `warpconvnet.models.MinkUNet18` | Model class to instantiate                                   |
-| `model.in_channels`  | `3`                             | Input feature channels (RGB)                                 |
-| `model.out_channels` | `20`                            | Output channels (num classes)                                |
-| `model.in_type`      | `voxel`                         | Input type (`voxel` wraps model with `PointToSparseWrapper`) |
+| Key                  | Default                         | Description                                          |
+| -------------------- | ------------------------------- | ---------------------------------------------------- |
+| `model._target_`     | `warpconvnet.models.MinkUNet18` | Model class to instantiate                           |
+| `model.in_channels`  | `3`                             | Input feature channels (RGB)                         |
+| `model.out_channels` | `20`                            | Output channels (num classes)                        |
+| `model.in_type`      | `voxel`                         | Input type (`voxel` wraps model with `PointToVoxel`) |
 
 **General:**
 

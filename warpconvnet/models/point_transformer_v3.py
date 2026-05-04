@@ -23,7 +23,7 @@ from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.sequential import Sequential
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
 from warpconvnet.nn.modules.sparse_pool import (
-    PointToSparseWrapper,
+    PointToVoxel,
     SparseMaxPool,
     SparseUnpool,
 )

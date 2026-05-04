@@ -22,7 +22,7 @@ A symmetric encoder–decoder over voxelized inputs:
 | `MinkUNet101` | `BottleneckBlock` | (2, 3, 4, 23, 2, 2, 2, 2) | ~83 M  |
 
 `PointMinkUNet18` / `PointMinkUNet34` wrap the voxel network with
-`PointToSparseWrapper` so the input/output types are `Points`.
+`PointToVoxel` so the input/output types are `Points`.
 
 ## Signature
 

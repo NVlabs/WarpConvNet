@@ -137,7 +137,7 @@ class SparseUnpool(BaseSpatialModule):
         )
 
 
-class PointToSparseWrapper(BaseSpatialModule):
+class PointToVoxel(BaseSpatialModule):
     """Pool points into a sparse tensor, apply an inner module and unpool back to points.
 
     Parameters
@@ -187,3 +187,17 @@ class PointToSparseWrapper(BaseSpatialModule):
             to_unique=to_unique,
         )
         return unpooled_pc
+
+
+class PointToSparseWrapper(PointToVoxel):
+    """Deprecated alias for ``PointToVoxel``. Will be removed in a future release."""
+
+    def __init__(self, *args, **kwargs):
+        import warnings
+
+        warnings.warn(
+            "PointToSparseWrapper is deprecated; use PointToVoxel instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)

@@ -134,7 +134,7 @@ ______________________________________________________________________
    without sacrificing the early-layer detail.
 5. **Concatenate raw point features.** When per-voxel pooling is unavoidable
    but you still want sub-voxel detail, propagate per-point features through
-   `PointToSparseWrapper(..., concat_unpooled_pc=True)` so the decoder sees
+   `PointToVoxel(..., concat_unpooled_pc=True)` so the decoder sees
    both voxel- and point-level information.
 
 ______________________________________________________________________

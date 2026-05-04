@@ -348,7 +348,7 @@ class MaskFormer(BaseSpatialModel):
 if __name__ == "__main__":
     from warpconvnet.dataset.scannet import ScanNetInstanceDataset
     from warpconvnet.models.mink_unet import MinkUNet18
-    from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+    from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
     wp.init()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -366,7 +366,7 @@ if __name__ == "__main__":
         features=[torch.from_numpy(s["colors"]).float() / 255.0 for s in samples],
     ).to(device)
 
-    backbone = PointToSparseWrapper(
+    backbone = PointToVoxel(
         inner_module=MinkUNet18(in_channels=3, out_channels=96),
         voxel_size=0.02,
         concat_unpooled_pc=False,

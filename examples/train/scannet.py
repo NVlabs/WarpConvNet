@@ -39,7 +39,7 @@ from tqdm import tqdm
 from warpconvnet.dataset.scannet import ScanNetDataset
 from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.geometry.types.points import Points
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
 # Embedded YAML configuration
 CONFIG_YAML = """
@@ -328,7 +328,7 @@ def main(cfg: DictConfig):
         wandb.watch(model)
 
     if hasattr(cfg.model, "in_type") and cfg.model.in_type == "voxel":
-        model = PointToSparseWrapper(
+        model = PointToVoxel(
             inner_module=model,
             voxel_size=cfg.data.voxel_size,
             concat_unpooled_pc=False,

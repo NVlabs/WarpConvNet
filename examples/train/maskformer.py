@@ -40,7 +40,7 @@ from tqdm import tqdm
 from warpconvnet.dataset.scannet import ScanNetInstanceDataset
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.models import MaskFormer  # backbone instantiated via Hydra
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
 CONFIG_YAML = """
 paths:
@@ -69,7 +69,7 @@ model:
   num_decoders: 6
   dim_feedforward: 256
   dropout: 0.1
-  backbone_voxel_size: 0.02   # null => skip PointToSparseWrapper (backbone takes Points directly)
+  backbone_voxel_size: 0.02   # null => skip PointToVoxel (backbone takes Points directly)
   backbone:
     _target_: warpconvnet.models.MinkUNet18
     in_channels: 3
@@ -274,7 +274,7 @@ def build_model(cfg, num_classes: int, device: str) -> MaskFormer:
 
     The `backbone._target_` config field selects any
     `warpconvnet.models.*` (or other `nn.Module`) class. The resulting
-    module is wrapped with `PointToSparseWrapper` when
+    module is wrapped with `PointToVoxel` when
     `cfg.model.backbone_voxel_size` is non-null so it consumes `Points`
     directly; set the voxel size to `null` to feed the backbone raw
     points (e.g. a model that already operates on `Points`).
@@ -284,9 +284,7 @@ def build_model(cfg, num_classes: int, device: str) -> MaskFormer:
 
     voxel_size = cfg.model.get("backbone_voxel_size", None)
     if voxel_size is not None:
-        inner = PointToSparseWrapper(
-            inner_module=inner, voxel_size=voxel_size, concat_unpooled_pc=False
-        )
+        inner = PointToVoxel(inner_module=inner, voxel_size=voxel_size, concat_unpooled_pc=False)
 
     return MaskFormer(
         backbone=inner,

@@ -6,7 +6,7 @@ import torch
 
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.models.point_transformer_v3 import PointTransformerV3
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def pc(device: torch.device = torch.device("cuda:0")):
 
 
 def test_point_transformer_v3(pc: Points):
-    point_transformer = PointToSparseWrapper(
+    point_transformer = PointToVoxel(
         PointTransformerV3(
             in_channels=pc.feature_tensor.shape[-1],
             enc_depths=(3, 3, 3, 6, 3),

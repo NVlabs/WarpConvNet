@@ -12,7 +12,7 @@ from warpconvnet.dataset.scannet import ScanNetInstanceDataset
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.models.maskformer import MaskFormer
 from warpconvnet.models.mink_unet import MinkUNet18
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
 SCANNET_HF = "~/datasets/scannet_hf"
 
@@ -25,7 +25,7 @@ def _make_pc(samples, device):
 
 
 def _build_maskformer(num_classes=200, hidden_dim=96, voxel_size=0.04):
-    backbone = PointToSparseWrapper(
+    backbone = PointToVoxel(
         inner_module=MinkUNet18(in_channels=3, out_channels=hidden_dim),
         voxel_size=voxel_size,
         concat_unpooled_pc=False,
@@ -43,7 +43,8 @@ def _build_maskformer(num_classes=200, hidden_dim=96, voxel_size=0.04):
 
 
 @pytest.mark.skipif(
-    not os.path.isdir(SCANNET_HF), reason="scannet_hf preprocessed data not available"
+    not os.path.isdir(os.path.expanduser(SCANNET_HF)),
+    reason="scannet_hf preprocessed data not available",
 )
 def test_maskformer_train_step():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

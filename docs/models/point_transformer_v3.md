@@ -46,14 +46,14 @@ class PointTransformerV3(BaseSpatialModel):
 import torch
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.models import PointTransformerV3
-from warpconvnet.nn.modules.sparse_pool import PointToSparseWrapper
+from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
 pc = Points(
     [torch.rand(N, 3) for N in (5000, 8000, 6000)],
     [torch.rand(N, 7) for N in (5000, 8000, 6000)],
 ).cuda()
 
-model = PointToSparseWrapper(
+model = PointToVoxel(
     PointTransformerV3(in_channels=7, shuffle_orders=True),
     voxel_size=0.02,
     reduction="mean",
