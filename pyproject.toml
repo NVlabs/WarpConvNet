@@ -90,6 +90,7 @@ warpconvnet = [
 write_to = "warpconvnet/_version.py"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 markers = [
     "benchmark: mark test as a performance benchmark",
     "slow: mark test as slow to run",

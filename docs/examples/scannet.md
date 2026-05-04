@@ -33,12 +33,12 @@ Expect a **5–10 mIoU boost** over the un-augmented baseline.
 The default model is **MinkUNet18**, a U-Net with sparse convolution
 encoder and decoder blocks connected by skip connections. Available models:
 
-| Model                   | Description                 |
-| ----------------------- | --------------------------- |
-| `mink_unet.MinkUNet18`  | Lightweight U-Net (default) |
-| `mink_unet.MinkUNet34`  | Deeper encoder              |
-| `mink_unet.MinkUNet50`  | ResNet-50 style blocks      |
-| `mink_unet.MinkUNet101` | ResNet-101 style blocks     |
+| Model                            | Description                 |
+| -------------------------------- | --------------------------- |
+| `warpconvnet.models.MinkUNet18`  | Lightweight U-Net (default) |
+| `warpconvnet.models.MinkUNet34`  | Deeper encoder              |
+| `warpconvnet.models.MinkUNet50`  | ResNet-50 style blocks      |
+| `warpconvnet.models.MinkUNet101` | ResNet-101 style blocks     |
 
 Input points are voxelized at `voxel_size=0.02` and wrapped via
 `PointToSparseWrapper`, which handles the point-to-voxel conversion and
@@ -59,7 +59,7 @@ Additional requirements: `hydra-core`, `omegaconf`, `torchmetrics`.
 ## Run
 
 ```bash
-python examples/scannet.py
+python examples/train/scannet.py
 ```
 
 The script uses [Hydra](https://hydra.cc/) for configuration. Override any
@@ -67,13 +67,13 @@ parameter on the command line:
 
 ```bash
 # Smaller batch size for limited GPU memory
-python examples/scannet.py train.batch_size=4
+python examples/train/scannet.py train.batch_size=4
 
 # Use a deeper model
-python examples/scannet.py model._target_=mink_unet.MinkUNet34
+python examples/train/scannet.py model._target_=warpconvnet.models.MinkUNet34
 
 # Change voxel size and learning rate
-python examples/scannet.py data.voxel_size=0.05 train.lr=0.01
+python examples/train/scannet.py data.voxel_size=0.05 train.lr=0.01
 ```
 
 ### Configuration reference
@@ -116,12 +116,12 @@ python examples/scannet.py data.voxel_size=0.05 train.lr=0.01
 
 **Model:**
 
-| Key                  | Default                | Description                                                  |
-| -------------------- | ---------------------- | ------------------------------------------------------------ |
-| `model._target_`     | `mink_unet.MinkUNet18` | Model class to instantiate                                   |
-| `model.in_channels`  | `3`                    | Input feature channels (RGB)                                 |
-| `model.out_channels` | `20`                   | Output channels (num classes)                                |
-| `model.in_type`      | `voxel`                | Input type (`voxel` wraps model with `PointToSparseWrapper`) |
+| Key                  | Default                         | Description                                                  |
+| -------------------- | ------------------------------- | ------------------------------------------------------------ |
+| `model._target_`     | `warpconvnet.models.MinkUNet18` | Model class to instantiate                                   |
+| `model.in_channels`  | `3`                             | Input feature channels (RGB)                                 |
+| `model.out_channels` | `20`                            | Output channels (num classes)                                |
+| `model.in_type`      | `voxel`                         | Input type (`voxel` wraps model with `PointToSparseWrapper`) |
 
 **General:**
 
@@ -165,10 +165,10 @@ Test-time data is **not** augmented (test loader uses the bare
 
 ```bash
 # Default minimal training (no augs)
-python examples/scannet.py
+python examples/train/scannet.py
 
 # Standard augmented recipe (recommended)
-python examples/scannet.py data.augmentations=true
+python examples/train/scannet.py data.augmentations=true
 ```
 
 To customize the pipeline, write your own `Compose([...])` and pass it as
@@ -204,7 +204,7 @@ seconds so it never stalls the training loop.
 
 ```bash
 # Train + visualize
-python examples/scannet.py viz.enabled=true viz.port=8080 viz.interval_seconds=10
+python examples/train/scannet.py viz.enabled=true viz.port=8080 viz.interval_seconds=10
 # Open http://localhost:8080
 ```
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Use hydra config to run the script
-# python scannet.py model._target=mink_unet.MinkUNet34 train.batch_size=12
+# python scannet.py model._target=warpconvnet.models.MinkUNet34 train.batch_size=12
 
 # WARNING: This is a simple example of how to use the warpconvnet library.
 # The data loader does NOT apply any augmentation to the point cloud.
@@ -73,7 +73,7 @@ data:
 
 # Model configuration
 model:
-  _target_: mink_unet.MinkUNet34
+  _target_: warpconvnet.models.MinkUNet34
   in_channels: 3
   out_channels: 20
   in_type: "voxel"
@@ -297,7 +297,7 @@ def main(cfg: DictConfig):
         split="train",
     )
     if cfg.data.get("augmentations", False):
-        from scannet_augmentations import AugmentedScanNetDataset
+        from examples.utils.scannet_augmentations import AugmentedScanNetDataset
 
         train_dataset = AugmentedScanNetDataset(train_dataset)
         print(
@@ -351,7 +351,7 @@ def main(cfg: DictConfig):
 
     visualizer = None
     if cfg.get("viz", None) is not None and cfg.viz.enabled:
-        from viser_scannet_visualizer import ScanNetViserVisualizer
+        from examples.utils.viser_scannet_visualizer import ScanNetViserVisualizer
 
         visualizer = ScanNetViserVisualizer(
             voxel_size=cfg.data.voxel_size,

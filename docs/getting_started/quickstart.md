@@ -29,7 +29,7 @@ print(out)  # Voxels geometry with 32 feature channels
 ## Run the ModelNet example
 
 ```bash
-python examples/modelnet.py
+python examples/train/modelnet.py
 ```
 
 This trains a 3D classification model on ModelNet40. The dataset is downloaded
@@ -39,7 +39,7 @@ automatically on first run.
 
 ```bash
 pip install ".[models]"
-python examples/scannet.py train.batch_size=12 model=mink_unet
+python examples/train/scannet.py train.batch_size=12 model=mink_unet
 ```
 
 This trains a semantic segmentation model on ScanNet. The script uses

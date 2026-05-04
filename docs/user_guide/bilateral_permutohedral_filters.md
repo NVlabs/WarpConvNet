@@ -295,10 +295,10 @@ preserves edges slightly better than the $d$-cube grid at this bandwidth,
 and noticeably better than the limited-$K$ KNN filter where boundary
 neighbors get clipped.
 
-Reproduce with [`examples/bilateral_image_example.py`](https://github.com/NVlabs/WarpConvNet/blob/main/examples/bilateral_image_example.py):
+Reproduce with [`examples/demos/bilateral_image.py`](https://github.com/NVlabs/WarpConvNet/blob/main/examples/demos/bilateral_image.py):
 
 ```bash
-python examples/bilateral_image_example.py \
+python examples/demos/bilateral_image.py \
     --out-dir docs/user_guide/img \
     --sigma-xy 4.0 --sigma-rgb 0.1 --noise-var 0.01
 ```

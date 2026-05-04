@@ -54,7 +54,7 @@ dense: Tensor = vox.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=
 # feed `dense` to your 3D CNN head for classification
 ```
 
-See `examples/modelnet.py` for a full training script.
+See `examples/train/modelnet.py` for a full training script.
 
 ### Group Convolution
 
@@ -323,15 +323,14 @@ For complete directory structure, run `bash scripts/dir_struct.sh`.
 ### ModelNet Classification
 
 ```bash
-python examples/modelnet.py
+python examples/train/modelnet.py
 ```
 
 ### ScanNet Semantic Segmentation
 
 ```bash
 pip install warpconvnet[models]
-cd warpconvnet/models
-python examples/scannet.py train.batch_size=12 model=mink_unet
+python examples/train/scannet.py train.batch_size=12 model._target_=warpconvnet.models.MinkUNet34
 ```
 
 ## Docker Usage

@@ -54,7 +54,7 @@ class RealSearchConfig:
         if self.mode == RealSearchMode.RADIUS:
             out_str = f"{self.mode.name}({self.radius})"
         elif self.mode == RealSearchMode.KNN:
-            out_str = f"{self.mode._name}({self.knn_k})"
+            out_str = f"{self.mode.name}({self.knn_k})"
         return out_str
 
     def replace(
@@ -78,9 +78,7 @@ class RealSearchConfig:
         if not isinstance(other, RealSearchConfig):
             return False
         return (
-            self.mode == other.mode
-            and self.radius == other.radius
-            and self.knn_k == other.knn_k
+            self.mode == other.mode and self.radius == other.radius and self.knn_k == other.knn_k
         )
 
 
@@ -104,9 +102,7 @@ class IntSearchConfig:
             ), "Distance threshold must be provided for manhattan distance search"
             self.kernel_sizes = kernel_sizes
         elif mode == IntSearchMode.CUSTOM_OFFSETS:
-            assert (
-                offsets is not None
-            ), "Offsets must be provided for custom offsets search"
+            assert offsets is not None, "Offsets must be provided for custom offsets search"
             self.offsets = offsets
         else:
             raise ValueError(f"Invalid neighbor search mode: {mode}")

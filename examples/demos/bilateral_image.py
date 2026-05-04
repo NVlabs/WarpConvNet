@@ -19,7 +19,7 @@ Saves five PNGs to <out-dir>:
     astronaut_grid.png, astronaut_permutohedral.png
 
 Run:
-    python examples/bilateral_image_example.py --out-dir docs/user_guide/img
+    python examples/demos/bilateral_image.py --out-dir docs/user_guide/img
 """
 
 import argparse

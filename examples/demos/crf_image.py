@@ -24,7 +24,7 @@ release (Krähenbühl, lucasb-eyer mirror): a single (image, anno) pair
 fetched on demand from raw GitHub.
 
 Run:
-    python examples/crf_image_example.py --out-dir docs/user_guide/img
+    python examples/demos/crf_image.py --out-dir docs/user_guide/img
 """
 
 from __future__ import annotations

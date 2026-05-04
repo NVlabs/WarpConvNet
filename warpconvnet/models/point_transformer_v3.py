@@ -9,8 +9,6 @@ https://arxiv.org/abs/2312.10035
 
 from typing import Literal, Optional, Tuple
 
-import pytest
-
 import torch
 import torch.nn as nn
 
@@ -114,9 +112,7 @@ class PatchAttentionBlock(BaseSpatialModule):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(
-        self, x: Geometry, order: Optional[POINT_ORDERING | str] = None
-    ) -> Geometry:
+    def forward(self, x: Geometry, order: Optional[POINT_ORDERING | str] = None) -> Geometry:
         x = self.conv(x) + self.conv_shortcut(x)
 
         # Attention block
@@ -345,43 +341,3 @@ class PointTransformerV3(BaseSpatialModel):
                 blk_idx += 1
 
         return self.final(x)
-
-
-# Pytests
-@pytest.fixture
-def pc(device: torch.device = torch.device("cuda:0")):
-    # Batch size, min number of points, max number of points, number of features
-    B, min_N, max_N, C = 3, 1000, 10000, 7
-    Ns = [N.item() for N in torch.randint(min_N, max_N, (B,))]
-    coords = [torch.rand((N, 3)) for N in Ns]
-    features = [torch.rand((N, C)) for N in Ns]
-    print(
-        f"Using total of {sum(Ns)} points with [{', '.join([str(N) for N in Ns])}] points per batch. Using {C} features."
-    )
-    return Points(coords, features).to(device)
-
-
-# Usage:
-# pytest -v -s examples/point_transformer_v3.py::test_point_transformer_v3
-def test_point_transformer_v3(pc: Points):
-    point_transformer = PointToSparseWrapper(
-        PointTransformerV3(
-            in_channels=pc.feature_tensor.shape[-1],
-            enc_depths=(3, 3, 3, 6, 3),
-            enc_channels=(48, 96, 192, 384, 512),
-            enc_num_head=(3, 6, 12, 24, 32),
-            enc_patch_size=(1024, 1024, 1024, 1024, 1024),
-            dec_depths=(3, 3, 3, 3),
-            dec_channels=(48, 96, 192, 384),
-            dec_num_head=(4, 6, 12, 24),
-            dec_patch_size=(1024, 1024, 1024, 1024),
-            shuffle_orders=True,
-        ),
-        voxel_size=0.02,
-        reduction="mean",
-        concat_unpooled_pc=False,
-    ).to(pc.device)
-    out = point_transformer(pc)
-    assert isinstance(out, Points)
-    assert out.feature_tensor.shape[-1] == 48
-    assert len(out) == len(pc)

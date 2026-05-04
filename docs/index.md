@@ -38,7 +38,7 @@ dense: Tensor = vox.to_dense(channel_dim=1, min_coords=(-5, -5, -5), max_coords=
 # feed `dense` to your 3D CNN head for classification
 ```
 
-See `examples/modelnet.py` for a full training script.
+See `examples/train/modelnet.py` for a full training script.
 
 ## 📚 Documentation Sections
 

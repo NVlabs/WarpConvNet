@@ -16,7 +16,7 @@ This page reproduces their dense-CRF on a 2D image using the same primitives
 WarpConvNet uses for 3D and higher. The 5D appearance kernel is the
 interesting bit; the 2D smoothness kernel is honest dense `Conv2d`. The
 [example](#running-the-example) ships as
-[`examples/crf_image_example.py`](https://github.com/nvlabs/warpconvnet/blob/main/examples/crf_image_example.py).
+[`examples/demos/crf_image.py`](https://github.com/nvlabs/warpconvnet/blob/main/examples/demos/crf_image.py).
 
 The paper's full trilateral construction (7D, RGB videos) is the same idea
 in higher dimension; see [Going higher: 7D trilateral CRF](#going-higher-7d-trilateral-crf).
@@ -157,7 +157,7 @@ dimensions: the 5D one wins by being sparse, the 2D one is plain dense.
 ## Running the example
 
 ```bash
-python examples/crf_image_example.py --out-dir docs/user_guide/img
+python examples/demos/crf_image.py --out-dir docs/user_guide/img
 ```
 
 The script fetches the densecrf reference image (`im1.png`) and noisy

@@ -27,14 +27,14 @@ The model chains three processing stages:
 ## Run
 
 ```bash
-python examples/modelnet.py
+python examples/train/modelnet.py
 ```
 
 The script uses [Fire](https://github.com/google/python-fire) for CLI
 arguments. All parameters of the `main()` function can be overridden:
 
 ```bash
-python examples/modelnet.py --batch_size=16 --epochs=50 --lr=5e-4
+python examples/train/modelnet.py --batch_size=16 --epochs=50 --lr=5e-4
 ```
 
 ### Arguments

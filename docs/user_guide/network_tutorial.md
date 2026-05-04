@@ -4,7 +4,7 @@ This tutorial walks through building neural networks with WarpConvNet modules. T
 
 ## MNIST Example
 
-The `examples/mnist.py` script constructs a small network for classifying 2‑D images using sparse convolutions:
+The `examples/train/mnist.py` script constructs a small network for classifying 2‑D images using sparse convolutions:
 
 ```python
 import torch
@@ -42,7 +42,7 @@ class Net(nn.Module):
 
 ## ModelNet Example
 
-For 3‑D data a combination of point and sparse convolutions can be used. The following snippet is adapted from `examples/modelnet.py`:
+For 3‑D data a combination of point and sparse convolutions can be used. The following snippet is adapted from `examples/train/modelnet.py`:
 
 ```python
 import torch

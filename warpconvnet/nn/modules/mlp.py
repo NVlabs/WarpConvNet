@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Union
+from typing import List, Optional, Sequence, Union
 from jaxtyping import Float
 
 import torch
@@ -175,3 +175,33 @@ class MLPBlock(BaseSpatialModule):
             return x.replace(batched_features=self._forward_feature(x.feature_tensor))
         else:
             return self._forward_feature(x)
+
+
+class FeatureMLPBlock(nn.Module):
+    """Plain MLP over a feature tensor with variable-depth hidden layers.
+
+    Stacks Linear → LayerNorm → activation per hidden width, then a final
+    Linear to ``out_channels`` (no norm/activation on the last layer).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_channels: Sequence[int] = (),
+        activation=nn.GELU,
+        bias: bool = True,
+    ):
+        super().__init__()
+        layers = []
+        prev = in_channels
+        for h in hidden_channels:
+            layers.append(nn.Linear(prev, h, bias=bias))
+            layers.append(nn.LayerNorm(h))
+            layers.append(activation())
+            prev = h
+        layers.append(nn.Linear(prev, out_channels, bias=bias))
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.block(x)

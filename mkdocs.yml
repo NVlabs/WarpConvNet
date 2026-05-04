@@ -48,6 +48,15 @@ nav:
   - Examples:
       - ModelNet: examples/modelnet.md
       - ScanNet: examples/scannet.md
+      - MaskFormer (instance seg): examples/maskformer.md
+  - Models:
+      - Overview: models/index.md
+      - PointNet: models/pointnet.md
+      - DGCNN: models/dgcnn.md
+      - PointTransformerV3: models/point_transformer_v3.md
+      - MinkUNet: models/mink_unet.md
+      - FIGConvNet: models/figconv.md
+      - MaskFormer: models/maskformer.md
   - User Guide:
       - Basic Concepts: user_guide/concepts.md
       - Geometry Types: user_guide/geometry_types.md
