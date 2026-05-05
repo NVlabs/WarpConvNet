@@ -3,6 +3,19 @@
 
 # Use hydra config to run the script
 # python scannet.py model._target=warpconvnet.models.MinkUNet34 train.batch_size=12
+#
+# Backbone selection. Any `warpconvnet.models.*` class with a Voxels-in
+# Voxels-out (or Points-in Points-out) interface drops in via the
+# `model._target_` Hydra override. For example, to swap MinkUNet34 for
+# SpaCeFormer:
+#
+#   python scannet.py \
+#       model._target_=warpconvnet.models.SpaCeFormer \
+#       model.in_channels=3 \
+#       model.out_channels=20 \
+#       +model.enc_attn_types=ssccc \
+#       +model.dec_attn_types=ssca \
+#       +model.use_rope=true
 
 # WARNING: This is a simple example of how to use the warpconvnet library.
 # Tune the default train-time augmentation pipeline for high-quality training.
@@ -81,6 +94,14 @@ model:
   in_channels: 3
   out_channels: 20
   in_type: "voxel"
+  # Alternative: SpaCeFormer (curve+space attention U-Net).
+  # _target_: warpconvnet.models.SpaCeFormer
+  # in_channels: 3
+  # out_channels: 20
+  # in_type: "voxel"
+  # enc_attn_types: ssccc   # space at shallow, curve deeper (rule of thumb)
+  # dec_attn_types: ssca    # 'a' = full-sequence attention at the bottleneck
+  # use_rope: true
 
 # Visualization configuration
 viz:
@@ -325,12 +346,15 @@ def main(cfg: DictConfig):
         collate_fn=collate_fn,
     )
 
-    # Model initialization
-    model = hydra.utils.instantiate(cfg.model).to(device)
+    # Model initialization. `in_type` is a script-level switch, not a
+    # constructor arg, so strip it before handing the dict to Hydra.
+    model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
+    in_type = model_cfg.pop("in_type", None)
+    model = hydra.utils.instantiate(model_cfg).to(device)
     if cfg.use_wandb:
         wandb.watch(model)
 
-    if hasattr(cfg.model, "in_type") and cfg.model.in_type == "voxel":
+    if in_type == "voxel":
         model = PointToVoxel(
             inner_module=model,
             voxel_size=cfg.data.voxel_size,

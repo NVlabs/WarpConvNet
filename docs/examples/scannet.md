@@ -33,12 +33,13 @@ Expect a **5–10 mIoU boost** over the un-augmented baseline.
 The default model is **MinkUNet18**, a U-Net with sparse convolution
 encoder and decoder blocks connected by skip connections. Available models:
 
-| Model                            | Description                 |
-| -------------------------------- | --------------------------- |
-| `warpconvnet.models.MinkUNet18`  | Lightweight U-Net (default) |
-| `warpconvnet.models.MinkUNet34`  | Deeper encoder              |
-| `warpconvnet.models.MinkUNet50`  | ResNet-50 style blocks      |
-| `warpconvnet.models.MinkUNet101` | ResNet-101 style blocks     |
+| Model                            | Description                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| `warpconvnet.models.MinkUNet18`  | Lightweight U-Net (default)                                                    |
+| `warpconvnet.models.MinkUNet34`  | Deeper encoder                                                                 |
+| `warpconvnet.models.MinkUNet50`  | ResNet-50 style blocks                                                         |
+| `warpconvnet.models.MinkUNet101` | ResNet-101 style blocks                                                        |
+| `warpconvnet.models.SpaCeFormer` | Curve + space + window attention U-Net (see [page](../models/space_former.md)) |
 
 Input points are voxelized at `voxel_size=0.02` and wrapped via
 `PointToVoxel`, which handles the point-to-voxel conversion and
@@ -74,6 +75,14 @@ python examples/train/scannet.py model._target_=warpconvnet.models.MinkUNet34
 
 # Change voxel size and learning rate
 python examples/train/scannet.py data.voxel_size=0.05 train.lr=0.01
+
+# Swap the backbone for SpaCeFormer (curve+space attention U-Net). The
+# +-prefixed keys add SpaCeFormer-specific args MinkUNet does not have.
+python examples/train/scannet.py \
+    model._target_=warpconvnet.models.SpaCeFormer \
+    +model.enc_attn_types=ssccc \
+    +model.dec_attn_types=ssca \
+    +model.use_rope=true
 ```
 
 ### Configuration reference

@@ -147,6 +147,14 @@ python examples/train/maskformer.py \
     model.backbone._target_=warpconvnet.models.MinkUNet50 \
     model.backbone.out_channels=128
 
+# SpaCeFormer backbone (curve+space attention U-Net). The +-prefixed keys
+# add SpaCeFormer-specific args that MinkUNet does not have.
+python examples/train/maskformer.py \
+    model.backbone._target_=warpconvnet.models.SpaCeFormer \
+    +model.backbone.enc_attn_types=ssccc \
+    +model.backbone.dec_attn_types=ssca \
+    +model.backbone.use_rope=true
+
 # Grid search Dice / BCE / no-object weights
 python examples/train/maskformer.py \
     loss.bce_weight=2.0 loss.dice_weight=2.0 loss.no_object_weight=0.05

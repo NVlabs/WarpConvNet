@@ -10,6 +10,19 @@
 # Usage:
 #   python examples/train/maskformer.py paths.data_dir=/path/to/scannet_preprocessed
 #
+# Backbone selection. The default is MinkUNet18; any
+# `warpconvnet.models.*` class with the same Voxels->Voxels (or Points->Points)
+# interface drops in via the `model.backbone._target_` Hydra override. For
+# example, to swap in SpaCeFormer:
+#
+#   python examples/train/maskformer.py \
+#       model.backbone._target_=warpconvnet.models.SpaCeFormer \
+#       model.backbone.in_channels=3 \
+#       model.backbone.out_channels=96 \
+#       +model.backbone.enc_attn_types=ssccc \
+#       +model.backbone.dec_attn_types=ssca \
+#       +model.backbone.use_rope=true
+#
 # The data layout follows the Mask3D ScanNet preprocessing:
 #   root/{train,val}/sceneXXXX_YY/{coord,color,normal,segmentXX,instance}.npy
 # See `warpconvnet.dataset.scannet.ScanNetInstanceDataset` for details.
@@ -81,6 +94,13 @@ model:
     _target_: warpconvnet.models.MinkUNet18
     in_channels: 3
     out_channels: 96          # must equal model.hidden_dim above
+    # Alternative: SpaCeFormer.
+    # _target_: warpconvnet.models.SpaCeFormer
+    # in_channels: 3
+    # out_channels: 96
+    # enc_attn_types: ssccc   # space at shallow, curve deeper (rule of thumb)
+    # dec_attn_types: ssca    # 'a' = full-sequence attention at the bottleneck
+    # use_rope: true
 
 loss:
   cls_weight: 1.0
