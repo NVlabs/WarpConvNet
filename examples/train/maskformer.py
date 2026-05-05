@@ -70,6 +70,7 @@ train:
   gamma: 0.5
   num_workers: 4
   log_every: 20
+  precision: "16-mixed"   # "32" (fp32) or "16-mixed" (fp16 forward + GradScaler for loss/grads)
 
 data:
   label_set: scannet20       # scannet20 (20 classes, faster) or scannet200 (198 fine-grained)
@@ -326,7 +327,26 @@ def build_model(cfg, num_classes: int, device: str) -> MaskFormer:
     ).to(device)
 
 
-def train_epoch(model, loader, optimizer, cfg, num_classes, device, epoch, visualizer=None):
+def train_epoch(
+    model,
+    loader,
+    optimizer,
+    scaler,
+    amp_enabled,
+    cfg,
+    num_classes,
+    device,
+    epoch,
+    visualizer=None,
+):
+    """One training epoch.
+
+    AMP recipe matches lightning's ``precision="16-mixed"``:
+    - forward + loss inside ``torch.amp.autocast`` (fp16 matmul where safe)
+    - ``scaler.scale(loss).backward()`` so fp16 grads don't underflow
+    - ``scaler.step(optimizer)`` unscales + skips step if grads are inf/nan
+    - ``scaler.update()`` adapts the scale for next step
+    """
     model.train()
     pbar = tqdm(loader, desc=f"epoch {epoch}")
     loss_guard = NonFiniteLossGuard(max_nonfinite=5)
@@ -335,15 +355,26 @@ def train_epoch(model, loader, optimizer, cfg, num_classes, device, epoch, visua
         targets = build_targets(batch, num_classes, cfg.data.ignore_index)
 
         optimizer.zero_grad()
-        logits, masks = model(pc)
-        loss, parts = maskformer_loss(logits, masks, targets, num_classes, cfg.loss, device)
+        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+            logits, masks = model(pc)
+            loss, parts = maskformer_loss(logits, masks, targets, num_classes, cfg.loss, device)
 
         if not loss_guard.check(loss, epoch=epoch, step=step):
+            # Skip optimizer + scaler entirely. GradScaler.update() must be
+            # preceded by scale().backward()+step() (or unscale_()) so it can
+            # record an inf check; calling update() alone trips an assertion.
             continue
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         if step % cfg.train.log_every == 0:
             pbar.set_postfix(parts)
@@ -362,14 +393,15 @@ def train_epoch(model, loader, optimizer, cfg, num_classes, device, epoch, visua
 
 
 @torch.no_grad()
-def validate(model, loader, cfg, num_classes, device):
+def validate(model, loader, cfg, num_classes, device, amp_enabled: bool = False):
     model.eval()
     losses = []
     for batch in tqdm(loader, desc="val"):
         pc = build_pc(batch, device)
         targets = build_targets(batch, num_classes, cfg.data.ignore_index)
-        logits, masks = model(pc)
-        _, parts = maskformer_loss(logits, masks, targets, num_classes, cfg.loss, device)
+        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+            logits, masks = model(pc)
+            _, parts = maskformer_loss(logits, masks, targets, num_classes, cfg.loss, device)
         losses.append(parts["total"])
     print(f"val loss: {np.mean(losses):.4f}")
 
@@ -433,6 +465,15 @@ def main(cfg: DictConfig):
     optimizer = optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=1e-4)
     scheduler = StepLR(optimizer, step_size=cfg.train.step_size, gamma=cfg.train.gamma)
 
+    # Mixed-precision setup. Mirrors examples/train/scannet.py.
+    precision = str(cfg.train.get("precision", "16-mixed")).lower()
+    amp_enabled = precision in ("16-mixed", "16", "fp16", "mixed", "amp")
+    scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
+    print(
+        f"[train] precision={precision} (autocast={amp_enabled}, "
+        f"GradScaler={'on' if scaler is not None else 'off'})"
+    )
+
     visualizer = None
     if cfg.get("viz", None) is not None and cfg.viz.enabled:
         # Hydra changes cwd, so add the repo root (two levels up) to sys.path
@@ -457,8 +498,19 @@ def main(cfg: DictConfig):
         )
 
     for epoch in range(cfg.train.epochs):
-        train_epoch(model, train_loader, optimizer, cfg, num_classes, device, epoch, visualizer)
-        validate(model, val_loader, cfg, num_classes, device)
+        train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            scaler,
+            amp_enabled,
+            cfg,
+            num_classes,
+            device,
+            epoch,
+            visualizer,
+        )
+        validate(model, val_loader, cfg, num_classes, device, amp_enabled=amp_enabled)
         scheduler.step()
 
 
