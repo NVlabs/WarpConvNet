@@ -3,6 +3,10 @@
 
 import glob
 import os
+import shutil
+import sys
+import urllib.request
+import zipfile
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -20,6 +24,16 @@ from warpconvnet.geometry.coords.ops.voxel import voxel_downsample_np
 SCANNET_URL = "https://cvg-data.inf.ethz.ch/openscene/data/scannet_processed/scannet_3d.zip"
 
 
+def _urlretrieve_progress(block_num: int, block_size: int, total_size: int) -> None:
+    """Stderr percent-progress reporter for ``urllib.request.urlretrieve``."""
+    if total_size <= 0:
+        return
+    downloaded = min(block_num * block_size, total_size)
+    pct = 100.0 * downloaded / total_size
+    sys.stderr.write(f"\r  {downloaded / 1e9:.2f} / {total_size / 1e9:.2f} GB ({pct:5.1f}%)")
+    sys.stderr.flush()
+
+
 class ScanNetDataset(Dataset):
     """
     Dataset from the OpenScene project.
@@ -35,7 +49,9 @@ class ScanNetDataset(Dataset):
         transform: Optional[SampleTransform] = None,
     ):
         super().__init__()
-        self.root = root
+        # Resolve to an absolute path so cwd changes (e.g. Hydra's outputs
+        # dir) don't move the dataset out from under us between calls.
+        self.root = os.path.abspath(os.path.expanduser(root))
         self.split = split
         self.voxel_size = voxel_size
         self.out_type = out_type
@@ -46,18 +62,58 @@ class ScanNetDataset(Dataset):
         self.prepare_data()
 
     def prepare_data(self):
-        # If data is not downloaded, download it
-        if not os.path.exists(self.root):
-            os.makedirs(self.root, exist_ok=True)
-            os.system(f"wget {SCANNET_URL} -O {self.root}/scannet_3d.zip")
-            os.system(f"unzip {self.root}/scannet_3d.zip -d {self.root}")
-            os.system(f"mv {self.root}/scannet_3d/* {self.root}")
-            os.system(f"rmdir {self.root}/scannet_3d")
+        # Trigger download on missing split file, not just missing root: a
+        # partial / aborted run can leave self.root present but empty, in
+        # which case we still need to fetch.
+        split_txt = os.path.join(self.root, f"scannetv2_{self.split}.txt")
+        if not os.path.exists(split_txt):
+            self._download()
 
-        # Get split txts
-        self.files = []
-        with open(os.path.join(self.root, f"scannetv2_{self.split}.txt")) as f:
+        if not os.path.exists(split_txt):
+            raise FileNotFoundError(
+                f"ScanNet split file {split_txt!r} missing after download. "
+                f"Manually fetch and unpack {SCANNET_URL} into {self.root!r}."
+            )
+
+        with open(split_txt) as f:
             self.files = sorted(f.readlines())
+
+    def _download(self):
+        """Fetch and unpack the OpenScene ScanNet preprocessed zip into ``self.root``.
+
+        Uses stdlib (``urllib`` + ``zipfile``) so no system tools are required.
+        Layout after extraction matches what __getitem__ expects:
+          {root}/scannetv2_{train,val,test}.txt
+          {root}/{train,val,test}/sceneXXXX_YY_vh_clean_2.pth
+        """
+        os.makedirs(self.root, exist_ok=True)
+        zip_path = os.path.join(self.root, "scannet_3d.zip")
+
+        if not os.path.exists(zip_path):
+            print(f"Downloading ScanNet preprocessed data from {SCANNET_URL} ...")
+            try:
+                urllib.request.urlretrieve(SCANNET_URL, zip_path, reporthook=_urlretrieve_progress)
+                sys.stderr.write("\n")
+            except Exception as e:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                raise RuntimeError(
+                    f"Failed to download {SCANNET_URL}: {e}. "
+                    f"Manually download and unpack into {self.root!r}."
+                ) from e
+
+        print(f"Extracting {zip_path} ...")
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(self.root)
+
+        # Zip extracts to {root}/scannet_3d/...; flatten one level so the
+        # split txt and {train,val,test}/ directories sit directly under root.
+        inner = os.path.join(self.root, "scannet_3d")
+        if os.path.isdir(inner):
+            for name in os.listdir(inner):
+                shutil.move(os.path.join(inner, name), os.path.join(self.root, name))
+            os.rmdir(inner)
+        os.remove(zip_path)
 
     def __len__(self):
         return len(self.files)

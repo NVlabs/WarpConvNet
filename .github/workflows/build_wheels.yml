@@ -77,7 +77,7 @@ jobs:
 
       - name: Build wheel
         env:
-          MAX_JOBS: "1"
+          MAX_JOBS: "2"
           NVCC_THREADS: "1"
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"

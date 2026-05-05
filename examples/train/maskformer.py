@@ -374,7 +374,7 @@ def register_config():
     cs.store(name="maskformer_config", node=cfg)
 
 
-@hydra.main(version_base=None, config_path=None, config_name="maskformer_config")
+@hydra.main(version_base="1.3", config_path=None, config_name="maskformer_config")
 def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
     torch.manual_seed(cfg.seed)

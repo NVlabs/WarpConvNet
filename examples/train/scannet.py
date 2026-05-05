@@ -301,7 +301,7 @@ def register_config():
     cs.store(name="scannet_config", node=cfg)
 
 
-@hydra.main(version_base=None, config_path=None, config_name="scannet_config")
+@hydra.main(version_base="1.3", config_path=None, config_name="scannet_config")
 def main(cfg: DictConfig):
     # Initialize seed
     set_seed(cfg.seed)
