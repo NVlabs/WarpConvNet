@@ -54,6 +54,7 @@ from warpconvnet.dataset.scannet import ScanNetInstanceDataset
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.models import MaskFormer  # backbone instantiated via Hydra
 from warpconvnet.nn.modules.sparse_pool import PointToVoxel
+from warpconvnet.utils.nonfinite_loss_guard import NonFiniteLossGuard
 
 CONFIG_YAML = """
 paths:
@@ -328,6 +329,7 @@ def build_model(cfg, num_classes: int, device: str) -> MaskFormer:
 def train_epoch(model, loader, optimizer, cfg, num_classes, device, epoch, visualizer=None):
     model.train()
     pbar = tqdm(loader, desc=f"epoch {epoch}")
+    loss_guard = NonFiniteLossGuard(max_nonfinite=5)
     for step, batch in enumerate(pbar):
         pc = build_pc(batch, device)
         targets = build_targets(batch, num_classes, cfg.data.ignore_index)
@@ -335,6 +337,10 @@ def train_epoch(model, loader, optimizer, cfg, num_classes, device, epoch, visua
         optimizer.zero_grad()
         logits, masks = model(pc)
         loss, parts = maskformer_loss(logits, masks, targets, num_classes, cfg.loss, device)
+
+        if not loss_guard.check(loss, epoch=epoch, step=step):
+            continue
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()

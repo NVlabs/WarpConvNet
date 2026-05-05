@@ -52,6 +52,7 @@ from warpconvnet.dataset.scannet import ScanNetDataset
 from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.modules.sparse_pool import PointToVoxel
+from warpconvnet.utils.nonfinite_loss_guard import NonFiniteLossGuard
 
 # Embedded YAML configuration
 CONFIG_YAML = """
@@ -188,6 +189,7 @@ def train(
     model.train()
     bar = tqdm(train_loader)
     dict_to_data = DataToTensor(device=cfg.device)
+    loss_guard = NonFiniteLossGuard(max_nonfinite=5)
     for step, batch_dict in enumerate(bar):
         start_time = time.time()
         optimizer.zero_grad(set_to_none=True)
@@ -200,6 +202,13 @@ def train(
                 reduction="mean",
                 ignore_index=cfg.data.ignore_index,
             )
+
+        if not loss_guard.check(loss, epoch=epoch, step=step):
+            # GradScaler.update() still has to be called every step to keep
+            # the scale state coherent.
+            if scaler is not None:
+                scaler.update()
+            continue
 
         if scaler is not None:
             scaler.scale(loss).backward()
