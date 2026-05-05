@@ -28,4 +28,5 @@ PYBIND11_MODULE(_C, m) {
   warpconvnet::bindings::register_coords(m);
   warpconvnet::bindings::register_cuhash(m);
   warpconvnet::bindings::register_mask_gemm(m);
+  warpconvnet::bindings::register_fused_rope(m);
 }

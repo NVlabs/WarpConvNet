@@ -17,6 +17,7 @@ void register_sampling(pybind11::module_ &m);
 void register_coords(pybind11::module_ &m);
 void register_cuhash(pybind11::module_ &m);
 void register_mask_gemm(pybind11::module_ &m);
+void register_fused_rope(pybind11::module_ &m);
 
 }  // namespace bindings
 }  // namespace warpconvnet

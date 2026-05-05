@@ -16,6 +16,7 @@ from warpconvnet.models.mink_unet import (
 )
 from warpconvnet.models.point_transformer_v3 import PointTransformerV3
 from warpconvnet.models.pointnet import PointNet
+from warpconvnet.models.space_former import SpaCeFormer
 
 __all__ = [
     "DGCNN",
@@ -34,4 +35,5 @@ __all__ = [
     "PointMinkUNetBase",
     "PointNet",
     "PointTransformerV3",
+    "SpaCeFormer",
 ]

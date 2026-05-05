@@ -363,6 +363,8 @@ if _HAS_TORCH:
                 "warpconvnet/csrc/cuhash_hash_table.cu",
                 "warpconvnet/csrc/cuhash_kernel_map.cu",
                 "warpconvnet/csrc/cuhash_packed128.cu",
+                "warpconvnet/csrc/bindings/fused_rope_bindings.cpp",
+                "warpconvnet/csrc/fused_rope_kernel.cu",
                 *generated_sources,
             ],
             include_dirs=include_dirs,

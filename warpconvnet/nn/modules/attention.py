@@ -27,6 +27,7 @@ from warpconvnet.geometry.features.ops.convert import (
 )
 from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.mlp import BatchedLinear
+from warpconvnet.nn.modules.rope import VoxelRotaryPositionalEmbeddings
 
 
 def zero_out_points(
@@ -89,9 +90,7 @@ class ToAttention(BaseSpatialModule):
         self.out_type = out_type
         self.use_encoding = use_encoding
         if use_encoding:
-            assert (
-                num_encoding_channels is not None
-            ), "num_encoding_channels must be provided"
+            assert num_encoding_channels is not None, "num_encoding_channels must be provided"
             assert encoding_range is not None, "encoding_range must be provided"
             self.encoding = nn.Sequential(
                 SinusoidalEncoding(
@@ -314,6 +313,8 @@ class PatchAttention(BaseSpatialModule):
         proj_drop: float = 0.0,
         order: POINT_ORDERING = POINT_ORDERING.MORTON_XYZ,
         use_batched_qkv: bool = True,
+        use_rope: bool = False,
+        rope_base: int = 10_000,
     ):
         """
         Patch attention module with optional batched QKV for Muon optimization.
@@ -330,6 +331,11 @@ class PatchAttention(BaseSpatialModule):
             use_batched_qkv: If True, uses separate Q, K, V matrices stacked as [3, dim, dim]
                            for Muon optimization. Muon can orthogonalize the [dim, dim] matrices
                            more effectively than the concatenated [dim, 3*dim] matrix.
+            use_rope: If True, apply 3D RoPE to Q and K via the fused CUDA
+                kernel. Uses point-cloud coordinates for the rotation phase.
+            rope_base: RoPE base. Use
+                `warpconvnet.nn.modules.rope.suggest_voxel_rope_base` for a
+                window-aware default.
         """
         super().__init__()
         self.patch_size = patch_size
@@ -349,6 +355,14 @@ class PatchAttention(BaseSpatialModule):
         self.order = order
         assert flash_attn is not None, "Make sure flash_attn is installed."
         self.attn_drop_p = attn_drop
+
+        self.use_rope = use_rope
+        if use_rope:
+            self.rope = VoxelRotaryPositionalEmbeddings(
+                dim=dim,
+                num_heads=num_heads,
+                base=rope_base,
+            )
 
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -409,6 +423,7 @@ class PatchAttention(BaseSpatialModule):
         K = self.patch_size
 
         feats = x.features
+        coords = x.coordinate_tensor
         M, C = feats.shape[:2]
         inverse_perm = None
         order = order or self.order
@@ -422,10 +437,14 @@ class PatchAttention(BaseSpatialModule):
                 return_inverse=True,
             )
             feats = feats[code_result.perm]
+            if self.use_rope:
+                coords = coords[code_result.perm]
             inverse_perm = code_result.inverse_perm
 
-        # Compute QKV: (M, 3, num_heads, head_dim)
-        qkv = self.qkv(feats).reshape(M, 3, self.num_heads, C // self.num_heads)
+        if self.use_rope:
+            qkv = self.rope(self.qkv(feats), coords)
+        else:
+            qkv = self.qkv(feats).reshape(M, 3, self.num_heads, C // self.num_heads)
         if qkv.dtype not in [torch.float16, torch.bfloat16]:
             qkv = qkv.to(torch.float16)
 
@@ -506,9 +525,7 @@ class TransformerBlock(BaseSpatialModule):
         )
         # Even hidden dimension
         hidden_dim = int(
-            (ffn_multiplier * dim + ffn_multiple_of - 1)
-            // ffn_multiple_of
-            * ffn_multiple_of
+            (ffn_multiplier * dim + ffn_multiple_of - 1) // ffn_multiple_of * ffn_multiple_of
         )
         self.feed_forward = FeedForward(
             dim=dim,
