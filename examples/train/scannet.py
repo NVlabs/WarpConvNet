@@ -204,10 +204,10 @@ def train(
             )
 
         if not loss_guard.check(loss, epoch=epoch, step=step):
-            # GradScaler.update() still has to be called every step to keep
-            # the scale state coherent.
-            if scaler is not None:
-                scaler.update()
+            # Skip optimizer + scaler entirely. GradScaler.update() must be
+            # preceded by scale().backward()+step() (or unscale_()) so it can
+            # record an inf check; calling update() alone trips an assertion.
+            # Scale state is fine to carry to the next iteration as-is.
             continue
 
         if scaler is not None:
