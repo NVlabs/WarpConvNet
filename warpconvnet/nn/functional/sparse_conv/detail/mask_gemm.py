@@ -7,7 +7,8 @@ Processes all kernel offsets in a single CUDA launch using bitmask-based
 offset skipping and mask_argsort for warp-coherent output ordering.
 """
 
-from typing import Optional, Tuple
+import os
+from typing import Literal, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -15,6 +16,46 @@ from torch import Tensor
 import warpconvnet._C as _C
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
 from warpconvnet.utils.type_cast import _min_dtype
+
+
+# Sort strategy for mask_argsort. Controls how voxels are ordered prior to
+# kernel dispatch:
+#   - "mask_bit": stable argsort on the raw uint32 pair_mask word(s). Groups
+#                 voxels with identical bitmasks contiguously (default).
+#   - "gray_code": treat pair_mask as a Gray code, decode to binary, and sort
+#                  by the decoded key. Induces a Gray-order linearization
+#                  so consecutive blocks see Hamming-adjacent active-offset
+#                  patterns. Expected to improve cache reuse on output rows
+#                  when a block transitions between mask groups.
+# Override at process start via WARPCONVNET_MASK_SORT={mask_bit,gray_code}.
+_MaskSortStrategy = Literal["mask_bit", "gray_code"]
+
+
+def _default_mask_sort_strategy() -> _MaskSortStrategy:
+    val = os.environ.get("WARPCONVNET_MASK_SORT", "mask_bit").strip().lower()
+    if val not in ("mask_bit", "gray_code"):
+        # Unknown value: fall back to default rather than crash. Mis-typed
+        # env vars must not break correctness.
+        return "mask_bit"
+    return val  # type: ignore[return-value]
+
+
+def _gray_to_binary_uint32(x: Tensor) -> Tensor:
+    """Decode a Gray-code uint32 tensor to its binary representation.
+
+    Standard inverse-Gray: binary[i] = XOR of bits {i, i+1, ..., 31} of gray.
+    Implemented as iterated `x ^= x >> shift` doublings (5 steps for 32 bits).
+    Operates element-wise; preserves shape and dtype.
+    """
+    # Cast to int64 to avoid signed-shift surprises while keeping bit-exact
+    # uint32 semantics. Final result re-cast to int32 by caller.
+    y = x.to(torch.int64) & 0xFFFFFFFF
+    y = y ^ (y >> 1)
+    y = y ^ (y >> 2)
+    y = y ^ (y >> 4)
+    y = y ^ (y >> 8)
+    y = y ^ (y >> 16)
+    return y
 
 
 def _build_pair_table(
@@ -70,6 +111,7 @@ def _build_mask_and_argsort(
     N: int,
     K: int,
     device: torch.device,
+    sort_strategy: Optional[_MaskSortStrategy] = None,
 ) -> Tuple[Tensor, Tensor]:
     """Build pair_mask and mask_argsort from a pair_table [K * N].
 
@@ -79,16 +121,40 @@ def _build_mask_and_argsort(
                 mask_words_padded is the next DISPATCH_MW template boundary
                 so the kernel's stride matches what the caller allocates.
     mask_argsort is always [N] int32 (voxel permutation).
+
+    sort_strategy: see _default_mask_sort_strategy() docstring. None reads
+    the WARPCONVNET_MASK_SORT env var (default "mask_bit"). The choice is
+    semantic-preserving — both yield valid permutations of [0, N).
     """
     mask_words = _dispatched_mask_words(K)
     pair_mask = torch.zeros(N * mask_words, dtype=torch.int32, device=device)
     _C.gemm.build_pair_mask_cuda(pair_table, pair_mask, K, mask_words)
+
+    strategy: _MaskSortStrategy = (
+        sort_strategy if sort_strategy is not None else _default_mask_sort_strategy()
+    )
+
     if mask_words == 1:
-        mask_argsort = torch.argsort(pair_mask, stable=True).int()
+        word0 = pair_mask
     else:
-        # Sort by first word for warp-coherent grouping
-        sort_key = pair_mask[::mask_words]  # word 0 of each voxel
-        mask_argsort = torch.argsort(sort_key, stable=True).int()
+        # Stride view of word 0 of each voxel. .contiguous() forces a copy
+        # so the sort/decoded key isn't strided in subsequent ops.
+        word0 = pair_mask[::mask_words].contiguous()
+
+    if strategy == "gray_code":
+        # Decode pair_mask (Gray) -> binary, then stable-sort. This puts
+        # voxels with Hamming-adjacent mask bits at adjacent positions,
+        # improving output-row cache reuse across consecutive blocks.
+        # For mask_words > 1, the decoded word-0 key is the dominant
+        # signal; ties on word 0 fall back to the natural (stable) order
+        # which still groups identical patterns. We deliberately don't
+        # multi-key sort the higher words — empirically the fwd kernel
+        # only consults word 0 first (NB: a future opt could chain).
+        key = _gray_to_binary_uint32(word0).int()
+    else:  # "mask_bit" (default, legacy)
+        key = word0
+
+    mask_argsort = torch.argsort(key, stable=True).int()
     return pair_mask, mask_argsort
 
 
@@ -96,6 +162,7 @@ def _kernel_map_to_mask_data(
     kernel_map: IntSearchResult,
     num_out_coords: int,
     device: torch.device,
+    sort_strategy: Optional[_MaskSortStrategy] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Convert IntSearchResult to mask-based pair_table + mask + argsort.
 
@@ -107,7 +174,9 @@ def _kernel_map_to_mask_data(
     K = len(kernel_map)
     N_out = num_out_coords
     pair_table = _build_pair_table(kernel_map, N_out, device)
-    pair_mask, mask_argsort = _build_mask_and_argsort(pair_table, N_out, K, device)
+    pair_mask, mask_argsort = _build_mask_and_argsort(
+        pair_table, N_out, K, device, sort_strategy=sort_strategy
+    )
     return pair_table, pair_mask, mask_argsort
 
 
@@ -117,6 +186,7 @@ def _build_reverse_mask_data(
     N_out: int,
     K: int,
     device: torch.device,
+    sort_strategy: Optional[_MaskSortStrategy] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Build reverse pair_table + mask + argsort for atomicAdd-free dgrad.
 
@@ -140,7 +210,7 @@ def _build_reverse_mask_data(
 
     reverse_flat = reverse_pair_table.reshape(-1).contiguous()
     reverse_pair_mask, reverse_mask_argsort = _build_mask_and_argsort(
-        reverse_flat, N_in, K, device
+        reverse_flat, N_in, K, device, sort_strategy=sort_strategy
     )
     return reverse_flat, reverse_pair_mask, reverse_mask_argsort
 

@@ -244,11 +244,12 @@ except ImportError:
 
 # F32-accumulator tiles: fp32 accumulation over C_in partial products.
 # Measured rd ~2e-5 against explicit_gemm, constant across C_in (8..256).
+# tile_ids match warpgemm canonical mask_gemm_dispatch_table.inc.
 _AB_MASK_GEMM_F32ACC = (
     [
-        ("mask_gemm", {"tile_id": 41}),  # 64x64
-        ("mask_gemm", {"tile_id": 43}),  # 64x128 3-stage
-        ("mask_gemm", {"tile_id": 44}),  # 128x64
+        ("mask_gemm", {"tile_id": 41}),  # 64x64 (canonical 41 = ex-wcn 41)
+        ("mask_gemm", {"tile_id": 3}),  # 64x128 3-stage (canonical 3 = ex-wcn 43)
+        ("mask_gemm", {"tile_id": 2}),  # 128x64 (canonical 2 = ex-wcn 44)
     ]
     if _HAS_MASK_GEMM
     else []
@@ -259,13 +260,13 @@ _AB_MASK_GEMM_F32ACC = (
 # 10-35x worse than F32Acc tiles at the same shape. Excluded from the
 # auto/trimmed pools because autotune picks them for speed, then the lossy
 # gradient accumulation slows training convergence over many epochs (observed
-# on MinkUNet18 ScanNet AMP training: tile 40 picked for ci>=64 deep layers,
+# on MinkUNet18 ScanNet AMP training: tile 28 picked for ci>=64 deep layers,
 # loss curve trails v1.7.0 REF by measurable margin). Kept available under
 # WARPCONVNET_AB_ALGO_MODE=all for inference benchmarks where speed dominates.
 _AB_MASK_GEMM_F16ACC = (
     [
-        ("mask_gemm", {"tile_id": 40}),  # 32x32 F16Acc
-        ("mask_gemm", {"tile_id": 42}),  # 64x128 F16Acc
+        ("mask_gemm", {"tile_id": 28}),  # 32x32 F16Acc (canonical 28 = ex-wcn 40)
+        ("mask_gemm", {"tile_id": 19}),  # 64x128 F16Acc (canonical 19 = ex-wcn 42)
     ]
     if _HAS_MASK_GEMM
     else []
@@ -297,37 +298,21 @@ _AB_MASK_GEMM_PCOFF = (
 # opt into F16Acc and pcoff tiles.
 _AB_MASK_GEMM = _AB_MASK_GEMM_F32ACC + _AB_MASK_GEMM_F16ACC + _AB_MASK_GEMM_PCOFF
 
-# Dgrad-namespace tile ids for fwd-kernel-reused-as-dgrad. These live in the
-# ProdDgradTile C++ enum (83-94). Dispatch translates each back to its source
-# ProdFwdTile id before invoking _C.mask_gemm.fwd. Autotune cache therefore
-# stores dgrad picks under dgrad-namespace ids rather than fwd-namespace ids.
-WT_TILE_TO_FWD_TILE = {
-    # f32 accumulate
-    83: 41,  # Prod_Dgrad_64x64x32_wt          <- Prod_Fwd_64x64x32
-    84: 43,  # Prod_Dgrad_64x128x32_3s_wt      <- Prod_Fwd_64x128x32_3s
-    85: 44,  # Prod_Dgrad_128x64x32_wt         <- Prod_Fwd_128x64x32
-    # f16 accumulate
-    86: 40,  # Prod_Dgrad_32x32x32_wt_F16Acc   <- Prod_Fwd_32x32x32_F16Acc
-    87: 42,  # Prod_Dgrad_64x128x32_wt_F16Acc  <- Prod_Fwd_64x128x32_F16Acc
-    # Pcoff (E1/F arc)
-    88: 54,  # Prod_Dgrad_Pcoff_64x64x32_flat_wt
-    89: 55,  # Prod_Dgrad_Pcoff_64x64x32_f16k8_wt
-    90: 56,  # Prod_Dgrad_Pcoff_64x128x32_f16k8_wt
-    91: 57,  # Prod_Dgrad_Pcoff_64x128x32_flat_wt
-    92: 58,  # Prod_Dgrad_Pcoff_64x64x32_3s_wt
-    93: 59,  # Prod_Dgrad_Pcoff_64x64x32_2s_warp_spec_wt
-    94: 63,  # Prod_Dgrad_Pcoff_64x128x32_2s_warp_spec_wt
-}
-
+# Dgrad-namespace tile ids for fwd-kernel-reused-as-dgrad. These are
+# canonical warpgemm tile_ids 900-911 in the DGRAD op namespace. Dispatch
+# in mask_gemm_bindings.cu has a dedicated dgrad_wt arm (tile_id range
+# 900-911) that routes to the underlying fwd kernel after the caller
+# pre-transposes the weight. Previous wcn dispatch used 83-94 in
+# ProdDgradTile plus a WT_TILE_TO_FWD_TILE remap; both are removed.
 _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF = (
     [
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 88}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 89}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 90}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 91}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 92}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 93}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 94}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 905}),  # ex-88: 64x64 flat F16Accum
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 906}),  # ex-89: 64x64 flat F16K8
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 907}),  # ex-90: 64x128 flat F16K8
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 908}),  # ex-91: 64x128 flat F16Accum
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 909}),  # ex-92: 64x64 3s
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 910}),  # ex-93: 64x64 WS
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 911}),  # ex-94: 64x128 WS
     ]
     if _HAS_MASK_GEMM
     else []
@@ -335,9 +320,9 @@ _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF = (
 
 _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC = (
     [
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 83}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 84}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 85}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 900}),  # ex-83: 64x64 sa
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 901}),  # ex-84: 64x128 3s
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 902}),  # ex-85: 128x64
     ]
     if _HAS_MASK_GEMM
     else []
@@ -345,8 +330,8 @@ _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC = (
 
 _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC = (
     [
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 86}),
-        ("mask_gemm_fwd_as_dgrad", {"tile_id": 87}),
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 903}),  # ex-86: 32x32 F16Accum
+        ("mask_gemm_fwd_as_dgrad", {"tile_id": 904}),  # ex-87: 64x128 F16Accum
     ]
     if _HAS_MASK_GEMM
     else []
@@ -358,34 +343,36 @@ _AB_MASK_GEMM_FWD_AS_DGRAD = (
     + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF
 )
 
+# tile_ids match warpgemm canonical mask_gemm_dispatch_table.inc (wgrad op).
+# Migration map: ex-wcn 60→0, 61→4, 62→7, 63→9, 64→1, 65→2, 66→3.
 _ATB_MASK_GEMM = (
     [
-        # tile_id=60 (Prod_Wgrad_64x64x32_f32, direct store) epilogue was
+        # tile_id=0 (ex-60: Wgrad_64x64x32_f32, direct store) epilogue was
         # numerically wrong at split_k>1 (non-atomic race); fixed upstream by
         # branching to atomicAdd when split_k>1 while keeping the fast direct
         # store at split_k=1. Kept in the candidate set at both split_k=1
         # (its fast path) and split_k=32 (atomicAdd path) so autotune can
         # pick whichever wins for a given shape.
-        ("mask_gemm", {"tile_id": 60, "split_k": 1}),  # Direct store, no split-K
-        ("mask_gemm", {"tile_id": 60, "split_k": 32}),  # Direct store w/ atomic fallback
-        ("mask_gemm", {"tile_id": 61, "split_k": 128}),  # Atomic 64x64, high split_k
-        ("mask_gemm", {"tile_id": 61, "split_k": 32}),  # Atomic 64x64, low split_k
-        ("mask_gemm", {"tile_id": 62, "split_k": 64}),  # Atomic 64x128, high split_k
-        ("mask_gemm", {"tile_id": 62, "split_k": 16}),  # Atomic 64x128, low split_k
-        ("mask_gemm", {"tile_id": 63, "split_k": 128}),  # 3-stage atomic, high split_k
-        ("mask_gemm", {"tile_id": 63, "split_k": 32}),  # 3-stage atomic, low split_k
+        ("mask_gemm", {"tile_id": 0, "split_k": 1}),  # ex-60: Direct store, no split-K
+        ("mask_gemm", {"tile_id": 0, "split_k": 32}),  # ex-60: Direct store w/ atomic fallback
+        ("mask_gemm", {"tile_id": 4, "split_k": 128}),  # ex-61: Atomic 64x64, high split_k
+        ("mask_gemm", {"tile_id": 4, "split_k": 32}),  # ex-61: Atomic 64x64, low split_k
+        ("mask_gemm", {"tile_id": 7, "split_k": 64}),  # ex-62: Atomic 64x128, high split_k
+        ("mask_gemm", {"tile_id": 7, "split_k": 16}),  # ex-62: Atomic 64x128, low split_k
+        ("mask_gemm", {"tile_id": 9, "split_k": 128}),  # ex-63: 3-stage atomic, high split_k
+        ("mask_gemm", {"tile_id": 9, "split_k": 32}),  # ex-63: 3-stage atomic, low split_k
         # Workspace tiles: allocate [split_k, K, G, Cig, Cog] fp32 buffer, no
         # atomic contention, post-kernel sum reduction. Win at small per-group
         # C + large K*G where atomic tiles thrash (e.g. K=343 g=4 Cig=Cog=16).
         # Upper split_k capped at 32 per warpgemm valid_split_k recommendation
         # (workspace memory = split_k * K * G * Cig * Cog * 4 bytes; 32 is a
         # good perf/memory compromise for typical UNet shapes).
-        ("mask_gemm", {"tile_id": 64, "split_k": 16}),  # Workspace 64x64 2s
-        ("mask_gemm", {"tile_id": 64, "split_k": 32}),  # Workspace 64x64 2s
-        ("mask_gemm", {"tile_id": 65, "split_k": 16}),  # Workspace 64x64 3s
-        ("mask_gemm", {"tile_id": 65, "split_k": 32}),  # Workspace 64x64 3s
-        ("mask_gemm", {"tile_id": 66, "split_k": 16}),  # Workspace 64x128 2s
-        ("mask_gemm", {"tile_id": 66, "split_k": 32}),  # Workspace 64x128 2s
+        ("mask_gemm", {"tile_id": 1, "split_k": 16}),  # ex-64: Workspace 64x64 2s
+        ("mask_gemm", {"tile_id": 1, "split_k": 32}),  # ex-64: Workspace 64x64 2s
+        ("mask_gemm", {"tile_id": 2, "split_k": 16}),  # ex-65: Workspace 64x64 3s
+        ("mask_gemm", {"tile_id": 2, "split_k": 32}),  # ex-65: Workspace 64x64 3s
+        ("mask_gemm", {"tile_id": 3, "split_k": 16}),  # ex-66: Workspace 64x128 2s
+        ("mask_gemm", {"tile_id": 3, "split_k": 32}),  # ex-66: Workspace 64x128 2s
     ]
     if _HAS_MASK_GEMM
     else []
@@ -808,6 +795,7 @@ def _get_trimmed_AtB_params(
 _ALL_ATB_PARAMS = [
     # mask_gemm fused mask kernels
     *_ATB_MASK_GEMM,
+    # mask_gemm compact-segment (pre-compacted i/o pairs)
     # Explicit GEMM
     ("explicit_gemm", {}),
     *[("explicit_gemm_grouped", {"saturation_m": m}) for m in [2000, 5000, 10000]],

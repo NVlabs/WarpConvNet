@@ -1093,19 +1093,19 @@ def _make_voxels_k8(N=400_000, C=64, grid=100, seed=1234, device="cuda"):
 def test_k8_tile3_pipeline_drain(seed, stride):
     """K=8 (kernel_size=2) fp16 fwd: regression for the
     MaskGemm_forward_64x128x32_3s 3-stage pipeline epilog race (warpgemm
-    e543398). Prior to the fix, tile_id=43 at K=8 C_in=64 with num_k_tiles=2
-    produced non-deterministic NaN / garbage across seeds because the
-    epilog's smem read raced the prolog's last cp.async. K=27 / K=125
-    workloads masked it via cache warming.
+    e543398). Prior to the fix, tile_id=3 (ex-43) at K=8 C_in=64 with
+    num_k_tiles=2 produced non-deterministic NaN / garbage across seeds
+    because the epilog's smem read raced the prolog's last cp.async.
+    K=27 / K=125 workloads masked it via cache warming.
 
-    Pinned tile_id=43 forces the pool through the affected kernel; the
+    Pinned tile_id=3 forces the pool through the affected kernel; the
     all-seeds pass confirms the drain is correct.
     """
     import warpconvnet.nn.functional.sparse_conv.detail.algo_params as ap
 
     orig_f32 = ap._AB_MASK_GEMM_F32ACC
     orig_f16 = ap._AB_MASK_GEMM_F16ACC
-    ap._AB_MASK_GEMM_F32ACC = [("mask_gemm", {"tile_id": 43})]
+    ap._AB_MASK_GEMM_F32ACC = [("mask_gemm", {"tile_id": 3})]
     ap._AB_MASK_GEMM_F16ACC = []
     ap._AB_MASK_GEMM = ap._AB_MASK_GEMM_F32ACC
 

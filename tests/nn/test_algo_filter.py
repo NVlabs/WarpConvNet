@@ -122,9 +122,9 @@ def test_fp16_accum_flag_adds_f16acc_tiles_to_pool():
     f16_tiles = _tile_ids(f16_pool)
     # F32-accum tiles common to both
     assert set(f32_tiles).issubset(f16_tiles)
-    # F16Acc-only tiles (40, 42) absent from F32 pool, present in F16 pool
-    assert 40 in f16_tiles and 40 not in f32_tiles
-    assert 42 in f16_tiles and 42 not in f32_tiles
+    # F16Acc-only tiles (28, 19; canonical = ex-wcn 40, 42) absent from F32 pool, present in F16 pool
+    assert 28 in f16_tiles and 28 not in f32_tiles
+    assert 19 in f16_tiles and 19 not in f32_tiles
 
 
 def test_spatially_sparse_conv_explicit_gemm_end_to_end():

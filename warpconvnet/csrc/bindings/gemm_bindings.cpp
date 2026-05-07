@@ -23,7 +23,7 @@ struct bfloat16_t;
 }  // namespace cutlass
 
 #include "../include/gemm_error_codes.h"
-#include "../include/gemm_mma_tiles.h"
+#include "../include/gemm_mma_tiles.h"       // canonical tile tags
 #include "../include/grouped_gemm_params.h"  // GroupedGemmParams
 
 namespace py = pybind11;

@@ -7,23 +7,27 @@ namespace warpconvnet {
 namespace gemm {
 
 // -----------------------------------------------------------------------------
-//  Tile tag types — used as template parameters to select CTA tile shapes.
-//  The naming convention is Tile{M}x{N}x{K}.
+// Tile tag types — used as template parameters to select CTA tile shapes.
+// The naming convention is Tile{M}x{N}x{K}.
+//
+// AUTO-GENERATED from warpgemm registry tile_tags. Bond #22 Option 1
+// single-source-of-truth: do NOT edit by hand. Run `python -m
+// warpgemm.codegen` or call `write_mask_to(out_dir)` to regenerate.
 // -----------------------------------------------------------------------------
 
-// --- tK=32 tiles (original) ---
+// --- tK=32 tiles (mask_gemm + offset_gemm shared) ---
 struct Tile128x128x32 {};
 struct Tile128x64x32 {};
 struct Tile64x128x32 {};
 struct Tile64x64x32 {};
 
-// --- tK=64 tiles (fewer mainloop iterations for large channels) ---
+// --- tK=64 tiles (offset_gemm — fewer mainloop iters for large channels) ---
 struct Tile64x64x64 {};
 struct Tile128x64x64 {};
 struct Tile64x128x64 {};
 struct Tile128x128x64 {};
 
-// --- Asymmetric M/N tiles (tK=32) ---
+// --- Asymmetric M/N tiles (offset_gemm) ---
 struct Tile256x64x32 {};
 struct Tile64x256x32 {};
 
@@ -32,33 +36,21 @@ struct Tile64x64x32_F16Accum {};
 struct Tile128x64x32_F16Accum {};
 struct Tile64x128x32_F16Accum {};
 
+// --- 128x128 with 8-warp Layout<_4,_2,_1> — bond #22 axis A2 ---
+struct Tile128x128x32_8warp {};
+struct Tile128x128x32_8warp_F16Accum {};
+
 // --- FP16 accum + k=8 MMA atom (4 k-blocks, m16n8k8) ---
 struct Tile64x64x32_F16K8 {};
 struct Tile64x128x32_F16K8 {};
 
-// --- F32 accum + k=8 MMA atom (4 interleaving points, for wgrad numerics) ---
-struct Tile64x64x32_F32K8 {};
-
 // --- k=8 MMA with full-width LDSM (for dgrad K-contiguous B operand) ---
-// Uses SM75_U32x4_LDSM_N (16-byte ldmatrix) compatible with standard smem swizzle,
-// but k=8 MMA atom for 4 interleaving points. CuTe handles the k mismatch.
 struct Tile64x64x32_DgradK8 {};
 struct Tile64x128x32_DgradK8 {};
 
 // --- Small tiles for 64-thread (2-warp) configs (lower register pressure) ---
 struct Tile32x32x32 {};
 struct Tile32x32x32_F16Accum {};
-struct Tile32x16x32_F16Accum {};  // tN=16: 2x blocks for better wave scheduling
-
-// --- Pcoff (E1 offset-index precompute) variants — universal-safe 2026-04-20 ---
-// Each mirrors warpgemm fwd tile IDs 54-63. Config inherits from a base tile.
-struct Tile64x64x32_Pcoff {};      // tile 54: F16Accum base
-struct Tile64x64x32_Pcoff_K8 {};   // tile 55: F16K8 base
-struct Tile64x128x32_Pcoff_K8 {};  // tile 56: F16K8 base (A100 flagship)
-struct Tile64x128x32_Pcoff {};     // tile 57: F16Accum base
-struct Tile64x64x32_Pcoff_3s {};   // tile 58: F32 accum, 3-stage override
-struct Tile64x64x32_Pcoff_WS {};   // tile 59: F32 accum, warp-spec
-struct Tile64x128x32_Pcoff_WS {};  // tile 63: F32 accum, warp-spec 64x128
 
 // --- SM90 (Hopper) WGMMA tiles ---
 #if defined(WARPCONVNET_SM90_ENABLED)
@@ -80,7 +72,9 @@ struct SM90_FP8_Tile128x128x128 {};
 struct SM90_FP8_Tile64x256x128 {};
 #endif  // WARPCONVNET_SM90_ENABLED
 
-// Runtime tile selector (integer maps to tile tag via switch)
+// Legacy runtime tile selector. Pre-Option 1 wcn dispatchers used these
+// integer codes; post-Option 1 dispatch keys directly off warpgemm
+// tile_id (see mask_gemm_dispatch_table.inc). Kept for backward compat.
 enum class MMATile : int {
   Tile128x128x32 = 0,
   Tile128x64x32 = 1,
@@ -117,80 +111,6 @@ enum class MMATile : int {
   SM90_FP8_Tile128x128x128 = 205,
   SM90_FP8_Tile64x256x128 = 206,
 #endif  // WARPCONVNET_SM90_ENABLED
-
-};
-
-// -----------------------------------------------------------------------------
-// Production mask GEMM tile IDs — op-scoped enums mirroring warpgemm's
-// op-scoped catalog. Each sync from warpgemm adds new entries to the
-// matching op enum with warpgemm's native tile_id values (no translation).
-// -----------------------------------------------------------------------------
-
-enum class ProdFwdTile : int {
-  _32x32x32_F16Acc = 40,
-  _64x64x32 = 41,
-  _64x128x32_F16Acc = 42,
-  _64x128x32_3s = 43,
-  _128x64x32 = 44,
-  // E1 pcoff (offset-precomputation) tiles — universal-safe 2026-04-20
-  Pcoff_64x64x32_flat = 54,    // E1 alone (Ada universal winner)
-  Pcoff_64x64x32_f16k8 = 55,   // E1 x D1 (64x64)
-  Pcoff_64x128x32_f16k8 = 56,  // E1 x D1 (64x128, A100 flagship)
-  Pcoff_64x128x32_flat = 57,   // E1 alone (64x128)
-  // F arc pcoff compositions — dissolve SM_89 pathologies 2026-04-20
-  Pcoff_64x64x32_3s = 58,             // E1 x tile10 (3-stage interleaved)
-  Pcoff_64x64x32_2s_warp_spec = 59,   // E1 x tile48 (warp-spec)
-  Pcoff_64x128x32_2s_warp_spec = 63,  // E1 x tile49 (warp-spec 64x128)
-  // Scalar fallbacks (non-aligned C) — shared tag space with dgrad scalars
-  Scalar_SAB_SE = 70,
-  Scalar_SA = 71,
-  Scalar_SB_SE = 72,
-  // F32-output tiles (fp16/bf16 input → fp32 output, non-AMP path)
-  _64x64x32_f32out = 80,
-  _64x64x32_f32out_sb = 82,
-};
-
-enum class ProdDgradTile : int {
-  _32x32x32 = 50,
-  _64x64x32 = 51,
-  _64x128x32 = 52,
-  _64x64x32_F16Acc = 53,
-  _64x128x32_F16Acc = 54,
-  _64x64x32_Pipe = 55,
-  _64x128x32_Pipe = 56,
-  _128x64x32_Pipe = 57,
-  // Scalar fallbacks (shared numbering with fwd, distinct type)
-  Scalar_SAB_SE = 70,
-  Scalar_SA = 71,
-  Scalar_SB_SE = 72,
-  _64x64x32_f32out = 81,
-  // fwd-kernel-reused-as-dgrad (weight pre-transposed by caller). These are
-  // descriptive labels for autotune cache and logs; dispatch translates them
-  // to the underlying ProdFwdTile id before invoking launch_mask_gemm_fwd.
-  // See WT_TILE_TO_FWD_TILE in algo_params.py.
-  _64x64x32_wt = 83,                     // -> ProdFwdTile::_64x64x32 (41)
-  _64x128x32_3s_wt = 84,                 // -> ProdFwdTile::_64x128x32_3s (43)
-  _128x64x32_wt = 85,                    // -> ProdFwdTile::_128x64x32 (44)
-  _32x32x32_wt_F16Acc = 86,              // -> ProdFwdTile::_32x32x32_F16Acc (40)
-  _64x128x32_wt_F16Acc = 87,             // -> ProdFwdTile::_64x128x32_F16Acc (42)
-  Pcoff_64x64x32_flat_wt = 88,           // -> ProdFwdTile::Pcoff_64x64x32_flat (54)
-  Pcoff_64x64x32_f16k8_wt = 89,          // -> ProdFwdTile::Pcoff_64x64x32_f16k8 (55)
-  Pcoff_64x128x32_f16k8_wt = 90,         // -> ProdFwdTile::Pcoff_64x128x32_f16k8 (56)
-  Pcoff_64x128x32_flat_wt = 91,          // -> ProdFwdTile::Pcoff_64x128x32_flat (57)
-  Pcoff_64x64x32_3s_wt = 92,             // -> ProdFwdTile::Pcoff_64x64x32_3s (58)
-  Pcoff_64x64x32_2s_warp_spec_wt = 93,   // -> ProdFwdTile::Pcoff_64x64x32_2s_warp_spec (59)
-  Pcoff_64x128x32_2s_warp_spec_wt = 94,  // -> ProdFwdTile::Pcoff_64x128x32_2s_warp_spec (63)
-};
-
-enum class ProdWgradTile : int {
-  _64x64x32_f32 = 60,
-  _64x64x32_f32_atomic = 61,
-  _64x128x32_f32_atomic = 62,
-  _64x64x32_3s_f32_atomic = 63,
-  _64x64x32_2s_f32_workspace = 64,
-  _64x64x32_3s_f32_workspace = 65,
-  _64x128x32_2s_f32_workspace = 66,
-  Scalar_SAB = 73,
 };
 
 }  // namespace gemm

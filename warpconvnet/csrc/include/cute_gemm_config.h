@@ -17,6 +17,12 @@
 
 #pragma once
 
+// cute/tensor.hpp must precede cute/atom/* — nvcc 12.9 + CUTLASS 12.9
+// cooperative_gemm.hpp pulls Copy_Atom symbols whose definitions live
+// behind the tensor header. Reverse order produced "Copy_Atom undefined"
+// during wcn build (bond #22 PR #2 surfacing, 2026-05-07). Guarded
+// against clang-format SortIncludes which would otherwise alphabetize
+// the block back to the broken order.
 // clang-format off
 #include "cute/tensor.hpp"
 #include "cute/atom/copy_atom.hpp"
@@ -178,27 +184,9 @@ using SmemLayoutAtomB_FP32 =
     static constexpr bool UseCpAsyncGatherA = false;                                         \
   };
 
-// F32 accumulator + k=8 MMA atom — for wgrad where f32 precision is needed
-// but 4 interleaving points help with load/MMA overlap.
-template <>
-struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_F32K8> {
-  using ElementInput = cutlass::half_t;
-  using TileShape = cute::Shape<cute::Int<64>, cute::Int<64>, cute::Int<32>>;
-  using TiledMma = cute::TiledMMA<cute::MMA_Atom<cute::SM80_16x8x8_F32F16F16F32_TN>,
-                                  cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>,
-                                  cute::Tile<cute::_32, cute::_32, cute::_8>>;
-  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
-  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
-  // k=8 needs half-width smem copy atoms to match mma_k
-  using SmemCopyAtomA = cute::Copy_Atom<cute::SM75_U32x2_LDSM_N, ElementInput>;
-  using SmemCopyAtomB = cute::Copy_Atom<cute::SM75_U16x4_LDSM_T, ElementInput>;
-  using GmemTiledCopyA = void;
-  using GmemTiledCopyB = void;
-  static constexpr int NumStages = 2;
-  static constexpr int AlignmentA = 4;
-  static constexpr int AlignmentB = 4;
-  static constexpr bool UseCpAsyncGatherA = false;
-};
+// Tile64x64x32_F32K8 spec dropped 2026-05-07 — peer audit + wcn PR #2
+// build confirmed dead code (no kernel instantiation, no canonical
+// gemm_mma_tiles.h decl). Bond #22 Option 1 cleanup.
 
 // k=8 MMA with FULL-WIDTH LDSM — for dgrad where both A and B use K-contiguous
 // smem layout (SmemLayoutAtomA). The standard SmemLayoutAtomA + SM75_U32x4_LDSM_N
@@ -253,10 +241,50 @@ DEFINE_CUTE_TILE_CONFIG_FP16(Tile128x64x32, 128, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16(Tile64x128x32, 64, 128, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16(Tile128x128x32, 128, 128, 32)
 
+// 8-warp Layout<_4,_2,_1> variant — bond #22 axis A2.
+template <>
+struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32_8warp> {
+  using ElementInput = cutlass::half_t;
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<128>, cute::Int<32>>;
+  using TiledMma = cute::TiledMMA<cute::MMA_Atom<cute::SM80_16x8x16_F32F16F16F32_TN>,
+                                  cute::Layout<cute::Shape<cute::_4, cute::_2, cute::_1>>,
+                                  cute::Tile<cute::_64, cute::_32, cute::_16>>;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
+  using SmemCopyAtomA = cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, ElementInput>;
+  using SmemCopyAtomB = cute::Copy_Atom<cute::SM75_U16x8_LDSM_T, ElementInput>;
+  using GmemTiledCopyA = void;
+  using GmemTiledCopyB = void;
+  static constexpr int NumStages = 2;
+  static constexpr int AlignmentA = 4;
+  static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
+};
+
 DEFINE_CUTE_TILE_CONFIG_BF16(Tile64x64x32, 64, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_BF16(Tile128x64x32, 128, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_BF16(Tile64x128x32, 64, 128, 32)
 DEFINE_CUTE_TILE_CONFIG_BF16(Tile128x128x32, 128, 128, 32)
+
+// 8-warp BF16 variant — bond #22 axis A2.
+template <>
+struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x128x32_8warp> {
+  using ElementInput = cutlass::bfloat16_t;
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<128>, cute::Int<32>>;
+  using TiledMma = cute::TiledMMA<cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>,
+                                  cute::Layout<cute::Shape<cute::_4, cute::_2, cute::_1>>,
+                                  cute::Tile<cute::_64, cute::_32, cute::_16>>;
+  using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
+  using SmemCopyAtomA = cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, ElementInput>;
+  using SmemCopyAtomB = cute::Copy_Atom<cute::SM75_U16x8_LDSM_T, ElementInput>;
+  using GmemTiledCopyA = void;
+  using GmemTiledCopyB = void;
+  static constexpr int NumStages = 2;
+  static constexpr int AlignmentA = 4;
+  static constexpr int AlignmentB = 4;
+  static constexpr bool UseCpAsyncGatherA = false;
+};
 
 // SmemLayoutAtomB for N=32 tiles (smaller atom: 32×8 instead of 64×8)
 using SmemLayoutAtomB_FP16_N32 = decltype(cute::composition(
@@ -304,21 +332,25 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile32x32x32_F16Accum> {
   static constexpr bool UseCpAsyncGatherA = false;
 };
 
-// 32×16×32 tile: tN=16 → 2× blocks for C=32 (better wave scheduling)
-// SmemLayoutAtomB needs N=16 compatible atom
-using SmemLayoutAtomB_FP16_N16 = decltype(cute::composition(
-    cute::Swizzle<2, 3, 3>{},
-    cute::Layout<cute::Shape<cute::_16, cute::_8>, cute::Stride<cute::_1, cute::_16>>{}));
+// FP16 accum + k=8 MMA atom tiles (m16n8k8)
+DEFINE_CUTE_TILE_CONFIG_FP16_K8(Tile64x64x32, 64, 64, 32)
+DEFINE_CUTE_TILE_CONFIG_FP16_K8(Tile64x128x32, 64, 128, 32)
 
+// FP16 accumulator tiles (2x tensor throughput, for fwd/dgrad)
+DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x64x32, 64, 64, 32)
+DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile128x64x32, 128, 64, 32)
+DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x128x32, 64, 128, 32)
+
+// 8-warp F16Acc variant — bond #22 axis A2.
 template <>
-struct CuteTileConfig<cutlass::half_t, gemm::Tile32x16x32_F16Accum> {
+struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32_8warp_F16Accum> {
   using ElementInput = cutlass::half_t;
-  using TileShape = cute::Shape<cute::Int<32>, cute::Int<16>, cute::Int<32>>;
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<128>, cute::Int<32>>;
   using TiledMma = cute::TiledMMA<cute::MMA_Atom<cute::SM80_16x8x16_F16F16F16F16_TN>,
-                                  cute::Layout<cute::Shape<cute::_2, cute::_1, cute::_1>>,
-                                  cute::Tile<cute::_32, cute::_16, cute::_16>>;
+                                  cute::Layout<cute::Shape<cute::_4, cute::_2, cute::_1>>,
+                                  cute::Tile<cute::_64, cute::_32, cute::_16>>;
   using SmemLayoutAtomA = SmemLayoutAtomA_FP16;
-  using SmemLayoutAtomB = SmemLayoutAtomB_FP16_N16;
+  using SmemLayoutAtomB = SmemLayoutAtomB_FP16;
   using SmemCopyAtomA = cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, ElementInput>;
   using SmemCopyAtomB = cute::Copy_Atom<cute::SM75_U16x8_LDSM_T, ElementInput>;
   using GmemTiledCopyA = void;
@@ -328,15 +360,6 @@ struct CuteTileConfig<cutlass::half_t, gemm::Tile32x16x32_F16Accum> {
   static constexpr int AlignmentB = 4;
   static constexpr bool UseCpAsyncGatherA = false;
 };
-
-// FP16 accum + k=8 MMA atom tiles (m16n8k8)
-DEFINE_CUTE_TILE_CONFIG_FP16_K8(Tile64x64x32, 64, 64, 32)
-DEFINE_CUTE_TILE_CONFIG_FP16_K8(Tile64x128x32, 64, 128, 32)
-
-// FP16 accumulator tiles (2x tensor throughput, for fwd/dgrad)
-DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x64x32, 64, 64, 32)
-DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile128x64x32, 128, 64, 32)
-DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x128x32, 64, 128, 32)
 
 // FP32 input (TF32 tensor cores) — for full-precision training
 DEFINE_CUTE_TILE_CONFIG_FP32(Tile64x64x32, 64, 64, 32)
@@ -381,48 +404,6 @@ struct CuteTileConfigOverride {
   static constexpr int NumStages = NumStages_;
   static constexpr bool UseCpAsyncGatherA = UseCpAsyncGatherA_;
 };
-
-// -----------------------------------------------------------------------------
-// Pcoff tile Config specializations (tiles 54-63 from warpgemm)
-// Each Pcoff TileTag inherits from the matching base config so the existing
-// DEFINE_CUTE_TILE_CONFIG macros aren't duplicated. Kernel class carries the
-// _pcoff suffix (offset-precompute variant).
-// -----------------------------------------------------------------------------
-
-// tile 54: flat_pcoff + F16Accum base
-template <>
-struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_Pcoff>
-    : CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_F16Accum> {};
-
-// tile 55: flat_pcoff + F16K8 base
-template <>
-struct CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_Pcoff_K8>
-    : CuteTileConfig<cutlass::half_t, gemm::Tile64x64x32_F16K8> {};
-
-// tile 56: flat_pcoff + F16K8 base (64x128, A100 flagship)
-template <>
-struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_Pcoff_K8>
-    : CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_F16K8> {};
-
-// tile 57: flat_pcoff + F16Accum base (64x128)
-template <>
-struct CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_Pcoff>
-    : CuteTileConfig<cutlass::half_t, gemm::Tile64x128x32_F16Accum> {};
-
-// tile 58: 3s_pcoff — F32 accum base with NumStages=3 override
-template <typename ElemIn>
-struct CuteTileConfig<ElemIn, gemm::Tile64x64x32_Pcoff_3s>
-    : CuteTileConfigOverride<CuteTileConfig<ElemIn, gemm::Tile64x64x32>, 3, false> {};
-
-// tile 59: 2s_warp_spec_pcoff — F32 accum base
-template <typename ElemIn>
-struct CuteTileConfig<ElemIn, gemm::Tile64x64x32_Pcoff_WS>
-    : CuteTileConfig<ElemIn, gemm::Tile64x64x32> {};
-
-// tile 63: 2s_warp_spec_pcoff — F32 accum base (64x128)
-template <typename ElemIn>
-struct CuteTileConfig<ElemIn, gemm::Tile64x128x32_Pcoff_WS>
-    : CuteTileConfig<ElemIn, gemm::Tile64x128x32> {};
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
