@@ -278,6 +278,18 @@ class Voxels(Geometry):
         return self.__class__(coords, feats, **self.extra_attributes)
 
     @property
+    def spatial_cache(self) -> dict:
+        """Per-instance mutable dict carried across ``replace()`` calls.
+
+        Useful for sparse U-Nets to pair Down→Up coordinate maps without
+        recomputing the scatter target. Keys and values are caller-defined;
+        the dict is copied (not deep-copied) into replacements.
+        """
+        if "_spatial_cache" not in self._extra_attributes:
+            self._extra_attributes["_spatial_cache"] = {}
+        return self._extra_attributes["_spatial_cache"]
+
+    @property
     def coordinate_hashmap(self) -> PackedHashTable:
         return self.batched_coordinates.hashmap
 

@@ -151,6 +151,31 @@ class Geometry:
     def features(self) -> Tensor:
         return self.batched_features.batched_tensor
 
+    # ------------------------------------------------------------------
+    # Sparse tensor aliases used by MinkowskiEngine, torchsparse, spconv,
+    # and TRELLIS-style modules.
+    # ------------------------------------------------------------------
+    @property
+    def feats(self) -> Tensor:
+        """Alias for ``features``."""
+        return self.features
+
+    @property
+    def coords(self) -> Tensor:
+        """Alias for ``batch_indexed_coordinates``.
+
+        Returns a ``(N, 1 + DIM)`` tensor with the batch index in column 0.
+        """
+        return self.batch_indexed_coordinates
+
+    def replace_features(self, new_features) -> "Geometry":
+        """Return a new geometry object with ``new_features`` and the same coords.
+
+        Convenience over ``self.replace(batched_features=new_features)`` for
+        feature-only mutations such as norms, activations, and MLPs.
+        """
+        return self.replace(batched_features=new_features)
+
     @property
     @amp_aware_dtype
     def nested_features(self) -> Tensor:
@@ -272,6 +297,22 @@ class Geometry:
 
     def __pow__(self, value: object) -> "Geometry":
         return self.binary_op(value, "__pow__")
+
+    # Right-side scalar/tensor ops. ``Geometry.binary_op`` is symmetric for the
+    # commutative cases; for `__rsub__` / `__rtruediv__` we negate / invert.
+    def __radd__(self, value: object) -> "Geometry":
+        return self.binary_op(value, "__add__")
+
+    def __rmul__(self, value: object) -> "Geometry":
+        return self.binary_op(value, "__mul__")
+
+    def __rsub__(self, value: object) -> "Geometry":
+        # ``value - self == -(self - value)``; invokes ``__neg__`` which we
+        # define via ``self * (-1)`` to avoid a separate helper.
+        return self._apply_feature_transform(lambda x: -x).binary_op(value, "__add__")
+
+    def __rtruediv__(self, value: object) -> "Geometry":
+        return self._apply_feature_transform(lambda x: x.reciprocal()).binary_op(value, "__mul__")
 
     def equal_rigorous(self, value: object) -> bool:
         raise NotImplementedError

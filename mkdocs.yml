@@ -49,6 +49,7 @@ nav:
       - ModelNet: examples/modelnet.md
       - ScanNet: examples/scannet.md
       - MaskFormer (instance seg): examples/maskformer.md
+      - TRELLIS.2 Viser Visualizer: examples/trellis2_viser.md
   - Models:
       - Overview: models/index.md
       - PointNet: models/pointnet.md
