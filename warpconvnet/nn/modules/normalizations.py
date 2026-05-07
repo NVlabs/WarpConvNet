@@ -13,13 +13,17 @@ from warpconvnet.nn.functional.transforms import apply_feature_transform
 from warpconvnet.nn.functional.normalizations import segmented_layer_norm
 
 __all__ = [
-    "NormalizationBase",
     "BatchNorm",
-    "LayerNorm",
-    "SegmentedLayerNorm",
-    "InstanceNorm",
+    "ChannelLayerNorm32",
     "GroupNorm",
+    "GroupNorm32",
+    "InstanceNorm",
+    "LayerNorm",
+    "LayerNorm32",
+    "MultiHeadRMSNorm",
+    "NormalizationBase",
     "RMSNorm",
+    "SegmentedLayerNorm",
 ]
 
 
@@ -117,9 +121,7 @@ class SegmentedLayerNorm(nn.LayerNorm):
         elementwise_affine: bool = True,
         bias: bool = True,
     ):
-        super().__init__(
-            [channels], eps=eps, elementwise_affine=elementwise_affine, bias=bias
-        )
+        super().__init__([channels], eps=eps, elementwise_affine=elementwise_affine, bias=bias)
 
     def forward(self, x: Geometry):
         # Only works for geometry with batched features
@@ -184,3 +186,60 @@ class RMSNorm(NormalizationBase):
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__(nn.RMSNorm(dim, eps=eps))
+
+
+# -----------------------------------------------------------------------------
+# fp32-internal AMP-stable variants (cast input → fp32 → norm → cast back).
+# Useful inside bf16/fp16 transformer blocks where running stats / variances
+# can overflow at the reduced precision.
+# -----------------------------------------------------------------------------
+class LayerNorm32(nn.LayerNorm):
+    """`torch.nn.LayerNorm` that always computes in fp32 then casts back."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_dtype = x.dtype
+        return super().forward(x.float()).to(x_dtype)
+
+
+class GroupNorm32(nn.GroupNorm):
+    """`torch.nn.GroupNorm` that always computes in fp32 then casts back."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_dtype = x.dtype
+        return super().forward(x.float()).to(x_dtype)
+
+
+class ChannelLayerNorm32(LayerNorm32):
+    """LayerNorm over the channel dim of a `(B, C, *spatial)` tensor (fp32)."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        DIM = x.dim()
+        x = x.permute(0, *range(2, DIM), 1).contiguous()
+        x = super().forward(x)
+        return x.permute(0, DIM - 1, *range(1, DIM - 1)).contiguous()
+
+
+# -----------------------------------------------------------------------------
+# qk-norm (per-head RMSNorm) — used in DiT-style attention to stabilise
+# attention logits at fp16/bf16 precision.
+# -----------------------------------------------------------------------------
+class MultiHeadRMSNorm(nn.Module):
+    """RMSNorm applied independently per attention head.
+
+    Parameters
+    ----------
+    dim : int
+        Per-head feature dim (i.e. ``channels // num_heads``).
+    heads : int
+        Number of attention heads.
+    """
+
+    def __init__(self, dim: int, heads: int):
+        super().__init__()
+        self.scale = dim**0.5
+        self.gamma = nn.Parameter(torch.ones(heads, dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return (torch.nn.functional.normalize(x.float(), dim=-1) * self.gamma * self.scale).to(
+            x.dtype
+        )

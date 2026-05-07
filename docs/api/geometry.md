@@ -54,3 +54,10 @@ memory formats so that FIGConvNet layers can operate on complementary spatial
 perspectives.
 
 ::: warpconvnet.geometry.types.factor_grid.FactorGrid
+
+## Voxel helpers
+
+Compatibility helpers for frameworks that represent sparse tensors as
+`(features, batch_indexed_coords)` pairs.
+
+::: warpconvnet.geometry.utils.voxel_ops
