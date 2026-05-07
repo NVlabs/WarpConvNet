@@ -37,8 +37,25 @@ from warpconvnet.nn.functional.sparse_conv.detail.algo_params import (
     _AB_MASK_GEMM,
     _AB_MASK_GEMM_FWD_AS_DGRAD,
     _ATB_MASK_GEMM,
-    WT_TILE_TO_FWD_TILE,
 )
+
+# Canonical dgrad_wt aliases (900-911) map to underlying canonical fwd
+# tile_ids. Used by tests below for skip-checks via the source fwd tile's
+# alignment requirements.
+_DGRAD_WT_TO_FWD_TILE = {
+    900: 41,  # ex-83: 64x64 sa
+    901: 3,  # ex-84: 64x128 3s
+    902: 2,  # ex-85: 128x64
+    903: 28,  # ex-86: 32x32 F16Accum
+    904: 19,  # ex-87: 64x128 F16Accum
+    905: 54,  # ex-88: Pcoff 64x64 flat (F16Accum)
+    906: 55,  # ex-89: Pcoff 64x64 flat (F16K8)
+    907: 56,  # ex-90: Pcoff 64x128 flat (F16K8)
+    908: 57,  # ex-91: Pcoff 64x128 flat (F16Accum)
+    909: 58,  # ex-92: Pcoff 64x64 3s
+    910: 59,  # ex-93: Pcoff 64x64 WS
+    911: 63,  # ex-94: Pcoff 64x128 WS
+}
 from warpconvnet.nn.functional.sparse_conv.detail.dispatch import (
     _execute_backward,
     _execute_forward,
@@ -59,12 +76,13 @@ _RTOL_WGRAD_FP32 = 1e-2
 _RTOL_WGRAD_FP16 = 5e-2
 
 # F16-accumulator tile ids (both fwd and fwd_as_dgrad _wt variants). These
-# tolerate larger rdiff because the MMA accumulates in fp16.
-_F16ACC_FWD_TILES = {40, 42}
-_F16ACC_WT_TILES = {86, 87}
+# tolerate larger rdiff because the MMA accumulates in fp16. tile_ids are
+# canonical warpgemm IDs.
+_F16ACC_FWD_TILES = {28, 19}  # ex-40, ex-42
+_F16ACC_WT_TILES = {903, 904}  # ex-86, ex-87
 # Pcoff tiles are also effectively f16acc (MW=1 only, f16 accumulate path).
 _PCOFF_FWD_TILES = {54, 55, 56, 57, 58, 59, 63}
-_PCOFF_WT_TILES = {88, 89, 90, 91, 92, 93, 94}
+_PCOFF_WT_TILES = {905, 906, 907, 908, 909, 910, 911}  # ex-88..94
 
 
 def _fwd_tile_tol(tile_id: int, dtype: torch.dtype) -> float:
@@ -194,8 +212,8 @@ def test_mask_gemm_dgrad_fwd_as_dgrad_tiles(tile_id, C_in, C_out, dtype):
     """Every fwd_as_dgrad _wt tile must produce dgrad matching explicit_gemm."""
     kernel_size = (3, 3, 3)
     K = 27
-    # Map _wt id back to the source fwd tile for alignment / dtype checks.
-    base_tile = WT_TILE_TO_FWD_TILE[tile_id]
+    # Map dgrad_wt id back to the source fwd tile for alignment / dtype checks.
+    base_tile = _DGRAD_WT_TO_FWD_TILE[tile_id]
     _skip_if_unsupported(base_tile, C_in, C_out, K, dtype)
 
     voxels = _make_voxels(C_in=C_in, seed=2)
@@ -379,10 +397,10 @@ def test_regression_fwd_as_dgrad_symmetric_fp16(C):
     torch.manual_seed(42)
     grad_out = torch.randn(num_out, C, device="cuda", dtype=dtype)
 
-    # Use the canonical f32acc _wt tile (83 -> Prod_Fwd_64x64x32) which is
+    # Use the canonical f32acc dgrad_wt tile (900 = ex-83, 64x64 sa) which is
     # what autotune picks for most MinkUNet layers.
-    tile_id = 83
-    _skip_if_unsupported(WT_TILE_TO_FWD_TILE[tile_id], C, C, K, dtype)
+    tile_id = 900
+    _skip_if_unsupported(_DGRAD_WT_TO_FWD_TILE[tile_id], C, C, K, dtype)
 
     grad_in_prod, _ = _execute_backward(
         "mask_gemm_fwd_as_dgrad",

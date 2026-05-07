@@ -48,7 +48,7 @@ def _mask_gemm_backend():
     return _C.mask_gemm
 
 
-# Pcoff forward tile IDs (warpgemm catalog, mirrored in ProdFwdTile enum).
+# Pcoff forward tile IDs (warpgemm canonical catalog).
 # These have MW=1 instantiations only; K>32 configs must route elsewhere.
 _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
 
@@ -56,8 +56,16 @@ _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
 # Routing K>32 to these silently falls back to MW=1 → kernel asserts
 # `(K) <= int(MaskWords) * 32`, which is a device-side abort that kills the
 # CUDA context for the whole process. Guard at Python level so autotune skips
-# these candidates instead of crashing the device.
-_MW1_ONLY_FWD_TILES = frozenset({40}) | _PCOFF_FWD_TILES
+# these candidates instead of crashing the device. tile_id=28 is the canonical
+# 32x32_F16Accum (ex-wcn 40).
+_MW1_ONLY_FWD_TILES = frozenset({28}) | _PCOFF_FWD_TILES
+
+# dgrad_wt tile_ids (canonical 900-911) that route through fwd kernels but
+# are MW=1 only. Includes the 32x32 F16Accum alias (903) and the 7 pcoff
+# aliases (905-911). The 64x64 sa (900), 64x128 3s (901), 128x64 (902),
+# and 64x128 F16Accum (904) aliases support MW>1 because their underlying
+# fwd kernels do.
+_MW1_ONLY_DGRAD_WT_TILES = frozenset({903, 905, 906, 907, 908, 909, 910, 911})
 
 # Lazy imports for optional backends
 if _HAS_CUTE_BACKEND:
@@ -501,7 +509,8 @@ def _execute_backward(
 
         mask_words = _dispatched_mask_words(K)
 
-        tile_id = params.get("tile_id", 60)
+        # Default wgrad tile_id is canonical 0 (= ex-wcn 60, 64x64 f32 direct).
+        tile_id = params.get("tile_id", 0)
         split_k = params.get("split_k", 64)
         N_in = in_features.shape[0]
 
@@ -565,16 +574,21 @@ def _execute_backward(
             dgrad_out_dtype = torch.float32 if use_f32_out_tile else compute_dtype
 
             if use_fwd_for_dgrad:
-                from .algo_params import WT_TILE_TO_FWD_TILE
-
-                dgrad_tile = params.get("tile_id", 41)
-                # Autotune pool uses dgrad-namespace _wt ids (83-94); translate
-                # back to the underlying fwd tile that the binding dispatches on.
-                dgrad_tile = WT_TILE_TO_FWD_TILE.get(dgrad_tile, dgrad_tile)
+                # The autotune pool uses canonical dgrad_wt tile_ids 900-911.
+                # The mask_gemm_bindings.cu dgrad arm has a dedicated branch
+                # for this range that routes to LAUNCH_FWD after caller
+                # pre-transposes weight (no Python-side remap).
+                #
+                # When alignment fallbacks force a scalar/f32out tile, we use
+                # the wcn-only fwd tile_ids (70-72, 80, 82) and route through
+                # backend.fwd directly (the caller has pre-transposed weight).
+                dgrad_tile = params.get("tile_id", 900)
                 fwd_cin_aligned = C_out_g % vec_width == 0
                 fwd_cout_aligned = C_in_g % vec_width == 0
+                use_fwd_fallback = False
                 if use_f32_out_tile:
                     dgrad_tile = 80 if (fwd_cin_aligned and fwd_cout_aligned) else 82
+                    use_fwd_fallback = True
                 elif not fwd_cin_aligned or not fwd_cout_aligned:
                     if mask_words > 1:
                         dgrad_tile = 70
@@ -584,21 +598,27 @@ def _execute_backward(
                         dgrad_tile = 71
                     else:
                         dgrad_tile = 72
-                elif mask_words > 1 and dgrad_tile in _MW1_ONLY_FWD_TILES:
-                    # MW=1-only tiles (32x32 F16Acc, pcoff) cannot dispatch K>32.
-                    # Skip candidate so autotune moves on; routing to a different
-                    # tile would benchmark the wrong kernel under this algo name.
+                    use_fwd_fallback = True
+                elif mask_words > 1 and dgrad_tile in _MW1_ONLY_DGRAD_WT_TILES:
+                    # MW=1-only dgrad_wt aliases (903 = 32x32 F16Acc, 905-911 = pcoff)
+                    # cannot dispatch K>32. Skip candidate so autotune moves on;
+                    # routing to a different tile would benchmark the wrong kernel
+                    # under this algo name.
                     raise RuntimeError(
                         f"fwd_as_dgrad tile {dgrad_tile} only supports mask_words==1 "
                         f"(got {mask_words}). Use an MW-capable tile for K>32."
                     )
 
                 backend = _mask_gemm_backend()
-                dgrad_fn = backend.fwd
+                # Fwd-fallback path (wcn-only fwd ids) → backend.fwd.
+                # Primary path (canonical dgrad_wt 900-911) → backend.dgrad
+                # (which has the dedicated dgrad_wt arm).
+                dgrad_fn = backend.fwd if use_fwd_fallback else backend.dgrad
             else:
                 cin_aligned = C_in_g % vec_width == 0
                 cout_aligned = C_out_g % vec_width == 0
                 if not cin_aligned or not cout_aligned:
+                    # wcn-only scalar dgrad tiles 70/71/72.
                     if mask_words > 1:
                         dgrad_tile = 70
                     elif not cin_aligned and not cout_aligned:
@@ -608,23 +628,28 @@ def _execute_backward(
                     else:
                         dgrad_tile = 72
                 elif mask_words > 1:
-                    # Native dgrad pipelined tiles (50-57) only have MW=1
-                    # instantiations in warpconvnet bindings. Route MW>1 to
-                    # scalar tile 70 (SAB_SE MW) which supports up to MW=12.
-                    # For better perf at MW>1 aligned shapes, prefer the
+                    # Native dgrad tiles only have MW=1 instantiations in
+                    # warpconvnet bindings. Route MW>1 to scalar tile 70
+                    # (SAB_SE MW) which supports up to MW=12. For better
+                    # perf at MW>1 aligned shapes, prefer the
                     # mask_gemm_fwd_as_dgrad algo in the pool.
                     dgrad_tile = 70
                 elif use_f32_out_tile:
-                    dgrad_tile = 81
+                    dgrad_tile = 81  # wcn-only dgrad f32-out
                 else:
+                    # Canonical dgrad tile selection by per-group channel size.
+                    # Migration map (previous wcn ids -> canonical):
+                    #   50→12 (32x32)         53→22 (64x64 F16Accum)
+                    #   51→0  (64x64 2s)      54→24 (64x128 F16Accum)
+                    #   52→1  (64x128 2s)
                     C = max(C_in_g, C_out_g)
                     is_fp16 = compute_dtype == torch.float16
                     if C <= 48:
-                        dgrad_tile = 50
+                        dgrad_tile = 12  # ex-50: 32x32
                     elif C <= 96:
-                        dgrad_tile = 53 if is_fp16 else 51
+                        dgrad_tile = 22 if is_fp16 else 0  # ex-53/51: 64x64 F16Acc / f32
                     else:
-                        dgrad_tile = 54 if is_fp16 else 52
+                        dgrad_tile = 24 if is_fp16 else 1  # ex-54/52: 64x128 F16Acc / f32
 
                 backend = _mask_gemm_backend()
                 dgrad_fn = backend.dgrad

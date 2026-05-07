@@ -8,10 +8,15 @@
 
 #pragma once
 
+// Canonical mask GEMM headers (committed under csrc/include/, optionally
+// regenerated from warpgemm via setup.py WARPGEMM_REGEN=1). wcn_pcoff_tiles.h
+// adds project-local Pcoff_* tile tags and their CuteTileConfig
+// specializations.
 #include "include/cute_gemm_config.h"
 #include "include/gemm_mma_tiles.h"
 #include "include/kernel_dispatch.h"
 #include "include/mma_macros.h"
+#include "include/wcn_pcoff_tiles.h"
 
 namespace warpconvnet {
 namespace cute_gemm {

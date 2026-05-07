@@ -49,35 +49,33 @@ print(f"warpconvnet build commit: {BUILD_COMMIT}")
 
 
 def _generate_warpgemm_codegen():
-    """Optionally re-emit warpgemm-generated artifacts.
+    """Optionally regenerate warpgemm-sourced artifacts (WARPGEMM_REGEN=1).
 
-    warpgemm is a developer codegen tool, not a build or runtime dependency.
-    The artifacts under warpconvnet/csrc/{offset_gemm,mask_gemm}/ are tracked in git, the
-    same convention used by mask GEMM kernels under csrc/include/MaskGemm_*.h.
-    Currently emitted:
-      - per-tile .cu + per-family .cuh + offset_gemm_dispatch_table.inc
-        (warpgemm.codegen.offset_gemm.write_to)
-      - tile_metadata.py — self-contained mask-tile registry consumed by
-        nn/.../sparse_conv/detail/tile_metadata.py
-        (warpgemm.autotune.write_tile_metadata_to)
-      - MaskGemm_*.h chain-include kernel headers + warpgemm_*.cuh helper
-        fragments, pinned to the names already tracked in
-        csrc/mask_gemm/include/ (warpgemm.codegen.write_mask_to)
+    Wcn ships standalone — the canonical safe files (gemm_mma_tiles.h,
+    cute_gemm_config.h, mask_gemm_dispatch_table.inc) are committed under
+    csrc/include/ and csrc/mask_gemm/. Selectively-committed kernel headers
+    live in csrc/mask_gemm/include/. None of these require warpgemm to be
+    importable for the build to succeed.
 
-    Refresh the snapshot by setting WARPGEMM_REGEN=1 (and having warpgemm
-    importable). Honors WARPGEMM_TILES (default 'stable'). Drift is
-    detected by tests/csrc/test_warpgemm_drift.py when warpgemm is installed.
+    When WARPGEMM_REGEN=1 is set AND warpgemm is importable, this function
+    refreshes those committed snapshots in place by calling
+    warpgemm.codegen.write_mask_to() into a temp dir and copying the safe
+    files into their existing committed locations. Kernel header templates
+    and warpgemm_*.cuh helper fragments contain warpgemm-internal IP and
+    are NOT committed; the warpgemm-equipped path can write them directly
+    into csrc/mask_gemm/include/ as a curated set tracked by name.
     """
 
     if os.environ.get("WARPGEMM_REGEN", "0") != "1":
         return
+
     csrc_dir = os.path.join(workspace_dir, "warpconvnet", "csrc")
-    offset_gemm_dir = os.path.join(csrc_dir, "offset_gemm")
+    include_dir = os.path.join(csrc_dir, "include")
     mask_gemm_dir = os.path.join(csrc_dir, "mask_gemm")
     mask_gemm_include_dir = os.path.join(mask_gemm_dir, "include")
-    os.makedirs(offset_gemm_dir, exist_ok=True)
-    os.makedirs(mask_gemm_dir, exist_ok=True)
+    offset_gemm_dir = os.path.join(csrc_dir, "offset_gemm")
     os.makedirs(mask_gemm_include_dir, exist_ok=True)
+    os.makedirs(offset_gemm_dir, exist_ok=True)
     try:
         from warpgemm.codegen.offset_gemm import write_to as _write_offset_gemm
         from warpgemm.autotune import write_tile_metadata_to as _write_tile_metadata
@@ -92,6 +90,12 @@ def _generate_warpgemm_codegen():
     )
     tm_path = _write_tile_metadata(mask_gemm_dir)
     print(f"warpgemm tile_metadata codegen: wrote {tm_path}")
+
+    # Refresh selectively-committed kernel headers (curated set already
+    # present in csrc/mask_gemm/include/) and the safe canonical artifacts
+    # (gemm_mma_tiles.h + cute_gemm_config.h → csrc/include/;
+    # mask_gemm_dispatch_table.inc → csrc/mask_gemm/) by writing into a
+    # temp dir and copying only the files that should be tracked.
     tracked_mask_names = sorted(
         os.path.splitext(f)[0]
         for f in os.listdir(mask_gemm_include_dir)
@@ -108,6 +112,24 @@ def _generate_warpgemm_codegen():
             f"warpgemm mask_gemm codegen: no tracked MaskGemm_*.h under "
             f"{mask_gemm_include_dir}; skipping (initial seed must be done by hand)"
         )
+
+    # Safe canonical files: gemm_mma_tiles.h + cute_gemm_config.h →
+    # csrc/include/; mask_gemm_dispatch_table.inc → csrc/mask_gemm/.
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as canonical_tmp:
+        _write_mask(canonical_tmp)
+        for fname, dst_dir in [
+            ("gemm_mma_tiles.h", include_dir),
+            ("cute_gemm_config.h", include_dir),
+            ("mask_gemm_dispatch_table.inc", mask_gemm_dir),
+        ]:
+            src = os.path.join(canonical_tmp, fname)
+            dst = os.path.join(dst_dir, fname)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                print(f"warpgemm canonical refresh: {fname} → {dst}")
 
 
 # Defaults for sdist-only mode (no torch)

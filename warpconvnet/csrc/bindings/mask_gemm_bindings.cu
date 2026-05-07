@@ -7,9 +7,76 @@
 #include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
 
+#include <cstring>
+
 #include "../include/gemm_error_codes.h"
-#include "../include/gemm_mma_tiles.h"
+#include "../include/gemm_mma_tiles.h"        // canonical tile_tag struct decls
+#include "../include/mask_gemm_tile_enums.h"  // FwdTile/DgradTile/WgradTile (warpgemm-emitted)
+#include "../include/wcn_pcoff_tiles.h"       // wcn-only Pcoff_* tile tags + CuteTileConfig specs
 #include "cutlass/numeric_types.h"
+
+// =============================================================================
+// kMaskGemmTable[] — compile-time metadata sidecar populated from
+// mask_gemm/mask_gemm_dispatch_table.inc via X-macro expansion. Used for
+// runtime introspection (warpconvnet._C.mask_gemm.list_kernels()); not a
+// dispatch driver — switch arms below switch directly on tile_id.
+// =============================================================================
+
+namespace warpconvnet {
+namespace cute_gemm {
+
+struct MaskGemmKernelEntry {
+  int tile_id;
+  const char *op;
+  const char *kernel_struct;
+  const char *tile_tag;
+  const char *config_alias;
+  const char *input_dtype;
+  const char *output_dtype;
+  const char *acc_dtype;
+  const char *mainloop;
+  const char *epilogue;
+  int mask_words;
+  bool persistent;
+  const char *scalar_flags;
+  const char *compile_archs;
+};
+
+[[maybe_unused]] constexpr MaskGemmKernelEntry kMaskGemmTable[] = {
+#define MASK_GEMM_KERNEL(tile_id,       \
+                         op,            \
+                         kernel_struct, \
+                         tile_tag,      \
+                         config_alias,  \
+                         in_dt,         \
+                         out_dt,        \
+                         acc_dt,        \
+                         mainloop,      \
+                         epilogue,      \
+                         mask_words,    \
+                         persistent,    \
+                         scalar_flags,  \
+                         compile_archs) \
+  {tile_id,                             \
+   op,                                  \
+   kernel_struct,                       \
+   tile_tag,                            \
+   config_alias,                        \
+   in_dt,                               \
+   out_dt,                              \
+   acc_dt,                              \
+   mainloop,                            \
+   epilogue,                            \
+   mask_words,                          \
+   static_cast<bool>(persistent),       \
+   scalar_flags,                        \
+   compile_archs},
+#include "../mask_gemm/mask_gemm_dispatch_table.inc"
+#undef MASK_GEMM_KERNEL
+};
+
+}  // namespace cute_gemm
+}  // namespace warpconvnet
 
 namespace warpconvnet {
 namespace cute_gemm {
@@ -685,7 +752,9 @@ int mask_gemm_fwd(torch::Tensor input,
   auto si = input.scalar_type();
   auto so = output.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto tile = static_cast<gemm::ProdFwdTile>(tile_id);
+  // Dispatch keys directly on canonical warpgemm tile_id integers.
+  // See mask_gemm/mask_gemm_dispatch_table.inc.
+  int tile = tile_id;
 
   auto args = std::make_tuple(input.data_ptr(),
                               weight.data_ptr(),
@@ -754,9 +823,10 @@ int mask_gemm_fwd(torch::Tensor input,
           [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_f32out_sb_mw<In, 12>(a...); }, \
           args))
 
-  if (tile == gemm::ProdFwdTile::_64x64x32_f32out ||
-      tile == gemm::ProdFwdTile::_64x64x32_f32out_sb) {
-    bool use_sb = (tile == gemm::ProdFwdTile::_64x64x32_f32out_sb);
+  // wcn-only fwd f32-output tiles (no canonical equivalent):
+  //   80 = aligned f32-output, 82 = scalar-B f32-output
+  if (tile == 80 || tile == 82) {
+    bool use_sb = (tile == 82);
     if (si == torch::kFloat16) {
       if (use_sb)
         FWD_F32OUT_SB_MW(cutlass::half_t);
@@ -801,15 +871,17 @@ int mask_gemm_fwd(torch::Tensor input,
           },                                                                                  \
           args))
 
+  // wcn-only scalar fwd tiles (unaligned C); not in canonical registry.
+  // 70=sab_se, 71=sa, 72=sb_se — kept as raw integers.
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
-      case gemm::ProdFwdTile::Scalar_SAB_SE:
+      case 70:  // wcn-only scalar tile, not in canonical registry
         SCALAR_FWD_MW(sab_se, In, Out);
-      case gemm::ProdFwdTile::Scalar_SA:
+      case 71:  // wcn-only scalar tile, not in canonical registry
         SCALAR_FWD_MW(sa, In, Out);
-      case gemm::ProdFwdTile::Scalar_SB_SE:
+      case 72:  // wcn-only scalar tile, not in canonical registry
         SCALAR_FWD_MW(sb_se, In, Out);
       default:
         break;
@@ -820,11 +892,11 @@ int mask_gemm_fwd(torch::Tensor input,
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::ProdFwdTile::Scalar_SAB_SE:
+      case 70:  // wcn-only scalar tile, not in canonical registry
         SCALAR_FWD_MW(sab_se, In, Out);
-      case gemm::ProdFwdTile::Scalar_SA:
+      case 71:  // wcn-only scalar tile, not in canonical registry
         SCALAR_FWD_MW(sa, In, Out);
-      case gemm::ProdFwdTile::Scalar_SB_SE:
+      case 72:  // wcn-only scalar tile, not in canonical registry
         SCALAR_FWD_MW(sb_se, In, Out);
       default:
         break;
@@ -910,41 +982,44 @@ int mask_gemm_fwd(torch::Tensor input,
           [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_128x64_mw<ElemIn, 12>(a...); }, \
           args))
 
+  // -- Canonical warpgemm fwd tile_ids. Each case label below references a
+  //    member of gemm::FwdTile (warpgemm-emitted, see mask_gemm_tile_enums.h).
+  using gemm::FwdTile;
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
-    switch (tile) {
-      case gemm::ProdFwdTile::_32x32x32_F16Acc:
+    switch (static_cast<FwdTile>(tile)) {
+      case FwdTile::_32x32x32_1s_flat_F16Accum:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile32x32x32_F16Accum, Out, a...); }, args);
-      case gemm::ProdFwdTile::_64x64x32:
+      case FwdTile::_64x64x32_1s_flat_sa:
         FWD_64x64_MW(In);
-      case gemm::ProdFwdTile::_64x128x32_F16Acc:
+      case FwdTile::_64x128x32_2s_fused_F16Accum:
         FWD_64x128_F16ACC_MW_DISP();
-      case gemm::ProdFwdTile::_64x128x32_3s:
+      case FwdTile::_64x128x32_3s:
         FWD_64x128_3S_MW(In);
-      case gemm::ProdFwdTile::_128x64x32:
+      case FwdTile::_128x64x32_2s:
         FWD_128x64_MW(In);
-      // Pcoff (E1) variants, MW=1 only (MW>1 instantiations deferred)
-      case gemm::ProdFwdTile::Pcoff_64x64x32_flat:
+      // Pcoff (E1) variants, MW=1 only (MW>1 instantiations deferred).
+      case FwdTile::_64x64x32_1s_flat_pcoff_F16Accum:
         return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff, Out, a...); },
                           args);
-      case gemm::ProdFwdTile::Pcoff_64x64x32_f16k8:
+      case FwdTile::_64x64x32_1s_flat_pcoff_F16K8:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_K8, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x128x32_f16k8:
+      case FwdTile::_64x128x32_1s_flat_pcoff_F16K8:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_K8, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x128x32_flat:
+      case FwdTile::_64x128x32_1s_flat_pcoff_F16Accum:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x64x32_3s:
+      case FwdTile::_64x64x32_3s_pcoff:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_3s, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x64x32_2s_warp_spec:
+      case FwdTile::_64x64x32_2s_warp_spec_pcoff:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_WS, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x128x32_2s_warp_spec:
+      case FwdTile::_64x128x32_2s_warp_spec_pcoff:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_WS, Out, a...); }, args);
       default:
@@ -955,21 +1030,21 @@ int mask_gemm_fwd(torch::Tensor input,
   if (si == torch::kBFloat16 && so == torch::kBFloat16) {
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
-    switch (tile) {
-      case gemm::ProdFwdTile::_64x64x32:
+    switch (static_cast<FwdTile>(tile)) {
+      case FwdTile::_64x64x32_1s_flat_sa:
         FWD_64x64_MW(In);
-      case gemm::ProdFwdTile::_64x128x32_3s:
+      case FwdTile::_64x128x32_3s:
         FWD_64x128_3S_MW(In);
-      case gemm::ProdFwdTile::_128x64x32:
+      case FwdTile::_128x64x32_2s:
         FWD_128x64_MW(In);
-      // Pcoff bf16 variants — only tiles 58/59/63 (F32-accum base supports bf16)
-      case gemm::ProdFwdTile::Pcoff_64x64x32_3s:
+      // Pcoff bf16 variants — F32-accum base supports bf16
+      case FwdTile::_64x64x32_3s_pcoff:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_3s, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x64x32_2s_warp_spec:
+      case FwdTile::_64x64x32_2s_warp_spec_pcoff:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_WS, Out, a...); }, args);
-      case gemm::ProdFwdTile::Pcoff_64x128x32_2s_warp_spec:
+      case FwdTile::_64x128x32_2s_warp_spec_pcoff:
         return std::apply(
             [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_WS, Out, a...); }, args);
       default:
@@ -1015,7 +1090,11 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
   auto si = grad_output.scalar_type();
   auto so = grad_input.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto tile = static_cast<gemm::ProdDgradTile>(tile_id);
+  // Dispatch keys directly on canonical warpgemm tile_id integers.
+  // Canonical dgrad ids 0-32 (native dgrad kernels), 900-911
+  // (dgrad_wt: fwd kernel reused with pre-transposed weight). wcn-only:
+  // 70-72 (scalar), 81 (f32out).
+  int tile = tile_id;
 
   auto args = std::make_tuple(grad_output.data_ptr(),
                               weight_T.data_ptr(),
@@ -1032,6 +1111,123 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
                               groups,
                               identity_offset,
                               stream);
+
+  // -- dgrad_wt branch: canonical tile_ids 900-911 (DgradTile::_*_wt members)
+  //    are aliases that route to the corresponding fwd kernel. Caller must
+  //    have pre-transposed weight_T to swap channel axes before calling here
+  //    (see dispatch.py use_fwd_for_dgrad path). The args tuple is structurally
+  //    identical to the fwd args (grad_output stands in as 'a', weight_T as
+  //    'b', grad_input as 'd'), so we can route through LAUNCH_FWD directly.
+  using gemm::DgradTile;
+  if (tile >= 900 && tile <= 911) {
+    // Fwd kernel grid/strides interpret args as (n_in, n_out, c_in, c_out).
+    // Our `args` tuple was built with dgrad semantics (N_in=grad_input rows,
+    // N_out=grad_output rows). For fwd-as-dgrad, swap so the fwd kernel sees:
+    //   n_in  ← N_out (grad_output is the "input" tensor it gathers from)
+    //   n_out ← N_in  (grad_input is the "output" tensor it scatters to)
+    //   c_in  ← C_out (grad_output channel count = fwd input channels)
+    //   c_out ← C_in  (grad_input channel count = fwd output channels)
+    auto fwd_args = std::make_tuple(grad_output.data_ptr(),
+                                    weight_T.data_ptr(),
+                                    grad_input.data_ptr(),
+                                    pair_table.data_ptr<int>(),
+                                    reinterpret_cast<const uint32_t *>(pair_mask.data_ptr<int>()),
+                                    mask_argsort.data_ptr<int>(),
+                                    N_out,
+                                    N_in,
+                                    C_out,
+                                    C_in,
+                                    K,
+                                    alpha,
+                                    groups,
+                                    identity_offset,
+                                    stream);
+    if (si == torch::kFloat16 && so == torch::kFloat16) {
+      using In = cutlass::half_t;
+      using Out = cutlass::half_t;
+      switch (static_cast<DgradTile>(tile)) {
+        case DgradTile::_64x64x32_1s_flat_sa_wt:
+          return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32, Out, a...); },
+                            fwd_args);
+        case DgradTile::_64x128x32_3s_wt:
+          return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32, Out, a...); },
+                            fwd_args);
+        case DgradTile::_128x64x32_2s_wt:
+          return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile128x64x32, Out, a...); },
+                            fwd_args);
+        case DgradTile::_32x32x32_1s_flat_F16Accum_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile32x32x32_F16Accum, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x128x32_2s_fused_F16Accum_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_F16Accum, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x64x32_1s_flat_pcoff_F16Accum_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff, Out, a...); }, fwd_args);
+        case DgradTile::_64x64x32_1s_flat_pcoff_F16K8_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_K8, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x128x32_1s_flat_pcoff_F16K8_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_K8, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x128x32_1s_flat_pcoff_F16Accum_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff, Out, a...); }, fwd_args);
+        case DgradTile::_64x64x32_3s_pcoff_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_3s, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x64x32_2s_warp_spec_pcoff_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_WS, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x128x32_2s_warp_spec_pcoff_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_WS, Out, a...); },
+              fwd_args);
+        default:
+          break;
+      }
+    }
+#ifndef DISABLE_BFLOAT16
+    if (si == torch::kBFloat16 && so == torch::kBFloat16) {
+      using In = cutlass::bfloat16_t;
+      using Out = cutlass::bfloat16_t;
+      switch (static_cast<DgradTile>(tile)) {
+        case DgradTile::_64x64x32_1s_flat_sa_wt:
+          return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32, Out, a...); },
+                            fwd_args);
+        case DgradTile::_64x128x32_3s_wt:
+          return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32, Out, a...); },
+                            fwd_args);
+        case DgradTile::_128x64x32_2s_wt:
+          return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile128x64x32, Out, a...); },
+                            fwd_args);
+        // Pcoff bf16 — F32-accum base supports bf16 (3s_pcoff, WS variants)
+        case DgradTile::_64x64x32_3s_pcoff_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_3s, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x64x32_2s_warp_spec_pcoff_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_WS, Out, a...); },
+              fwd_args);
+        case DgradTile::_64x128x32_2s_warp_spec_pcoff_wt:
+          return std::apply(
+              [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_WS, Out, a...); },
+              fwd_args);
+        default:
+          break;
+      }
+    }
+#endif
+    TORCH_CHECK(false, "Unsupported dtype for dgrad_wt tile=", tile_id);
+    return -1;
+  }
 
   // fp32 output dgrad tile (supports MW=1,2,4,8,12)
 #define DGRAD_F32OUT_MW(In)                                                                      \
@@ -1051,7 +1247,8 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
           [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_f32out_mw<In, 12>(a...); }, \
           args))
 
-  if (tile == gemm::ProdDgradTile::_64x64x32_f32out) {
+  // wcn-only dgrad f32-output (id=81, no canonical equivalent).
+  if (tile == 81) {
     if (si == torch::kFloat16) DGRAD_F32OUT_MW(cutlass::half_t);
 #ifndef DISABLE_BFLOAT16
     if (si == torch::kBFloat16) DGRAD_F32OUT_MW(cutlass::bfloat16_t);
@@ -1084,15 +1281,17 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
           },                                                                                    \
           args))
 
+  // wcn-only scalar dgrad tiles (not in canonical registry).
+  // 70=sab_se, 71=sa, 72=sb_se — kept as raw integers.
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
     switch (tile) {
-      case gemm::ProdDgradTile::Scalar_SAB_SE:
+      case 70:  // wcn-only scalar tile, not in canonical registry
         SCALAR_DGRAD_MW(sab_se, In, Out);
-      case gemm::ProdDgradTile::Scalar_SA:
+      case 71:  // wcn-only scalar tile, not in canonical registry
         SCALAR_DGRAD_MW(sa, In, Out);
-      case gemm::ProdDgradTile::Scalar_SB_SE:
+      case 72:  // wcn-only scalar tile, not in canonical registry
         SCALAR_DGRAD_MW(sb_se, In, Out);
       default:
         break;
@@ -1103,11 +1302,11 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
     switch (tile) {
-      case gemm::ProdDgradTile::Scalar_SAB_SE:
+      case 70:  // wcn-only scalar tile, not in canonical registry
         SCALAR_DGRAD_MW(sab_se, In, Out);
-      case gemm::ProdDgradTile::Scalar_SA:
+      case 71:  // wcn-only scalar tile, not in canonical registry
         SCALAR_DGRAD_MW(sa, In, Out);
-      case gemm::ProdDgradTile::Scalar_SB_SE:
+      case 72:  // wcn-only scalar tile, not in canonical registry
         SCALAR_DGRAD_MW(sb_se, In, Out);
       default:
         break;
@@ -1134,33 +1333,34 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
           [](auto &&...a) { return cute_gemm::launch_mask_gemm_dgrad_mw<ElemIn, 12>(a...); },  \
           args))
 
+  // -- Canonical warpgemm dgrad tile_ids (gemm::DgradTile members).
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
-    switch (tile) {
-      case gemm::ProdDgradTile::_32x32x32:
+    switch (static_cast<DgradTile>(tile)) {
+      case DgradTile::_32x32x32_1s_flat:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile32x32x32, Out, a...); },
                           args);
-      case gemm::ProdDgradTile::_64x64x32:
+      case DgradTile::_64x64x32_2s:
         DGRAD_64x64_MW(In);
-      case gemm::ProdDgradTile::_64x64x32_F16Acc:
+      case DgradTile::_64x64x32_1s_flat_F16Accum:
         return std::apply(
             [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32_F16Accum, Out, a...); }, args);
-      case gemm::ProdDgradTile::_64x128x32:
+      case DgradTile::_64x128x32_2s:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32, Out, a...); },
                           args);
-      case gemm::ProdDgradTile::_64x128x32_F16Acc:
+      case DgradTile::_64x128x32_2s_F16Accum:
         return std::apply(
             [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32_F16Accum, Out, a...); }, args);
-      case gemm::ProdDgradTile::_64x64x32_Pipe:
+      case DgradTile::_64x64x32_2s_pipelined:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x64<In, Out>(a...); },
             args);
-      case gemm::ProdDgradTile::_64x128x32_Pipe:
+      case DgradTile::_64x128x32_2s_pipelined:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x128<In, Out>(a...); },
             args);
-      case gemm::ProdDgradTile::_128x64x32_Pipe:
+      case DgradTile::_128x64x32_2s_pipelined:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
             args);
@@ -1172,21 +1372,21 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
   if (si == torch::kBFloat16 && so == torch::kBFloat16) {
     using In = cutlass::bfloat16_t;
     using Out = cutlass::bfloat16_t;
-    switch (tile) {
-      case gemm::ProdDgradTile::_64x64x32:
+    switch (static_cast<DgradTile>(tile)) {
+      case DgradTile::_64x64x32_2s:
         DGRAD_64x64_MW(In);
-      case gemm::ProdDgradTile::_64x128x32:
+      case DgradTile::_64x128x32_2s:
         return std::apply([](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32, Out, a...); },
                           args);
-      case gemm::ProdDgradTile::_64x64x32_Pipe:
+      case DgradTile::_64x64x32_2s_pipelined:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x64<In, Out>(a...); },
             args);
-      case gemm::ProdDgradTile::_64x128x32_Pipe:
+      case DgradTile::_64x128x32_2s_pipelined:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_64x128<In, Out>(a...); },
             args);
-      case gemm::ProdDgradTile::_128x64x32_Pipe:
+      case DgradTile::_128x64x32_2s_pipelined:
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
             args);
@@ -1235,14 +1435,18 @@ int mask_gemm_wgrad(torch::Tensor input,
   auto si = input.scalar_type();
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  auto tile = static_cast<gemm::ProdWgradTile>(tile_id);
+  // Dispatch keys directly on canonical warpgemm wgrad tile_ids
+  // (gemm::WgradTile members; see mask_gemm_tile_enums.h).
+  // wcn-only: 73 (scalar SAB), kept as raw integer below.
+  using gemm::WgradTile;
+  int tile = tile_id;
   auto pt_ptr = pair_table.data_ptr<int>();
   auto pm_ptr = reinterpret_cast<const uint32_t *>(pair_mask.data_ptr<int>());
   auto ms_ptr = mask_argsort.data_ptr<int>();
   auto rm_ptr = reinterpret_cast<const uint32_t *>(reduced_mask.data_ptr<int>());
 
-  // Scalar wgrad (any C alignment)
-  if (tile == gemm::ProdWgradTile::Scalar_SAB) {
+  // wcn-only scalar wgrad (any C alignment, tile_id=73, not in canonical registry).
+  if (tile == 73) {
     if (si == torch::kFloat16)
       return cute_gemm::launch_scalar_wgrad_sab<cutlass::half_t, float>(input.data_ptr(),
                                                                         grad_output.data_ptr(),
@@ -1354,38 +1558,38 @@ int mask_gemm_wgrad(torch::Tensor input,
 
   if (si == torch::kFloat16) {
     using In = cutlass::half_t;
-    switch (tile) {
-      case gemm::ProdWgradTile::_64x64x32_f32_atomic:
+    switch (static_cast<WgradTile>(tile)) {
+      case WgradTile::_64x64x32_2s_f32_atomic:
         return WGRAD_ATOMIC(In, 64x64);
-      case gemm::ProdWgradTile::_64x128x32_f32_atomic:
+      case WgradTile::_64x128x32_2s_f32_atomic:
         return WGRAD_ATOMIC(In, 64x128);
-      case gemm::ProdWgradTile::_64x64x32_3s_f32_atomic:
+      case WgradTile::_64x64x32_3s_f32_atomic:
         return WGRAD_ATOMIC(In, 3s);
-      case gemm::ProdWgradTile::_64x64x32_2s_f32_workspace:
+      case WgradTile::_64x64x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64);
-      case gemm::ProdWgradTile::_64x64x32_3s_f32_workspace:
+      case WgradTile::_64x64x32_3s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64_3s);
-      case gemm::ProdWgradTile::_64x128x32_2s_f32_workspace:
+      case WgradTile::_64x128x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x128);
-      default:
+      default:  // WgradTile::_64x64x32_2s_f32 (canonical 0) — also fallback for unmapped ids
         return WGRAD_DISPATCH(In, Tile64x64x32);
     }
   }
 #ifndef DISABLE_BFLOAT16
   if (si == torch::kBFloat16) {
     using In = cutlass::bfloat16_t;
-    switch (tile) {
-      case gemm::ProdWgradTile::_64x64x32_f32_atomic:
+    switch (static_cast<WgradTile>(tile)) {
+      case WgradTile::_64x64x32_2s_f32_atomic:
         return WGRAD_ATOMIC(In, 64x64);
-      case gemm::ProdWgradTile::_64x128x32_f32_atomic:
+      case WgradTile::_64x128x32_2s_f32_atomic:
         return WGRAD_ATOMIC(In, 64x128);
-      case gemm::ProdWgradTile::_64x64x32_3s_f32_atomic:
+      case WgradTile::_64x64x32_3s_f32_atomic:
         return WGRAD_ATOMIC(In, 3s);
-      case gemm::ProdWgradTile::_64x64x32_2s_f32_workspace:
+      case WgradTile::_64x64x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64);
-      case gemm::ProdWgradTile::_64x64x32_3s_f32_workspace:
+      case WgradTile::_64x64x32_3s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x64_3s);
-      case gemm::ProdWgradTile::_64x128x32_2s_f32_workspace:
+      case WgradTile::_64x128x32_2s_f32_workspace:
         WGRAD_WORKSPACE_CASE(In, 64x128);
       default:
         return WGRAD_DISPATCH(In, Tile64x64x32);
@@ -1499,7 +1703,7 @@ void register_mask_gemm(py::module &m) {
            py::arg("mask_argsort"),
            py::arg("reduced_mask"),
            py::arg("K"),
-           py::arg("tile_id") = 60,
+           py::arg("tile_id") = 0,  // WgradTile::_64x64x32_2s_f32 (canonical 0)
            py::arg("split_k") = 64,
            py::arg("alpha") = 1.0f,
            py::arg("groups") = 1);

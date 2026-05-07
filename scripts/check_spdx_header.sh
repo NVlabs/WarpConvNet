@@ -16,9 +16,9 @@ done
 if [ "$failed" -ne 0 ]; then
     echo ""
     echo "Add the appropriate header to the top of each file:"
-    echo "  Python:  # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+    echo "  Python:  # SPDX-FileCopyrightText: Copyright (c) 2025-present NVIDIA CORPORATION & AFFILIATES. All rights reserved."
     echo "           # SPDX-License-Identifier: Apache-2.0"
-    echo "  C/C++:   // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+    echo "  C/C++:   // SPDX-FileCopyrightText: Copyright (c) 2025-present NVIDIA CORPORATION & AFFILIATES. All rights reserved."
     echo "           // SPDX-License-Identifier: Apache-2.0"
     exit 1
 fi
