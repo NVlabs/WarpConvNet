@@ -76,8 +76,25 @@ logger = get_logger(__name__)
 
 # Benchmark iterations for auto-tuning. More iterations = more reliable
 # winner selection but slower first-iteration auto-tune.
-_BENCHMARK_NUM_WARMUP = 2
-_BENCHMARK_NUM_ITERS = 5
+#
+# Phase 1 (screening): every candidate gets _BENCHMARK_NUM_ITERS samples,
+# median taken. Used to pick top-k for re-timing.
+# Phase 2 (tie-break): top _BENCHMARK_TIE_BREAK_TOP_K candidates re-timed
+# with _BENCHMARK_TIE_BREAK_NUM_ITERS samples, median wins.
+#
+# Without phase 2, top candidates within 3% of each other get ranked by
+# noise — caused bimodal e2e bench at RES=32 C=1024 (best 1.24x, worst
+# 2.0x same shape across runs).
+_BENCHMARK_NUM_WARMUP = 3
+_BENCHMARK_NUM_ITERS = 7
+
+# Tie-break re-timing: re-time top-K candidates with more samples to
+# stabilize ranking when phase-1 medians are within tie-break threshold.
+_BENCHMARK_TIE_BREAK_TOP_K = 3
+_BENCHMARK_TIE_BREAK_NUM_ITERS = 21
+# If phase-1 best vs k-th-best ratio < this, run tie-break. Otherwise
+# the gap is larger than expected noise so phase-1 ranking is trusted.
+_BENCHMARK_TIE_BREAK_THRESHOLD = 1.10
 
 # Track whether auto-tune banner has been shown (once per process)
 _AUTOTUNE_BANNER_SHOWN = False
@@ -214,6 +231,63 @@ _initialize_benchmark_cache()
 from warpconvnet.utils.benchmark_cache import get_generic_benchmark_cache as _get_cache
 
 _get_cache().register_on_merge_callback(_on_cache_merge)
+
+
+def _tie_break_top_k(
+    sorted_results: List[Tuple[str, Dict[str, Any], float]],
+    run_one,
+    timer,
+) -> List[Tuple[str, Dict[str, Any], float]]:
+    """Re-time top candidates with more samples to stabilize ranking.
+
+    Phase-1 timed every candidate with `_BENCHMARK_NUM_ITERS` samples.
+    When top candidates are close (within `_BENCHMARK_TIE_BREAK_THRESHOLD`),
+    the median ranking is dominated by noise. This helper re-times the top
+    `_BENCHMARK_TIE_BREAK_TOP_K` candidates with `_BENCHMARK_TIE_BREAK_NUM_ITERS`
+    samples each, replaces their phase-1 medians with the new ones, and
+    re-sorts.
+
+    Args:
+        sorted_results: List of (algo, params, median_ms) sorted ascending
+            by median_ms.
+        run_one: Callable run_one(algo, params) executing one pass; result
+            ignored.
+        timer: CUDA event timer with `with timer:` and `.elapsed_time`.
+
+    Returns:
+        Re-sorted result list (full length, not just top-k).
+    """
+    if len(sorted_results) <= 1:
+        return sorted_results
+    best_time = sorted_results[0][2]
+    if best_time <= 0:
+        return sorted_results
+    # How many candidates fall within the tie-break threshold?
+    cutoff = best_time * _BENCHMARK_TIE_BREAK_THRESHOLD
+    in_band = [(i, r) for i, r in enumerate(sorted_results) if r[2] <= cutoff]
+    in_band = in_band[:_BENCHMARK_TIE_BREAK_TOP_K]
+    if len(in_band) <= 1:
+        return sorted_results
+
+    rebuilt: List[Tuple[str, Dict[str, Any], float]] = list(sorted_results)
+    for i, (algo, params, _) in in_band:
+        try:
+            iter_times = []
+            for _ in range(_BENCHMARK_TIE_BREAK_NUM_ITERS):
+                with timer:
+                    run_one(algo, params)
+                iter_times.append(timer.elapsed_time)
+            torch.cuda.synchronize()
+            median = sorted(iter_times)[len(iter_times) // 2]
+            rebuilt[i] = (algo, params, median)
+        except (RuntimeError, Exception):
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            continue
+    rebuilt.sort(key=lambda x: x[2])
+    return rebuilt
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +527,14 @@ def _run_forward_benchmarks(
 
     # Sort results by time (3rd element of tuple), ascending
     all_benchmark_results.sort(key=lambda x: x[2])
+
+    # Tie-break re-timing: when top candidates are within threshold (3% by
+    # default), re-time them with more samples to stabilize ranking.
+    all_benchmark_results = _tie_break_top_k(
+        all_benchmark_results,
+        run_one=lambda algo, cfg: _execute_single_fwd_pass(algo, cfg),
+        timer=timer,
+    )
 
     best_algo, best_params, overall_best_time_ms = all_benchmark_results[0]
     _best_param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
@@ -725,6 +807,14 @@ def _run_backward_benchmarks(
 
     # Sort results by time (3rd element of tuple), ascending
     all_benchmark_results.sort(key=lambda x: x[2])
+
+    # Tie-break re-timing for stable ranking when top candidates are
+    # within threshold. See _tie_break_top_k docstring.
+    all_benchmark_results = _tie_break_top_k(
+        all_benchmark_results,
+        run_one=lambda algo, cfg: _execute_single_bwd_pass(algo, cfg),
+        timer=timer,
+    )
 
     best_algo, best_params, overall_best_time_ms = all_benchmark_results[0]
     _best_param_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
