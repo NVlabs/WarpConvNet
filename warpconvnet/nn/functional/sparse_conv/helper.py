@@ -320,7 +320,13 @@ def spatially_sparse_conv(
         # the output is a view (e.g., from channel padding slice).
         out_feature_tensor = out_feature_tensor + bias
 
-    out_offsets_cpu = out_offsets.cpu().int()
+    # Submanifold path (stride=1 non-transposed non-generative): out_offsets is the
+    # same object as input_sparse_tensor.offsets (already CPU per IntCoords contract),
+    # so .cpu() is a redundant device sync. Only round-trip when actually on GPU.
+    if out_offsets.device.type == "cpu":
+        out_offsets_cpu = out_offsets if out_offsets.dtype == torch.int32 else out_offsets.int()
+    else:
+        out_offsets_cpu = out_offsets.cpu().int()
     return input_sparse_tensor.replace(
         batched_coordinates=IntCoords(
             batch_indexed_out_coords[:, 1:],

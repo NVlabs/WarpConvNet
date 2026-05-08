@@ -36,6 +36,7 @@ struct Tile64x128x32_Pcoff {};     // tile 57: F16Accum base
 struct Tile64x64x32_Pcoff_3s {};   // tile 58: F32 accum, 3-stage override
 struct Tile64x64x32_Pcoff_WS {};   // tile 59: F32 accum, warp-spec
 struct Tile64x128x32_Pcoff_WS {};  // tile 63: F32 accum, warp-spec 64x128
+struct Tile64x128x32_Pcoff_3s {};  // dgrad tile 69: F32 accum, 3-stage 64x128
 
 }  // namespace gemm
 
@@ -81,6 +82,11 @@ struct CuteTileConfig<ElemIn, gemm::Tile64x64x32_Pcoff_WS>
 template <typename ElemIn>
 struct CuteTileConfig<ElemIn, gemm::Tile64x128x32_Pcoff_WS>
     : CuteTileConfig<ElemIn, gemm::Tile64x128x32> {};
+
+// dgrad tile 69: 3s_pcoff — F32 accum base (64x128) with NumStages=3 override
+template <typename ElemIn>
+struct CuteTileConfig<ElemIn, gemm::Tile64x128x32_Pcoff_3s>
+    : CuteTileConfigOverride<CuteTileConfig<ElemIn, gemm::Tile64x128x32>, 3, false> {};
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
