@@ -123,6 +123,7 @@ def _generate_warpgemm_codegen():
         for fname, dst_dir in [
             ("gemm_mma_tiles.h", include_dir),
             ("cute_gemm_config.h", include_dir),
+            ("mask_gemm_tile_enums.h", include_dir),
             ("mask_gemm_dispatch_table.inc", mask_gemm_dir),
         ]:
             src = os.path.join(canonical_tmp, fname)

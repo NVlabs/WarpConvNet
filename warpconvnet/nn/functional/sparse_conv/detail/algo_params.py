@@ -343,6 +343,23 @@ _AB_MASK_GEMM_FWD_AS_DGRAD = (
     + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF
 )
 
+# Native dgrad pcoff tiles — bond #23. Canonical warpgemm DgradTile ids 64-69
+# (E1 offset-precompute on dgrad path, no weight transpose pre-op).
+# fp16 only; MW=1 only (kv <= 32). Mirror fwd pcoff family 54-59/63 in DgradTile
+# namespace for the dgrad kernel template specialization.
+_AB_MASK_GEMM_DGRAD_PCOFF = (
+    [
+        ("mask_gemm", {"tile_id": 64}),  # 64x64 1s_flat_pcoff F16Accum
+        ("mask_gemm", {"tile_id": 65}),  # 64x64 1s_flat_pcoff F16K8
+        ("mask_gemm", {"tile_id": 66}),  # 64x128 1s_flat_pcoff F16K8
+        ("mask_gemm", {"tile_id": 67}),  # 64x128 1s_flat_pcoff F16Accum
+        ("mask_gemm", {"tile_id": 68}),  # 64x64 3s_pcoff
+        ("mask_gemm", {"tile_id": 69}),  # 64x128 3s_pcoff
+    ]
+    if _HAS_MASK_GEMM
+    else []
+)
+
 # tile_ids match warpgemm canonical mask_gemm_dispatch_table.inc (wgrad op).
 # Migration map: ex-wcn 60→0, 61→4, 62→7, 63→9, 64→1, 65→2, 66→3.
 _ATB_MASK_GEMM = (

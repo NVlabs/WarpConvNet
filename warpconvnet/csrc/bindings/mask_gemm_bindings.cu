@@ -1364,6 +1364,25 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
         return std::apply(
             [](auto &&...a) { return cute_gemm::launch_dgrad_pipelined_128x64<In, Out>(a...); },
             args);
+      // Pcoff (E1) native dgrad variants — bond #23. MW=1 only.
+      case DgradTile::_64x64x32_1s_flat_pcoff_F16Accum:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32_Pcoff, Out, a...); }, args);
+      case DgradTile::_64x64x32_1s_flat_pcoff_F16K8:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32_Pcoff_K8, Out, a...); }, args);
+      case DgradTile::_64x128x32_1s_flat_pcoff_F16K8:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32_Pcoff_K8, Out, a...); }, args);
+      case DgradTile::_64x128x32_1s_flat_pcoff_F16Accum:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32_Pcoff, Out, a...); }, args);
+      case DgradTile::_64x64x32_3s_pcoff:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x64x32_Pcoff_3s, Out, a...); }, args);
+      case DgradTile::_64x128x32_3s_pcoff:
+        return std::apply(
+            [](auto &&...a) { return LAUNCH_DGRAD(In, Tile64x128x32_Pcoff_3s, Out, a...); }, args);
       default:
         break;
     }

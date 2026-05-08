@@ -19,6 +19,12 @@
 #include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sa.h"
 #include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sab_se.h"
 #include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sb_se.h"
+// Dgrad pcoff (E1 offset-precompute) variants — bond #23 native dgrad pcoff.
+#include "include/wcn_pcoff_tiles.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x128x32_1s_flat_pcoff.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x128x32_3s_pcoff.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_pcoff.h"
+#include "mask_gemm/include/MaskGemm_dgrad_64x64x32_3s_pcoff.h"
 
 namespace warpconvnet {
 namespace cute_gemm {
@@ -62,6 +68,33 @@ WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x128x32_1s_flat_direpi,
                            cutlass::bfloat16_t,
                            Tile64x128x32,
                            cutlass::bfloat16_t)
+
+// Dgrad pcoff (E1 offset-precompute) variants — bond #23 native dgrad pcoff.
+// fp16 only; bf16 not registered in warpgemm DGRAD_TILES 64-69.
+WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x64x32_1s_flat_pcoff,  // tile 64 F16Accum
+                           cutlass::half_t,
+                           Tile64x64x32_Pcoff,
+                           cutlass::half_t)
+WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x64x32_1s_flat_pcoff,  // tile 65 F16K8
+                           cutlass::half_t,
+                           Tile64x64x32_Pcoff_K8,
+                           cutlass::half_t)
+WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x128x32_1s_flat_pcoff,  // tile 66 F16K8
+                           cutlass::half_t,
+                           Tile64x128x32_Pcoff_K8,
+                           cutlass::half_t)
+WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x128x32_1s_flat_pcoff,  // tile 67 F16Accum
+                           cutlass::half_t,
+                           Tile64x128x32_Pcoff,
+                           cutlass::half_t)
+WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x64x32_3s_pcoff,  // tile 68 F32 3s
+                           cutlass::half_t,
+                           Tile64x64x32_Pcoff_3s,
+                           cutlass::half_t)
+WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x128x32_3s_pcoff,  // tile 69 F32 3s
+                           cutlass::half_t,
+                           Tile64x128x32_Pcoff_3s,
+                           cutlass::half_t)
 
 // Dgrad pipelined: stride_A = C_out*groups (grad_output), stride_D = C_in*groups (grad_input)
 #define INST_DGRAD_PIPE(SUFFIX, KernelClass, ElemIn, TileTag)                                 \

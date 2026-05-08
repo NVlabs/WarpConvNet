@@ -424,14 +424,22 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
         # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose).
         # F32Acc always included; F16Acc added when use_fp16_accum=True.
+        # PCOFF (905-911) require mask_words==1 (kv_bwd <= 32); dispatch raises
+        # for K>32 so we gate at pool construction.
+        # Native dgrad pcoff (64-69, bond #23): no weight transpose, MW=1 only.
         from .algo_params import (
             _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC,
             _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC,
+            _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF,
+            _AB_MASK_GEMM_DGRAD_PCOFF,
         )
 
         dgrad_adaptive = list(dgrad_adaptive) + list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
         if use_fp16_accum:
             dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
+        if kv_bwd <= 32:
+            dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF)
+            dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF)
         if wgrad_filter == "trimmed":
             wgrad_adaptive = _get_trimmed_AtB_params(
                 C_in_bwd,

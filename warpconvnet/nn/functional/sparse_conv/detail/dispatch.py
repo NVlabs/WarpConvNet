@@ -67,6 +67,9 @@ _MW1_ONLY_FWD_TILES = frozenset({28}) | _PCOFF_FWD_TILES
 # fwd kernels do.
 _MW1_ONLY_DGRAD_WT_TILES = frozenset({903, 905, 906, 907, 908, 909, 910, 911})
 
+# Native dgrad pcoff tile_ids — bond #23. MW=1 only.
+_DGRAD_PCOFF_TILES = frozenset({64, 65, 66, 67, 68, 69})
+
 # Lazy imports for optional backends
 if _HAS_CUTE_BACKEND:
     from .cute import (
@@ -560,8 +563,15 @@ def _execute_backward(
             # axes before the kernel sees it. .contiguous() is mandatory: fwd's
             # vectorized cp.async needs 16-byte-aligned strides and a .transpose()
             # view does not satisfy that.
+            #
+            # Reuse caller-provided weight_T when groups==1 (its [K, C_out, C_in]
+            # layout matches what fwd_as_dgrad needs after .transpose(-1,-2)). Saves
+            # one 54MB copy per bwd call at C=1024 K=27 fp16.
             if use_fwd_for_dgrad:
-                _w_dgrad = _w.transpose(-1, -2).contiguous()
+                if weight_T is not None and groups == 1 and weight_T.dtype == _w.dtype:
+                    _w_dgrad = weight_T
+                else:
+                    _w_dgrad = _w.transpose(-1, -2).contiguous()
             else:
                 _w_dgrad = _w.contiguous()
 
@@ -636,6 +646,10 @@ def _execute_backward(
                     dgrad_tile = 70
                 elif use_f32_out_tile:
                     dgrad_tile = 81  # wcn-only dgrad f32-out
+                elif params.get("tile_id") in _DGRAD_PCOFF_TILES:
+                    # Native dgrad pcoff (bond #23): autotune-driven tile_id
+                    # 64-69 wins for E1 hoist on dgrad. MW=1 only, fp16 only.
+                    dgrad_tile = params["tile_id"]
                 else:
                     # Canonical dgrad tile selection by per-group channel size.
                     # Migration map (previous wcn ids -> canonical):
