@@ -671,6 +671,7 @@ def _run_backward_benchmarks(
                 requires_grad=needs_input_grad,
                 device=device,
                 mma_tile=params_config.get("mma_tile", 3),
+                splits=params_config.get("splits", 1),
             )
             if isinstance(result[0], int) and result[0] != 0:
                 return result[0]

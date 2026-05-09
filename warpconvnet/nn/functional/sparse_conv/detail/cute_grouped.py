@@ -276,8 +276,10 @@ def _cute_grouped_forward_logic(
         return status
     return output
 
+    pass
 
-def _cute_grouped_backward_logic(
+
+def _cute_grouped_backward_logic(  # noqa: F811
     grad_output: Float[Tensor, "M C_out"],
     in_features: Float[Tensor, "N C_in"],
     weight: Float[Tensor, "K C_in C_out"],
@@ -286,6 +288,7 @@ def _cute_grouped_backward_logic(
     device: torch.device = None,
     mma_tile: int = 3,
     weight_T: Optional[Tensor] = None,
+    splits: int = 1,
 ) -> Union[
     Tuple[Float[Tensor, "N C_in"], Float[Tensor, "K C_in C_out"]],
     Tuple[int, int],
@@ -396,6 +399,7 @@ def _cute_grouped_backward_logic(
                 mma_tile,
                 1.0,
                 _DTYPE_TO_SCALAR_TYPE_INT[out_dtype],
+                splits,
             )
             if status != 0:
                 return status, -2

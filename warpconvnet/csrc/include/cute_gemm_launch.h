@@ -213,7 +213,9 @@ int launch_cute_gemm_grouped_trAB_gather(const void *ptr_A,
     return static_cast<int>(gemm::GemmStatus::kSuccess);
   }
 
-  dim3 grid((K_dim + TileM - 1) / TileM, (N + TileN - 1) / TileN, params.num_groups);
+  // Split-K aware grid. blockIdx.z packs (split_id * num_groups + group).
+  int splits = params.splits > 0 ? params.splits : 1;
+  dim3 grid((K_dim + TileM - 1) / TileM, (N + TileN - 1) / TileN, params.num_groups * splits);
 
   if (smem_size > 48 * 1024) {
     auto err = cudaFuncSetAttribute(cute_gemm_grouped_trAB_kernel_entry<Kernel>,
