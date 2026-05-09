@@ -24,11 +24,11 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
-#include "cute/tensor.hpp"  // MUST come first
 #include "cute/algorithm/copy.hpp"
 #include "cute/arch/copy_sm80.hpp"
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
+#include "cute/tensor.hpp"  // MUST come first
 #include "cute_gemm_config.h"
 #include "grouped_gemm_params.h"
 
@@ -437,7 +437,14 @@ struct CuteGemmGroupedTrABKernel {
                              char *smem_buf) const {
     using namespace cute;
     // --- Group dispatch ---
-    int g = int(blockIdx.z);
+    // Split-K aware group dispatch. blockIdx.z packs (split_id, group):
+    //   group    = blockIdx.z % num_groups
+    //   split_id = blockIdx.z / num_groups
+    // For splits == 1 (default), split_id == 0 and the kernel runs the
+    // original full-reduction mainloop with direct-store epilogue.
+    int splits = params.splits > 0 ? params.splits : 1;
+    int g = int(blockIdx.z) % params.num_groups;
+    int split_id = int(blockIdx.z) / params.num_groups;
     int k_tile = int(blockIdx.x);  // tiles K_dim
     int n_tile = int(blockIdx.y);  // tiles N
     int k_start = k_tile * tM;
@@ -448,6 +455,13 @@ struct CuteGemmGroupedTrABKernel {
     ElementOutput *ptr_D_g = reinterpret_cast<ElementOutput *>(params.ptr_D_array[g]);
     const int *idx_a_g = idx_a + map_offset_g;
     const int *idx_b_g = idx_b + map_offset_g;
+
+    // Compute this shard's g_tile range. Shards are striped by tK chunks
+    // (round-robin) for balanced load when gather_size is small.
+    int total_g_tiles_g = (gather_size_g + tK - 1) / tK;
+    int shard_g_tile_start = (split_id * total_g_tiles_g) / splits;
+    int shard_g_tile_end = ((split_id + 1) * total_g_tiles_g) / splits;
+    int shard_num_g_tiles = shard_g_tile_end - shard_g_tile_start;
 
     // --- Standard TrAB mainloop ---
     SharedStorage &storage = *reinterpret_cast<SharedStorage *>(smem_buf);
@@ -472,27 +486,34 @@ struct CuteGemmGroupedTrABKernel {
     Tensor tCsB = smem_thr_copy_B.partition_S(sB);
     Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB);
 
-    int num_g_tiles = (gather_size_g + tK - 1) / tK;
+    int num_g_tiles = shard_num_g_tiles;
     auto K_BLOCK_MAX = size<2>(tCrA);
 
     if (num_g_tiles == 0) {
-      _epilogue_trAB(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+      // Shard has no work. Skip epilogue when splits > 1 (other shards
+      // own this dW location); for splits == 1, write zero accum (already
+      // cleared) — preserves original behavior.
+      if (splits == 1) {
+        _epilogue_trAB(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+      }
       return;
     }
 
-    // Prolog: load g_tile=0 into stage[0]
-    _load_A_trAB(ptr_A, idx_a_g, sA(_, _, 0), k_start, 0, K_dim, gather_size_g);
-    _load_B_trAB(ptr_B, idx_b_g, sB(_, _, 0), n_start, 0, N, gather_size_g);
+    // Prolog: load shard's first g_tile into stage[0]
+    int g_start_first = shard_g_tile_start * tK;
+    _load_A_trAB(ptr_A, idx_a_g, sA(_, _, 0), k_start, g_start_first, K_dim, gather_size_g);
+    _load_B_trAB(ptr_B, idx_b_g, sB(_, _, 0), n_start, g_start_first, N, gather_size_g);
     cute::cp_async_fence();
     cute::cp_async_wait<0>();
     __syncthreads();
 
-    // Mainloop
+    // Mainloop — iterate shard's g_tile range
     CUTLASS_PRAGMA_NO_UNROLL
-    for (int g_tile = 1; g_tile < num_g_tiles; ++g_tile) {
-      int curr_stage = (g_tile - 1) % NumStages;
-      int next_stage = g_tile % NumStages;
-      int g_start = g_tile * tK;
+    for (int g_tile_local = 1; g_tile_local < num_g_tiles; ++g_tile_local) {
+      int curr_stage = (g_tile_local - 1) % NumStages;
+      int next_stage = g_tile_local % NumStages;
+      int g_tile_global = shard_g_tile_start + g_tile_local;
+      int g_start = g_tile_global * tK;
 
       _load_A_trAB(ptr_A, idx_a_g, sA(_, _, next_stage), k_start, g_start, K_dim, gather_size_g);
       _load_B_trAB(ptr_B, idx_b_g, sB(_, _, next_stage), n_start, g_start, N, gather_size_g);
@@ -509,7 +530,7 @@ struct CuteGemmGroupedTrABKernel {
       __syncthreads();
     }
 
-    // Epilog: compute last g_tile
+    // Epilog: compute last g_tile of shard
     {
       int last_stage = (num_g_tiles - 1) % NumStages;
       CUTLASS_PRAGMA_UNROLL
@@ -520,7 +541,11 @@ struct CuteGemmGroupedTrABKernel {
       }
     }
 
-    _epilogue_trAB(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+    if (splits > 1) {
+      _epilogue_trAB_atomic(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+    } else {
+      _epilogue_trAB(accum, ptr_D_g, k_start, n_start, K_dim, N, alpha, tiled_mma);
+    }
   }
 
 private:
@@ -627,6 +652,36 @@ private:
       if (k_global < K_dim && n_global < N) {
         float result = alpha * float(accum(i));
         ptr_D[k_global * N + n_global] = static_cast<ElementOutput>(result);
+      }
+    }
+  }
+
+  /// Atomic epilogue for split-K: D_g[k, n] += alpha * accum.
+  /// Caller must pre-zero ptr_D.
+  template <class Accumulator, class TiledMma_>
+  __device__ void _epilogue_trAB_atomic(Accumulator &accum,
+                                        ElementOutput *ptr_D,
+                                        int k_start,
+                                        int n_start,
+                                        int K_dim,
+                                        int N,
+                                        float alpha,
+                                        TiledMma_ &tiled_mma) const {
+    using namespace cute;
+    auto thr_mma = tiled_mma.get_slice(threadIdx.x);
+    Tensor tCrC = thr_mma.partition_C(make_identity_tensor(make_shape(Int<tM>{}, Int<tN>{})));
+
+    CUTE_UNROLL
+    for (int i = 0; i < size(accum); ++i) {
+      auto coord = tCrC(i);
+      int k_local = get<0>(coord);
+      int n_local = get<1>(coord);
+      int k_global = k_start + k_local;
+      int n_global = n_start + n_local;
+
+      if (k_global < K_dim && n_global < N) {
+        float result = alpha * float(accum(i));
+        atomic_add(&ptr_D[k_global * N + n_global], static_cast<ElementOutput>(result));
       }
     }
   }

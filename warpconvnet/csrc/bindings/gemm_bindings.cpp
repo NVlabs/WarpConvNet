@@ -2616,7 +2616,8 @@ int cute_gemm_grouped_trAB_gather(
     int N,                       // C_out (output cols)
     int mma_tile,
     float alpha,
-    int output_scalar_type) {  // torch::ScalarType as int
+    int output_scalar_type,
+    int splits) {  // split-K shards (1 = no split)
   TORCH_CHECK(tensor_a.is_cuda() && tensor_b.is_cuda(), "Tensors must be on CUDA");
   TORCH_CHECK(in_map.is_cuda() && out_map.is_cuda(), "Maps must be on CUDA");
   TORCH_CHECK(output_ptrs.is_cuda() && gather_sizes.is_cuda() && map_offsets.is_cuda(),
@@ -2650,6 +2651,7 @@ int cute_gemm_grouped_trAB_gather(
   params.gather_sizes = gather_sizes.data_ptr<int>();
   params.map_offsets = map_offsets.data_ptr<int>();
   params.ptr_D_array = reinterpret_cast<void *const *>(output_ptrs.data_ptr<int64_t>());
+  params.splits = splits > 0 ? splits : 1;
 
   auto scalar_a = tensor_a.scalar_type();
   auto scalar_d = static_cast<torch::ScalarType>(output_scalar_type);
@@ -2738,7 +2740,8 @@ int offset_gemm_grouped_trAB_gather(torch::Tensor tensor_a,
                                     const std::string &backend,
                                     int tile_id,
                                     float alpha,
-                                    int output_scalar_type) {
+                                    int output_scalar_type,
+                                    int splits) {
   TORCH_CHECK(has_registered_offset_gemm_kernel("trab_gather", backend, tile_id),
               "Unknown registered grouped non-mask kernel key: (op=trab_gather, backend=",
               backend,
@@ -2761,7 +2764,8 @@ int offset_gemm_grouped_trAB_gather(torch::Tensor tensor_a,
                                        N,
                                        tile_id,
                                        alpha,
-                                       output_scalar_type);
+                                       output_scalar_type,
+                                       splits);
 }
 
 #endif  // WARPCONVNET_SM80_ENABLED (CuTe Grouped TrAB)
@@ -2875,7 +2879,8 @@ void register_gemm(py::module_ &m) {
            py::arg("N"),
            py::arg("mma_tile") = 0,
            py::arg("alpha") = 1.0f,
-           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
+           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32),
+           py::arg("splits") = 1);
 
   gemm.def("offset_gemm_grouped_trab_gather",
            &offset_gemm_grouped_trAB_gather,
@@ -2891,7 +2896,8 @@ void register_gemm(py::module_ &m) {
            py::arg("backend"),
            py::arg("tile_id"),
            py::arg("alpha") = 1.0f,
-           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
+           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32),
+           py::arg("splits") = 1);
 
   gemm.def("offset_gemm_grouped_trAB_gather",
            &offset_gemm_grouped_trAB_gather,
@@ -2907,7 +2913,8 @@ void register_gemm(py::module_ &m) {
            py::arg("backend"),
            py::arg("tile_id"),
            py::arg("alpha") = 1.0f,
-           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32));
+           py::arg("output_scalar_type") = static_cast<int>(torch::kFloat32),
+           py::arg("splits") = 1);
 
   gemm.def("cute_gemm_AD_gather_scatter_staged",
            &cute_gemm_AD_gather_scatter_staged,

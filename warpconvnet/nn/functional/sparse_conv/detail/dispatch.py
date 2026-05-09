@@ -463,6 +463,7 @@ def _execute_backward(
             device=device,
             mma_tile=params.get("mma_tile", 3),
             weight_T=weight_T,
+            splits=params.get("splits", 1),
         )
         if isinstance(result[0], int) and result[0] != 0:
             raise RuntimeError(
