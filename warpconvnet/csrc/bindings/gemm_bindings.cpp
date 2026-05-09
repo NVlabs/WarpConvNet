@@ -171,6 +171,14 @@ void csr_to_pair_table(const int *in_maps,
                        int N_out,
                        int K,
                        int L);
+void build_reverse_mask_data(const int *pair_table,
+                             int *reverse_pair_table,
+                             uint32_t *reverse_pair_mask,
+                             int N_in,
+                             int N_out,
+                             int K,
+                             int mask_words);
+int mask_argsort_uint32(const uint32_t *keys_in, int *out_perm, int N);
 }  // namespace mask_data
 
 #if defined(WARPCONVNET_SM80_ENABLED)
@@ -3145,6 +3153,52 @@ void register_gemm(py::module_ &m) {
       py::arg("pair_table"),
       py::arg("N_out"),
       py::arg("K"));
+
+  gemm.def(
+      "mask_argsort_cuda",
+      [](torch::Tensor keys, torch::Tensor out_perm) {
+        TORCH_CHECK(keys.is_cuda() && out_perm.is_cuda());
+        TORCH_CHECK(keys.scalar_type() == torch::kInt32);
+        TORCH_CHECK(out_perm.scalar_type() == torch::kInt32);
+        TORCH_CHECK(keys.numel() == out_perm.numel());
+        int N = static_cast<int>(keys.numel());
+        ::warpconvnet::mask_data::mask_argsort_uint32(
+            reinterpret_cast<const uint32_t *>(keys.data_ptr<int>()), out_perm.data_ptr<int>(), N);
+      },
+      py::arg("keys"),
+      py::arg("out_perm"));
+
+  gemm.def(
+      "build_reverse_mask_data_cuda",
+      [](torch::Tensor pair_table,
+         torch::Tensor reverse_pair_table,
+         torch::Tensor reverse_pair_mask,
+         int N_in,
+         int N_out,
+         int K,
+         int mask_words) {
+        TORCH_CHECK(pair_table.is_cuda());
+        TORCH_CHECK(reverse_pair_table.is_cuda());
+        TORCH_CHECK(reverse_pair_mask.is_cuda());
+        TORCH_CHECK(pair_table.scalar_type() == torch::kInt32);
+        TORCH_CHECK(reverse_pair_table.scalar_type() == torch::kInt32);
+        TORCH_CHECK(reverse_pair_mask.scalar_type() == torch::kInt32);
+        ::warpconvnet::mask_data::build_reverse_mask_data(
+            pair_table.data_ptr<int>(),
+            reverse_pair_table.data_ptr<int>(),
+            reinterpret_cast<uint32_t *>(reverse_pair_mask.data_ptr<int>()),
+            N_in,
+            N_out,
+            K,
+            mask_words);
+      },
+      py::arg("pair_table"),
+      py::arg("reverse_pair_table"),
+      py::arg("reverse_pair_mask"),
+      py::arg("N_in"),
+      py::arg("N_out"),
+      py::arg("K"),
+      py::arg("mask_words") = 1);
 
   // --- Fused sparse conv ops ---
 }
