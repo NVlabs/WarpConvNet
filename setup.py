@@ -133,11 +133,73 @@ def _generate_warpgemm_codegen():
                 print(f"warpgemm canonical refresh: {fname} → {dst}")
 
 
+def _patch_cutlass_cuda_host_adapter():
+    """Make `#include <cuda.h>` unconditional in CUTLASS's cuda_host_adapter.hpp.
+
+    CUTLASS 4.1's cuda_host_adapter.hpp conditionally includes <cuda.h>
+    based on macros it sets earlier in the same file. Under CUDA 12.9 +
+    nvcc 12.9 some compilation paths fail to define `cuuint32_t` /
+    `cuuint64_t` before <cudaTypedefs.h> consumes them in forward
+    declarations of `cuTensorMapEncodeIm2colWide_v12080`, leading to:
+
+        cudaTypedefs.h(917): error: identifier "cuuint32_t" is undefined
+
+    which then cascades into CUTLASS parse failures (Status undefined,
+    cute::cute:: double-resolution, etc.).
+
+    Fix: idempotent in-place edit of cuda_host_adapter.hpp to make the
+    `#include <cuda.h>` unconditional, ensuring cuuint32_t is always
+    defined before <cudaTypedefs.h> is reached.
+
+    Apply via a marker comment so the patch is detected on subsequent
+    builds and not re-applied.
+    """
+    path = os.path.join(
+        workspace_dir, "3rdparty", "cutlass", "include", "cutlass", "cuda_host_adapter.hpp"
+    )
+    if not os.path.exists(path):
+        return
+    marker = "/* WCN: cuda.h pre-include patched */"
+    try:
+        with open(path) as f:
+            content = f.read()
+        if marker in content:
+            return  # Already patched
+        old_block = (
+            "// Include <cuda.h> for CUDA Driver API calls if any of these capabilities are enabled.\n"
+            "#if defined(CUDA_HOST_ADAPTER_LAUNCH_ATTRIBUTES_ENABLED) ||        \\\n"
+            "    defined(CUDA_HOST_ADAPTER_TENSORMAP_ENABLED)\n"
+            "\n"
+            "#include <cuda.h>\n"
+            "\n"
+            "#endif // defined(CUDA_HOST_ADAPTER_LAUNCH_ATTRIBUTES_ENABLED) ||\n"
+            "       // defined(CUDA_HOST_ADAPTER_TENSORMAP_ENABLED)"
+        )
+        new_block = (
+            f"// {marker[3:-3]}\n"
+            "// Unconditional <cuda.h> include: guarantees cuuint32_t/cuuint64_t\n"
+            "// typedefs exist before <cudaTypedefs.h> forward-declares CUDA 12.8+\n"
+            "// tensor-map APIs that consume them. CUTLASS upstream guard misses\n"
+            "// some compilation paths under CUDA 12.9. Safe no-op when cuda.h\n"
+            "// would have been included anyway by the original conditional.\n"
+            "#include <cuda.h>"
+        )
+        if old_block not in content:
+            return  # Upstream changed shape; skip rather than corrupt.
+        new_content = content.replace(old_block, new_block)
+        with open(path, "w") as f:
+            f.write(new_content)
+        print(f"CUTLASS cuda_host_adapter.hpp patched for CUDA 12.9 compat: {path}")
+    except OSError as e:
+        print(f"Warning: failed to patch CUTLASS cuda_host_adapter.hpp: {e}")
+
+
 # Defaults for sdist-only mode (no torch)
 ext_modules = []
 cmdclass = {}
 
 if _HAS_TORCH:
+    _patch_cutlass_cuda_host_adapter()
     # ---------------------------------------------------------------------------
     # CUDA extension build (requires torch + CUDA toolkit)
     # ---------------------------------------------------------------------------
