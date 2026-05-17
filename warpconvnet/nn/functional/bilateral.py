@@ -9,7 +9,7 @@ aggregate. Two backends:
 
 * ``mode="knn"`` (default): uses warpconvnet's chunked KNN to get a fixed-K
   neighborhood. Predictable memory; recommended.
-* ``mode="radius"``: uses warpconvnet's wp.HashGrid radius search to get a
+* ``mode="radius"``: uses warpconvnet's radius search to get a
   variable-K neighborhood inside a 3-sigma ball. Lower work per query for
   highly non-uniform densities.
 """
@@ -93,13 +93,6 @@ def bilateral_filter(
         return out.to(src_value.dtype)
 
     elif mode == "radius":
-        # Warp's torch interop uses warp.context.runtime which is None until
-        # wp.init() runs. Trigger it explicitly to avoid an unhelpful
-        # AttributeError deep in wp.from_torch.
-        import warp as wp
-
-        if wp.context.runtime is None:
-            wp.init()
         from warpconvnet.geometry.coords.search.radius import batched_radius_search
 
         radius = float(radius_mult * sigma_xyz)

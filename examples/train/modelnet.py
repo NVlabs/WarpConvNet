@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import warp as wp
 from jaxtyping import Float
 from torch import Tensor
 from torch.optim.lr_scheduler import StepLR
@@ -142,7 +141,6 @@ def main(
     gamma: float = 0.7,
     device: str = "cuda",
 ):
-    wp.init()
     device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
 
     train_dataset = ModelNet40Dataset(root_dir, split="train")
