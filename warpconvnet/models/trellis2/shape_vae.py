@@ -3,7 +3,7 @@
 
 """TRELLIS.2 sparse U-Net VAE decoder + FlexiDualGrid mesh-attr head.
 
-Decoder side only (encoder skipped for inference). Module names mirror
+Decoder and encoder ports. Module names mirror
 `trellis2.models.sc_vaes.{sparse_unet_vae,fdg_vae}`, while sparse-conv
 checkpoint tensors are converted to WarpConvNet's native weight layout by
 ``load_trellis2_state_dict``.
@@ -12,6 +12,13 @@ Mesh extraction (`flexible_dual_grid_to_mesh`) is intentionally deferred to
 Phase 10 since it needs the o-voxel CUDA extension. `FlexiDualGridVaeDecoder`
 returns the raw 7-channel attrs (vertices, intersected, quad-lerp) and the
 caller can pipe them to o-voxel later.
+
+The encoder side (``SparseUnetVaeEncoder`` / ``FlexiDualGridVaeEncoder``) is
+included so the published TRELLIS.2 shape-encoder safetensors
+(``shape_enc_next_dc_f16c32_fp16``) can be loaded for use as a frozen 3D
+shape feature extractor. The forward path mirrors the upstream encoder
+exactly, including the KL bottleneck (``to_latent`` outputs
+``2 × latent_channels`` for mean/logvar).
 """
 from __future__ import annotations
 
@@ -24,7 +31,9 @@ import torch.nn.functional as F
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.modules.sparse_unet import (
     SparseChannelToSpatialResBlock3d,
+    SparseSpatialToChannelResBlock3d,
     SparseUNetDecoderStages,
+    SparseUNetEncoderStages,
 )
 from warpconvnet.nn.utils import DEFAULT_MIXED_PRECISION_MODULES, convert_module_parameters_to
 
@@ -33,8 +42,11 @@ from .sparse_conv_blocks import SparseConv3d, SparseConvNeXtBlock3d
 
 __all__ = [
     "FlexiDualGridVaeDecoder",
+    "FlexiDualGridVaeEncoder",
     "SparseResBlockC2S3d",
+    "SparseResBlockS2C3d",
     "SparseUnetVaeDecoder",
+    "SparseUnetVaeEncoder",
     "convert_trellis2_shape_vae_state_dict",
 ]
 
@@ -297,3 +309,191 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
         decoded = super().forward(x, **kwargs)
         h = decoded[0] if isinstance(decoded, tuple) else decoded
         return self.decode_attrs(h)
+
+
+# -----------------------------------------------------------------------------
+# Down-block: SparseResBlockS2C3d
+# -----------------------------------------------------------------------------
+class SparseResBlockS2C3d(SparseSpatialToChannelResBlock3d):
+    """Spatial-to-channel residual downsample block — encoder mirror of
+    ``SparseResBlockC2S3d``.
+
+    Layout (per upstream
+    `trellis2.models.sc_vaes.sparse_unet_vae.SparseResBlockS2C3d`):
+        ``conv1`` :  ``channels → out_channels // 8`` (pre-S2C; the S2C
+                     pack then expands channels by 8×, landing at out_channels)
+        ``updown``: SparseSpatial2Channel(2)
+        ``conv2`` : ``out_channels → out_channels`` (zero-init)
+        skip     : reshape+mean inverse of the decoder's repeat_interleave.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        out_channels: int | None = None,
+        use_checkpoint: bool = False,
+    ):
+        super().__init__(
+            channels=channels,
+            out_channels=out_channels,
+            factor=2,
+            use_checkpoint=use_checkpoint,
+            conv_cls=SparseConv3d,
+        )
+
+
+# -----------------------------------------------------------------------------
+# SparseUnetVaeEncoder
+# -----------------------------------------------------------------------------
+_ENCODER_BLOCK_REGISTRY = {
+    "SparseConvNeXtBlock3d": SparseConvNeXtBlock3d,
+    "SparseResBlockS2C3d": SparseResBlockS2C3d,
+}
+
+
+class SparseUnetVaeEncoder(nn.Module):
+    """Sparse U-Net encoder used by the TRELLIS.2 shape VAE.
+
+    Mirrors ``trellis2.models.sc_vaes.sparse_unet_vae.SparseUnetVaeEncoder``.
+    Channels go from ``model_channels[0]`` (input side) to
+    ``model_channels[-1]`` (latent side); each resolution block applies
+    ``num_blocks[i]`` ``block_type[i]`` modules followed by an
+    ``down_block_type[i]`` (between resolutions). The final ``to_latent``
+    linear produces ``2 × latent_channels`` features per voxel, which are
+    chunked into ``(mean, logvar)`` for the KL bottleneck.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        model_channels: list[int],
+        latent_channels: int,
+        num_blocks: list[int],
+        block_type: list[str],
+        down_block_type: list[str],
+        block_args: list[dict[str, Any]],
+        use_fp16: bool = False,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        self.num_blocks = num_blocks
+        self.use_fp16 = use_fp16
+        self.dtype = torch.float16 if use_fp16 else torch.float32
+
+        self.input_layer = nn.Linear(in_channels, model_channels[0])
+        self.to_latent = nn.Linear(model_channels[-1], 2 * latent_channels)
+
+        self.blocks = SparseUNetEncoderStages(
+            model_channels=model_channels,
+            num_blocks=num_blocks,
+            block_type=block_type,
+            down_block_type=down_block_type,
+            block_args=block_args,
+            block_registry=_ENCODER_BLOCK_REGISTRY,
+        )
+
+        if use_fp16:
+            self.convert_to_fp16()
+
+    def convert_to_fp16(self) -> None:
+        self.use_fp16 = True
+        self.dtype = torch.float16
+        self.blocks.apply(_convert_module_to_f16)
+
+    def convert_to_fp32(self) -> None:
+        self.use_fp16 = False
+        self.dtype = torch.float32
+        self.blocks.apply(_convert_module_to_f32)
+
+    def load_trellis2_state_dict(self, state_dict: dict[str, torch.Tensor], *args, **kwargs):
+        """Load a published TRELLIS.2 shape-encoder checkpoint.
+
+        Sparse-conv weights are converted to native WarpConvNet layout before
+        delegating to ``load_state_dict``. Same conversion as the decoder side.
+        """
+        converted = convert_trellis2_shape_vae_state_dict(state_dict, self)
+        return self.load_state_dict(converted, *args, **kwargs)
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    def forward(
+        self,
+        x: Voxels,
+        sample_posterior: bool = False,
+        return_raw: bool = False,
+    ):
+        in_dtype = x.feats.dtype
+        h = x.replace_features(self.input_layer(x.feats))
+        h = h.replace_features(h.feats.to(self.dtype))
+
+        h = self.blocks.run(h)
+
+        h = h.replace_features(h.feats.to(in_dtype))
+        h = h.replace_features(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        h = h.replace_features(self.to_latent(h.feats))
+
+        mean, logvar = h.feats.chunk(2, dim=-1)
+        if sample_posterior:
+            std = torch.exp(0.5 * logvar)
+            z = mean + std * torch.randn_like(std)
+        else:
+            z = mean
+        z_voxels = h.replace_features(z)
+
+        if return_raw:
+            return z_voxels, mean, logvar
+        return z_voxels
+
+
+# -----------------------------------------------------------------------------
+# FlexiDualGridVaeEncoder
+# -----------------------------------------------------------------------------
+class FlexiDualGridVaeEncoder(SparseUnetVaeEncoder):
+    """Shape VAE encoder consuming O-Voxel ``(vertices, intersected)`` pair.
+
+    Mirrors ``trellis2.models.sc_vaes.fdg_vae.FlexiDualGridVaeEncoder``.
+    Concatenates the per-voxel vertex offsets and intersection flags into
+    a 6-channel input (each shifted by -0.5 so the input is roughly
+    zero-centred). The two ``Voxels`` are expected to share coordinates.
+    """
+
+    def __init__(
+        self,
+        model_channels: list[int],
+        latent_channels: int,
+        num_blocks: list[int],
+        block_type: list[str],
+        down_block_type: list[str],
+        block_args: list[dict[str, Any]],
+        use_fp16: bool = False,
+    ):
+        super().__init__(
+            in_channels=6,
+            model_channels=model_channels,
+            latent_channels=latent_channels,
+            num_blocks=num_blocks,
+            block_type=block_type,
+            down_block_type=down_block_type,
+            block_args=block_args,
+            use_fp16=use_fp16,
+        )
+
+    def forward(
+        self,
+        vertices: Voxels,
+        intersected: Voxels,
+        sample_posterior: bool = False,
+        return_raw: bool = False,
+    ):
+        feats = torch.cat(
+            [
+                vertices.feats - 0.5,
+                intersected.feats.float() - 0.5,
+            ],
+            dim=1,
+        )
+        x = vertices.replace_features(feats)
+        return super().forward(x, sample_posterior=sample_posterior, return_raw=return_raw)
