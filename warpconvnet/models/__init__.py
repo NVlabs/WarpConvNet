@@ -4,8 +4,7 @@
 """Lazy model re-exports.
 
 Importing ``warpconvnet.models`` previously eagerly loaded every model in the
-package, which dragged in heavy optional deps (e.g. ``warp-lang`` via
-MaskFormer) even when the caller only wanted, say,
+package, which dragged in heavy optional deps even when the caller only wanted, say,
 ``warpconvnet.models.trellis2``. We use PEP-562 ``__getattr__`` so each public
 name imports the underlying module on first access — preserving the public
 API while letting callers avoid pulling in modules they don't use.

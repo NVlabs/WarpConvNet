@@ -4,7 +4,6 @@
 from typing import List, Optional, Tuple, Union
 
 import torch
-import warp as wp
 from einops import rearrange
 from jaxtyping import Float, Int
 from torch import Tensor, nn
@@ -350,7 +349,6 @@ if __name__ == "__main__":
     from warpconvnet.models.mink_unet import MinkUNet18
     from warpconvnet.nn.modules.sparse_pool import PointToVoxel
 
-    wp.init()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = ScanNetInstanceDataset(

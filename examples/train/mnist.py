@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import warp as wp
 from torch import Tensor
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
@@ -92,7 +91,6 @@ def main(
     gamma: float = 0.7,
     device: str = "cuda",
 ):
-    wp.init()
     device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
 
     torch.manual_seed(1)

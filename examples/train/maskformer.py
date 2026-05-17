@@ -43,7 +43,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import warp as wp
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
 from torch.optim.lr_scheduler import StepLR
@@ -418,7 +417,6 @@ def main(cfg: DictConfig):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    wp.init()
     device = cfg.device
     num_classes = ScanNetInstanceDataset.NUM_CLASSES[cfg.data.label_set]
 
