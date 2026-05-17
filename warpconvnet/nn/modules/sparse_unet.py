@@ -15,11 +15,16 @@ import torch.nn.functional as F
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.modules.normalizations import LayerNorm32
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
-from warpconvnet.nn.modules.sparse_resample import SparseChannel2Spatial
+from warpconvnet.nn.modules.sparse_resample import SparseChannel2Spatial, SparseSpatial2Channel
 from warpconvnet.nn.utils import zero_module
 
 
-__all__ = ["SparseChannelToSpatialResBlock3d", "SparseUNetDecoderStages"]
+__all__ = [
+    "SparseChannelToSpatialResBlock3d",
+    "SparseSpatialToChannelResBlock3d",
+    "SparseUNetDecoderStages",
+    "SparseUNetEncoderStages",
+]
 
 
 class SparseUNetDecoderStages(nn.ModuleList):
@@ -188,3 +193,148 @@ class SparseChannelToSpatialResBlock3d(nn.Module):
         if self.use_checkpoint:
             return torch.utils.checkpoint.checkpoint(self._forward, x, subdiv, use_reentrant=False)
         return self._forward(x, subdiv)
+
+
+class SparseSpatialToChannelResBlock3d(nn.Module):
+    """Residual block that downsamples sparse voxels via spatial-to-channel packing.
+
+    Mirror of ``SparseChannelToSpatialResBlock3d`` for the encoder direction.
+    The block projects ``channels`` to ``out_channels // factor**3`` channels,
+    packs ``factor**3`` neighbouring child voxels into the channel dimension
+    via ``SparseSpatial2Channel`` (so the output has ``out_channels`` per
+    parent voxel), applies a zero-initialized sparse conv, and adds the
+    residual skip (which packs the input's spatial neighbours by averaging
+    each group of ``num_children`` channels — the inverse of the decoder's
+    ``repeat_interleave`` broadcast).
+
+    Submodule names match upstream
+    ``trellis2.models.sc_vaes.sparse_unet_vae.SparseResBlockS2C3d`` exactly
+    (``norm1``, ``norm2``, ``conv1``, ``conv2``, ``updown``), so published
+    TRELLIS.2 shape-encoder safetensors load via the same weight conversion
+    used by ``FlexiDualGridVaeDecoder``.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        out_channels: int | None = None,
+        factor: int = 2,
+        use_checkpoint: bool = False,
+        conv_cls: type[nn.Module] = SparseConv3d,
+        norm_cls: type[nn.Module] = LayerNorm32,
+        kernel_size: int | tuple[int, int, int] = 3,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.factor = factor
+        self.use_checkpoint = use_checkpoint
+        self.num_children = factor**3
+
+        # ``conv1`` produces ``out_channels // num_children`` features per child
+        # voxel; the spatial-to-channel pack then concatenates ``num_children``
+        # children into one parent, yielding ``out_channels`` per parent voxel.
+        if self.out_channels % self.num_children != 0:
+            raise ValueError(
+                f"out_channels ({self.out_channels}) must be divisible by "
+                f"factor**3 ({self.num_children})"
+            )
+        # Skip path: take the original ``channels`` per child, pack
+        # ``num_children`` children → ``channels * num_children`` per parent,
+        # then reshape and mean over the per-output-channel groups to land at
+        # ``out_channels``. This requires ``channels * num_children`` to be
+        # an integer multiple of ``out_channels``.
+        if (channels * self.num_children) % self.out_channels != 0:
+            raise ValueError(
+                "skip-connection reshape requires channels * factor**3 "
+                f"({channels * self.num_children}) divisible by out_channels "
+                f"({self.out_channels})"
+            )
+        self._skip_group = (channels * self.num_children) // self.out_channels
+
+        self.norm1 = norm_cls(channels, elementwise_affine=True, eps=1e-6)
+        self.norm2 = norm_cls(self.out_channels, elementwise_affine=False, eps=1e-6)
+        self.conv1 = conv_cls(channels, self.out_channels // self.num_children, kernel_size)
+        self.conv2 = zero_module(conv_cls(self.out_channels, self.out_channels, kernel_size))
+        self.updown = SparseSpatial2Channel(factor)
+
+    def _skip(self, x: Voxels) -> Voxels:
+        # After ``updown``, x.feats has shape (N_parent, channels * num_children).
+        # Reshape to (N_parent, out_channels, _skip_group) and mean over the
+        # last axis to land at (N_parent, out_channels).
+        feats = x.feats.reshape(x.feats.shape[0], self.out_channels, self._skip_group).mean(dim=-1)
+        return x.replace_features(feats)
+
+    def _forward(self, x: Voxels) -> Voxels:
+        h = x.replace_features(self.norm1(x.feats))
+        h = h.replace_features(F.silu(h.feats))
+        h = self.conv1(h)
+        h = self.updown(h)
+        x = self.updown(x)
+        h = h.replace_features(self.norm2(h.feats))
+        h = h.replace_features(F.silu(h.feats))
+        h = self.conv2(h)
+        h = h + self._skip(x)
+        return h
+
+    def forward(self, x: Voxels) -> Voxels:
+        if self.use_checkpoint:
+            return torch.utils.checkpoint.checkpoint(self._forward, x, use_reentrant=False)
+        return self._forward(x)
+
+
+class SparseUNetEncoderStages(nn.ModuleList):
+    """Resolution-stage assembly for sparse U-Net encoders.
+
+    Mirror of ``SparseUNetDecoderStages`` going low→high channels. Each stage
+    contains ``num_blocks[i]`` residual blocks followed by an optional
+    downsample block between resolutions. Subclasses ``nn.ModuleList`` so
+    state-dict keys follow the same ``blocks.{i}.{j}.*`` naming used by the
+    decoder side and by upstream TRELLIS.2.
+    """
+
+    def __init__(
+        self,
+        model_channels: list[int],
+        num_blocks: list[int],
+        block_type: list[str],
+        down_block_type: list[str],
+        block_args: list[dict[str, Any]],
+        block_registry: Mapping[str, type[nn.Module]],
+        down_block_kwargs: dict[str, Any] | None = None,
+    ):
+        if not (len(model_channels) == len(num_blocks) == len(block_type) == len(block_args)):
+            raise ValueError("model_channels, num_blocks, block_type, and block_args must align")
+        if len(down_block_type) != max(0, len(num_blocks) - 1):
+            raise ValueError("down_block_type must have one entry between each resolution stage")
+
+        stages: list[nn.ModuleList] = []
+        down_block_kwargs = down_block_kwargs or {}
+        for i, n_blocks in enumerate(num_blocks):
+            stage = nn.ModuleList([])
+            for _ in range(n_blocks):
+                stage.append(block_registry[block_type[i]](model_channels[i], **block_args[i]))
+            if i < len(num_blocks) - 1:
+                kwargs = dict(block_args[i])
+                kwargs.update(down_block_kwargs)
+                stage.append(
+                    block_registry[down_block_type[i]](
+                        model_channels[i],
+                        model_channels[i + 1],
+                        **kwargs,
+                    )
+                )
+            stages.append(stage)
+        super().__init__(stages)
+
+        self.model_channels = model_channels
+        self.num_blocks = num_blocks
+        self.block_type = block_type
+        self.down_block_type = down_block_type
+
+    def run(self, x: Voxels) -> Voxels:
+        """Run encoder stages sequentially."""
+        for stage in self:
+            for block in stage:
+                x = block(x)
+        return x
