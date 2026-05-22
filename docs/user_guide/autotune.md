@@ -1,7 +1,7 @@
 # Auto-Tuning
 
 **Created**: 2026-04-18 17:02:44
-**Edited**: 2026-04-18 17:02:44
+**Edited**: 2026-05-22 12:50:00
 
 WarpConvNet's spatially sparse convolution has many backend algorithms
 (see [Sparse Convolution Internals — Algorithm taxonomy](./sparse_convolutions_internals.md#algorithm-taxonomy)).
@@ -171,6 +171,13 @@ SM90 CuTe non-mask GEMM inner-autotune entries now use registry identity
 `(op, backend, tile_id)`. Existing warm cache entries under
 `cute_gemm_sm90_AD_gather_scatter` are not migrated and will be rebenchmarked
 under `nonmask_gemm_ad_gather_scatter.cute_sm90` after upgrade.
+
+`SpatiallySparseConvConfig` now keys on conv stride, `transposed`,
+`generative`, and `stride_mode` in addition to channel/voxel shape. Strided
+downsample layers (`N_in != N_out`) now route through native strided fwd
+kernels (tile_ids 300-307). Pre-upgrade cache entries deserialize with empty
+stride metadata and will miss against new lookups; expect a one-time
+re-autotune pass on the first run after upgrade.
 
 ```bash
 # Clear cache (e.g. after switching GPUs)
