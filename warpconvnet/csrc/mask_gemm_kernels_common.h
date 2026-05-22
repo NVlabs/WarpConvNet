@@ -69,6 +69,41 @@ __global__ __launch_bounds__(
 template <typename Kernel>
 __global__ __launch_bounds__(
     Kernel::MaxThreadsPerBlock,
+    Kernel::MinBlocksPerMultiprocessor) void mask_gemm_kernel_entry_strided(const typename Kernel::
+                                                                                ElementInput *ptr_A,
+                                                                            const typename Kernel::
+                                                                                ElementInput *ptr_B,
+                                                                            typename Kernel::
+                                                                                ElementOutput
+                                                                                    *ptr_D,
+                                                                            const int *neighbor_map,
+                                                                            int N_in,
+                                                                            int N_out,
+                                                                            int C_in,
+                                                                            int C_out,
+                                                                            int K,
+                                                                            float alpha,
+                                                                            int stride_A,
+                                                                            int stride_D) {
+  extern __shared__ char smem[];
+  Kernel{}(ptr_A,
+           ptr_B,
+           ptr_D,
+           neighbor_map,
+           N_in,
+           N_out,
+           C_in,
+           C_out,
+           K,
+           alpha,
+           stride_A,
+           stride_D,
+           smem);
+}
+
+template <typename Kernel>
+__global__ __launch_bounds__(
+    Kernel::MaxThreadsPerBlock,
     Kernel::MinBlocksPerMultiprocessor) void mask_gemm_wgrad_kernel_entry(const typename Kernel::
                                                                               ElementInput *ptr_A,
                                                                           const typename Kernel::
@@ -128,6 +163,45 @@ int launch_mask_gemm_fwd(const void *a,
                          int groups = 1,
                          int identity_offset = -1,
                          cudaStream_t stream = 0);
+
+template <typename ElementInput, class TileTag, typename ElementOutput>
+int launch_mask_gemm_fwd_strided(const void *a,
+                                 const void *b,
+                                 void *d,
+                                 const int *neighbor_map,
+                                 int N_in,
+                                 int N_out,
+                                 int C_in,
+                                 int C_out,
+                                 int K,
+                                 float alpha,
+                                 int groups = 1,
+                                 cudaStream_t stream = 0);
+
+#define WCN_DECLARE_FWD_STRIDED_LAUNCH(FuncName)           \
+  template <typename ElementInput, typename ElementOutput> \
+  int FuncName(const void *a,                              \
+               const void *b,                              \
+               void *d,                                    \
+               const int *neighbor_map,                    \
+               int N_in,                                   \
+               int N_out,                                  \
+               int C_in,                                   \
+               int C_out,                                  \
+               int K,                                      \
+               float alpha,                                \
+               int groups = 1,                             \
+               cudaStream_t stream = 0);
+
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x64_2s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x64_3s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x128_2s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x128_3s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_128x64_2s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x64_2s_fused)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x128_2s_fused)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_128x64_2s_fused)
+#undef WCN_DECLARE_FWD_STRIDED_LAUNCH
 
 template <typename ElementInput, class TileTag, typename ElementOutput>
 int launch_mask_gemm_dgrad(const void *a,
@@ -769,6 +843,96 @@ int launch_scalar_wgrad_sab(const void *a,
                                                              C_out * groups,                  \
                                                              identity_offset);                \
     return 0;                                                                                 \
+  }
+
+#define WCN_PROD_INSTANTIATE_FWD_STRIDED(KernelClass, ElemIn, TileTag, ElemOut)             \
+  template <>                                                                               \
+  int launch_mask_gemm_fwd_strided<ElemIn, gemm::TileTag, ElemOut>(const void *a,           \
+                                                                   const void *b,           \
+                                                                   void *d,                 \
+                                                                   const int *neighbor_map, \
+                                                                   int N_in,                \
+                                                                   int N_out,               \
+                                                                   int C_in,                \
+                                                                   int C_out,               \
+                                                                   int K,                   \
+                                                                   float alpha,             \
+                                                                   int groups,              \
+                                                                   cudaStream_t stream) {   \
+    using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                                   \
+    using Kernel = KernelClass<Config, ElemOut>;                                            \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});                      \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});                      \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                                    \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                              \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                              \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                                 \
+    size_t smem = Kernel::SharedStorageSize;                                                \
+    if (smem > 48 * 1024) {                                                                 \
+      auto err = cudaFuncSetAttribute(mask_gemm_kernel_entry_strided<Kernel>,               \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,          \
+                                      smem);                                                \
+      if (err != cudaSuccess) return -1;                                                    \
+    }                                                                                       \
+    mask_gemm_kernel_entry_strided<Kernel>                                                  \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,             \
+                                                             (const ElemIn *)b,             \
+                                                             (ElemOut *)d,                  \
+                                                             neighbor_map,                  \
+                                                             N_in,                          \
+                                                             N_out,                         \
+                                                             C_in,                          \
+                                                             C_out,                         \
+                                                             K,                             \
+                                                             alpha,                         \
+                                                             C_in * groups,                 \
+                                                             C_out * groups);               \
+    return 0;                                                                               \
+  }
+
+#define WCN_PROD_INSTANTIATE_FWD_STRIDED_NAMED(FuncName, KernelClass, ElemIn, TileTag, ElemOut) \
+  template <>                                                                                   \
+  int FuncName<ElemIn, ElemOut>(const void *a,                                                  \
+                                const void *b,                                                  \
+                                void *d,                                                        \
+                                const int *neighbor_map,                                        \
+                                int N_in,                                                       \
+                                int N_out,                                                      \
+                                int C_in,                                                       \
+                                int C_out,                                                      \
+                                int K,                                                          \
+                                float alpha,                                                    \
+                                int groups,                                                     \
+                                cudaStream_t stream) {                                          \
+    using Config = CuteTileConfig<ElemIn, gemm::TileTag>;                                       \
+    using Kernel = KernelClass<Config, ElemOut>;                                                \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});                          \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});                          \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                                        \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                                  \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                                  \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                                     \
+    size_t smem = Kernel::SharedStorageSize;                                                    \
+    if (smem > 48 * 1024) {                                                                     \
+      auto err = cudaFuncSetAttribute(mask_gemm_kernel_entry_strided<Kernel>,                   \
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,              \
+                                      smem);                                                    \
+      if (err != cudaSuccess) return -1;                                                        \
+    }                                                                                           \
+    mask_gemm_kernel_entry_strided<Kernel>                                                      \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,                 \
+                                                             (const ElemIn *)b,                 \
+                                                             (ElemOut *)d,                      \
+                                                             neighbor_map,                      \
+                                                             N_in,                              \
+                                                             N_out,                             \
+                                                             C_in,                              \
+                                                             C_out,                             \
+                                                             K,                                 \
+                                                             alpha,                             \
+                                                             C_in * groups,                     \
+                                                             C_out * groups);                   \
+    return 0;                                                                                   \
   }
 
 #define WCN_PROD_INSTANTIATE_DGRAD(KernelClass, ElemIn, TileTag, ElemOut)                     \

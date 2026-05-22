@@ -8,10 +8,18 @@
 
 // Forward kernels
 #include "mask_gemm/include/MaskGemm_forward_128x64x32_2s_fused.h"
+#include "mask_gemm/include/MaskGemm_forward_128x64x32_2s_fused_strided.h"
+#include "mask_gemm/include/MaskGemm_forward_128x64x32_2s_pipelined_strided.h"
 #include "mask_gemm/include/MaskGemm_forward_32x32x32_1s_flat.h"
 #include "mask_gemm/include/MaskGemm_forward_64x128x32_2s_fused.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_2s_fused_strided.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_2s_pipelined_strided.h"
 #include "mask_gemm/include/MaskGemm_forward_64x128x32_3s.h"
+#include "mask_gemm/include/MaskGemm_forward_64x128x32_3s_pipelined_strided.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_2s_fused_strided.h"
 #include "mask_gemm/include/MaskGemm_forward_64x64x32_2s_pipelined.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_2s_pipelined_strided.h"
+#include "mask_gemm/include/MaskGemm_forward_64x64x32_3s_pipelined_strided.h"
 // Forward scalar variants (for unaligned C)
 #include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_sa.h"
 #include "mask_gemm/include/MaskGemm_forward_64x64x32_1s_flat_sab_se.h"
@@ -56,6 +64,47 @@ WCN_PROD_INSTANTIATE_FWD(MaskGemm_forward_64x64x32_2s_pipelined,
                          cutlass::bfloat16_t,
                          Tile64x64x32,
                          float)
+
+// Forward strided: pair_table/neighbor_map driven downsample path (tiles 300-307).
+WCN_PROD_INSTANTIATE_FWD_STRIDED(MaskGemm_forward_64x64x32_2s_pipelined_strided,
+                                 cutlass::half_t,
+                                 Tile64x64x32,
+                                 cutlass::half_t)
+WCN_PROD_INSTANTIATE_FWD_STRIDED(MaskGemm_forward_64x64x32_2s_pipelined_strided,
+                                 cutlass::bfloat16_t,
+                                 Tile64x64x32,
+                                 cutlass::bfloat16_t)
+#define INST_FWD_STRIDED_BOTH(FuncName, KernelClass, TileTag)           \
+  WCN_PROD_INSTANTIATE_FWD_STRIDED_NAMED(                               \
+      FuncName, KernelClass, cutlass::half_t, TileTag, cutlass::half_t) \
+  WCN_PROD_INSTANTIATE_FWD_STRIDED_NAMED(                               \
+      FuncName, KernelClass, cutlass::bfloat16_t, TileTag, cutlass::bfloat16_t)
+
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_64x64_2s_pipelined,
+                      MaskGemm_forward_64x64x32_2s_pipelined_strided,
+                      Tile64x64x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_64x64_3s_pipelined,
+                      MaskGemm_forward_64x64x32_3s_pipelined_strided,
+                      Tile64x64x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_64x128_2s_pipelined,
+                      MaskGemm_forward_64x128x32_2s_pipelined_strided,
+                      Tile64x128x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_64x128_3s_pipelined,
+                      MaskGemm_forward_64x128x32_3s_pipelined_strided,
+                      Tile64x128x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_128x64_2s_pipelined,
+                      MaskGemm_forward_128x64x32_2s_pipelined_strided,
+                      Tile128x64x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_64x64_2s_fused,
+                      MaskGemm_forward_64x64x32_2s_fused_strided,
+                      Tile64x64x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_64x128_2s_fused,
+                      MaskGemm_forward_64x128x32_2s_fused_strided,
+                      Tile64x128x32)
+INST_FWD_STRIDED_BOTH(launch_fwd_strided_128x64_2s_fused,
+                      MaskGemm_forward_128x64x32_2s_fused_strided,
+                      Tile128x64x32)
+#undef INST_FWD_STRIDED_BOTH
 
 // Forward: 64x128x32 fused (C>=128, C_in>=C_out, fp16 — F16 accum)
 WCN_PROD_INSTANTIATE_FWD(MaskGemm_forward_64x128x32_2s_fused,

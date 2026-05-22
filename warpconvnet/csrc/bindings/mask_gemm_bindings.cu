@@ -100,6 +100,45 @@ int launch_mask_gemm_fwd(const void *a,
                          cudaStream_t stream);
 
 template <typename ElementInput, typename TileTag, typename ElementOutput>
+int launch_mask_gemm_fwd_strided(const void *a,
+                                 const void *b,
+                                 void *d,
+                                 const int *neighbor_map,
+                                 int N_in,
+                                 int N_out,
+                                 int C_in,
+                                 int C_out,
+                                 int K,
+                                 float alpha,
+                                 int groups,
+                                 cudaStream_t stream);
+
+#define WCN_DECLARE_FWD_STRIDED_LAUNCH(FuncName)           \
+  template <typename ElementInput, typename ElementOutput> \
+  int FuncName(const void *a,                              \
+               const void *b,                              \
+               void *d,                                    \
+               const int *neighbor_map,                    \
+               int N_in,                                   \
+               int N_out,                                  \
+               int C_in,                                   \
+               int C_out,                                  \
+               int K,                                      \
+               float alpha,                                \
+               int groups,                                 \
+               cudaStream_t stream);
+
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x64_2s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x64_3s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x128_2s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x128_3s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_128x64_2s_pipelined)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x64_2s_fused)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_64x128_2s_fused)
+WCN_DECLARE_FWD_STRIDED_LAUNCH(launch_fwd_strided_128x64_2s_fused)
+#undef WCN_DECLARE_FWD_STRIDED_LAUNCH
+
+template <typename ElementInput, typename TileTag, typename ElementOutput>
 int launch_mask_gemm_dgrad(const void *a,
                            const void *b,
                            void *d,
@@ -703,6 +742,12 @@ using namespace warpconvnet;
 #define LAUNCH_FWD(ElemIn, TileTag, ElemOut, ...) \
   cute_gemm::launch_mask_gemm_fwd<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
 
+#define LAUNCH_FWD_STRIDED(ElemIn, TileTag, ElemOut, ...) \
+  cute_gemm::launch_mask_gemm_fwd_strided<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
+
+#define LAUNCH_FWD_STRIDED_NAMED(FuncName, ElemIn, ElemOut, ...) \
+  cute_gemm::FuncName<ElemIn, ElemOut>(__VA_ARGS__)
+
 #define LAUNCH_DGRAD(ElemIn, TileTag, ElemOut, ...) \
   cute_gemm::launch_mask_gemm_dgrad<ElemIn, gemm::TileTag, ElemOut>(__VA_ARGS__)
 
@@ -771,6 +816,18 @@ int mask_gemm_fwd(torch::Tensor input,
                               groups,
                               identity_offset,
                               stream);
+  auto strided_args = std::make_tuple(input.data_ptr(),
+                                      weight.data_ptr(),
+                                      output.data_ptr(),
+                                      pair_table.data_ptr<int>(),
+                                      N_in,
+                                      N_out,
+                                      C_in,
+                                      C_out,
+                                      K,
+                                      alpha,
+                                      groups,
+                                      stream);
 
   // MW>1 dispatch helper macro
 #define DISPATCH_MW(CALL_MW1, CALL_MW2, CALL_MW4, CALL_MW8, CALL_MW12) \
@@ -985,6 +1042,12 @@ int mask_gemm_fwd(torch::Tensor input,
   // -- Canonical warpgemm fwd tile_ids. Each case label below references a
   //    member of gemm::FwdTile (warpgemm-emitted, see mask_gemm_tile_enums.h).
   using gemm::FwdTile;
+#define FWD_STRIDED_CASE(TileEnum, FuncName)                                           \
+  case FwdTile::TileEnum:                                                              \
+    return std::apply(                                                                 \
+        [](auto &&...a) { return LAUNCH_FWD_STRIDED_NAMED(FuncName, In, Out, a...); }, \
+        strided_args)
+
   if (si == torch::kFloat16 && so == torch::kFloat16) {
     using In = cutlass::half_t;
     using Out = cutlass::half_t;
@@ -1000,6 +1063,14 @@ int mask_gemm_fwd(torch::Tensor input,
         FWD_64x128_3S_MW(In);
       case FwdTile::_128x64x32_2s:
         FWD_128x64_MW(In);
+        FWD_STRIDED_CASE(_64x64x32_2s_pipelined_strided, launch_fwd_strided_64x64_2s_pipelined);
+        FWD_STRIDED_CASE(_64x64x32_3s_pipelined_strided, launch_fwd_strided_64x64_3s_pipelined);
+        FWD_STRIDED_CASE(_64x128x32_2s_pipelined_strided, launch_fwd_strided_64x128_2s_pipelined);
+        FWD_STRIDED_CASE(_64x128x32_3s_pipelined_strided, launch_fwd_strided_64x128_3s_pipelined);
+        FWD_STRIDED_CASE(_128x64x32_2s_pipelined_strided, launch_fwd_strided_128x64_2s_pipelined);
+        FWD_STRIDED_CASE(_64x64x32_2s_fused_strided, launch_fwd_strided_64x64_2s_fused);
+        FWD_STRIDED_CASE(_64x128x32_2s_fused_strided, launch_fwd_strided_64x128_2s_fused);
+        FWD_STRIDED_CASE(_128x64x32_2s_fused_strided, launch_fwd_strided_128x64_2s_fused);
       // Pcoff (E1) variants, MW=1 only (MW>1 instantiations deferred).
       case FwdTile::_64x64x32_1s_flat_pcoff_F16Accum:
         return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff, Out, a...); },
@@ -1037,6 +1108,14 @@ int mask_gemm_fwd(torch::Tensor input,
         FWD_64x128_3S_MW(In);
       case FwdTile::_128x64x32_2s:
         FWD_128x64_MW(In);
+        FWD_STRIDED_CASE(_64x64x32_2s_pipelined_strided, launch_fwd_strided_64x64_2s_pipelined);
+        FWD_STRIDED_CASE(_64x64x32_3s_pipelined_strided, launch_fwd_strided_64x64_3s_pipelined);
+        FWD_STRIDED_CASE(_64x128x32_2s_pipelined_strided, launch_fwd_strided_64x128_2s_pipelined);
+        FWD_STRIDED_CASE(_64x128x32_3s_pipelined_strided, launch_fwd_strided_64x128_3s_pipelined);
+        FWD_STRIDED_CASE(_128x64x32_2s_pipelined_strided, launch_fwd_strided_128x64_2s_pipelined);
+        FWD_STRIDED_CASE(_64x64x32_2s_fused_strided, launch_fwd_strided_64x64_2s_fused);
+        FWD_STRIDED_CASE(_64x128x32_2s_fused_strided, launch_fwd_strided_64x128_2s_fused);
+        FWD_STRIDED_CASE(_128x64x32_2s_fused_strided, launch_fwd_strided_128x64_2s_fused);
       // Pcoff bf16 variants — F32-accum base supports bf16
       case FwdTile::_64x64x32_3s_pcoff:
         return std::apply(
@@ -1052,6 +1131,7 @@ int mask_gemm_fwd(torch::Tensor input,
     }
   }
 #endif
+#undef FWD_STRIDED_CASE
 #undef FWD_64x64_MW
 #undef FWD_64x128_F16ACC_MW_DISP
 #undef FWD_64x128_3S_MW
@@ -1155,26 +1235,26 @@ int mask_gemm_dgrad(torch::Tensor grad_output,
         case DgradTile::_128x64x32_2s_wt:
           return std::apply([](auto &&...a) { return LAUNCH_FWD(In, Tile128x64x32, Out, a...); },
                             fwd_args);
-        case DgradTile::_32x32x32_1s_flat_F16Accum_wt:
+        case DgradTile::_32x32x32_1s_flat_wt_F16Accum:
           return std::apply(
               [](auto &&...a) { return LAUNCH_FWD(In, Tile32x32x32_F16Accum, Out, a...); },
               fwd_args);
-        case DgradTile::_64x128x32_2s_fused_F16Accum_wt:
+        case DgradTile::_64x128x32_2s_fused_wt_F16Accum:
           return std::apply(
               [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_F16Accum, Out, a...); },
               fwd_args);
-        case DgradTile::_64x64x32_1s_flat_pcoff_F16Accum_wt:
+        case DgradTile::_64x64x32_1s_flat_pcoff_wt_F16Accum:
           return std::apply(
               [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff, Out, a...); }, fwd_args);
-        case DgradTile::_64x64x32_1s_flat_pcoff_F16K8_wt:
+        case DgradTile::_64x64x32_1s_flat_pcoff_wt_F16K8:
           return std::apply(
               [](auto &&...a) { return LAUNCH_FWD(In, Tile64x64x32_Pcoff_K8, Out, a...); },
               fwd_args);
-        case DgradTile::_64x128x32_1s_flat_pcoff_F16K8_wt:
+        case DgradTile::_64x128x32_1s_flat_pcoff_wt_F16K8:
           return std::apply(
               [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff_K8, Out, a...); },
               fwd_args);
-        case DgradTile::_64x128x32_1s_flat_pcoff_F16Accum_wt:
+        case DgradTile::_64x128x32_1s_flat_pcoff_wt_F16Accum:
           return std::apply(
               [](auto &&...a) { return LAUNCH_FWD(In, Tile64x128x32_Pcoff, Out, a...); }, fwd_args);
         case DgradTile::_64x64x32_3s_pcoff_wt:

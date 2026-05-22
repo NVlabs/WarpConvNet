@@ -293,10 +293,30 @@ _AB_MASK_GEMM_PCOFF = (
     else []
 )
 
-# Full mask_gemm pool (F32Acc + F16Acc + Pcoff). Referenced by _AB_PARAMS_AUTO
-# so env-var overrides like WARPCONVNET_AB_ALGO_MODE=["mask_gemm"] can still
-# opt into F16Acc and pcoff tiles.
-_AB_MASK_GEMM = _AB_MASK_GEMM_F32ACC + _AB_MASK_GEMM_F16ACC + _AB_MASK_GEMM_PCOFF
+_AB_MASK_GEMM_STRIDED_F32ACC = (
+    [
+        ("mask_gemm", {"tile_id": 300}),  # 64x64 2s pipelined_strided
+        ("mask_gemm", {"tile_id": 301}),  # 64x64 3s pipelined_strided
+        ("mask_gemm", {"tile_id": 302}),  # 64x128 2s pipelined_strided
+        ("mask_gemm", {"tile_id": 303}),  # 64x128 3s pipelined_strided
+        ("mask_gemm", {"tile_id": 304}),  # 128x64 2s pipelined_strided
+        ("mask_gemm", {"tile_id": 305}),  # 64x64 2s fused_strided
+        ("mask_gemm", {"tile_id": 306}),  # 64x128 2s fused_strided
+        ("mask_gemm", {"tile_id": 307}),  # 128x64 2s fused_strided
+    ]
+    if _HAS_MASK_GEMM
+    else []
+)
+
+# Full mask_gemm pool (F32Acc + F16Acc + Pcoff + strided). Referenced by
+# _AB_PARAMS_AUTO so env-var overrides like WARPCONVNET_AB_ALGO_MODE=["mask_gemm"]
+# can still opt into F16Acc and pcoff tiles.
+_AB_MASK_GEMM = (
+    _AB_MASK_GEMM_F32ACC
+    + _AB_MASK_GEMM_F16ACC
+    + _AB_MASK_GEMM_PCOFF
+    + _AB_MASK_GEMM_STRIDED_F32ACC
+)
 
 # Dgrad-namespace tile ids for fwd-kernel-reused-as-dgrad. These are
 # canonical warpgemm tile_ids 900-911 in the DGRAD op namespace. Dispatch

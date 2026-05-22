@@ -98,6 +98,26 @@ enum class FwdTile : int {
   _64x128x32_3s_pipelined_splitk_workspace = 203,    // null-result
   _128x64x32_2s_pipelined_splitk_workspace = 204,    // null-result
   _64x128x32_2s_fused_splitk_workspace = 205,        // null-result
+  _64x64x32_2s_pipelined_strided = 300,              // experimental
+  _64x64x32_3s_pipelined_strided = 301,              // experimental
+  _64x128x32_2s_pipelined_strided = 302,             // experimental
+  _64x128x32_3s_pipelined_strided = 303,             // experimental
+  _128x64x32_2s_pipelined_strided = 304,             // experimental
+  _64x64x32_2s_fused_strided = 305,                  // experimental
+  _64x128x32_2s_fused_strided = 306,                 // experimental
+  _128x64x32_2s_fused_strided = 307,                 // experimental
+  _64x64x32_1s_flat_sa_wt = 400,
+  _64x128x32_3s_wt = 401,
+  _128x64x32_2s_wt = 402,
+  _32x32x32_1s_flat_wt_F16Accum = 403,
+  _64x128x32_2s_fused_wt_F16Accum = 404,
+  _64x64x32_1s_flat_pcoff_wt_F16Accum = 405,
+  _64x64x32_1s_flat_pcoff_wt_F16K8 = 406,
+  _64x128x32_1s_flat_pcoff_wt_F16K8 = 407,
+  _64x128x32_1s_flat_pcoff_wt_F16Accum = 408,
+  _64x64x32_3s_pcoff_wt = 409,
+  _64x64x32_2s_warp_spec_pcoff_wt = 410,
+  _64x128x32_2s_warp_spec_pcoff_wt = 411,
 };
 
 enum class DgradTile : int {
@@ -154,12 +174,12 @@ enum class DgradTile : int {
   _64x64x32_1s_flat_sa_wt = 900,
   _64x128x32_3s_wt = 901,
   _128x64x32_2s_wt = 902,
-  _32x32x32_1s_flat_F16Accum_wt = 903,
-  _64x128x32_2s_fused_F16Accum_wt = 904,
-  _64x64x32_1s_flat_pcoff_F16Accum_wt = 905,
-  _64x64x32_1s_flat_pcoff_F16K8_wt = 906,
-  _64x128x32_1s_flat_pcoff_F16K8_wt = 907,
-  _64x128x32_1s_flat_pcoff_F16Accum_wt = 908,
+  _32x32x32_1s_flat_wt_F16Accum = 903,
+  _64x128x32_2s_fused_wt_F16Accum = 904,
+  _64x64x32_1s_flat_pcoff_wt_F16Accum = 905,
+  _64x64x32_1s_flat_pcoff_wt_F16K8 = 906,
+  _64x128x32_1s_flat_pcoff_wt_F16K8 = 907,
+  _64x128x32_1s_flat_pcoff_wt_F16Accum = 908,
   _64x64x32_3s_pcoff_wt = 909,
   _64x64x32_2s_warp_spec_pcoff_wt = 910,
   _64x128x32_2s_warp_spec_pcoff_wt = 911,
