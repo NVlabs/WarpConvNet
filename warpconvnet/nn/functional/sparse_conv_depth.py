@@ -79,14 +79,67 @@ _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS: Dict[
 ] = {}
 
 
+def _rehydrate_algo(
+    algo: Any,
+    enum_cls: type,
+) -> Any:
+    """Convert a cached algo (string name or value) back to its enum instance.
+
+    The benchmark cache serializes ``enum.Enum`` instances as their ``.name``
+    (see ``_to_msgpack`` in ``warpconvnet/utils/benchmark_cache.py``). On load
+    we need to rehydrate so dispatch comparisons against enum members succeed.
+    """
+    if isinstance(algo, enum_cls):
+        return algo
+    if isinstance(algo, str):
+        try:
+            return enum_cls[algo]  # by name, e.g. "EXPLICIT"
+        except KeyError:
+            try:
+                return enum_cls(algo)  # by value, e.g. "explicit"
+            except ValueError:
+                return algo
+    return algo
+
+
+def _rehydrate_benchmark_results(
+    results: Any,
+    enum_cls: type,
+) -> List[Tuple[Any, Dict[str, Any], float]]:
+    """Rehydrate a list of ``(algo, params, time)`` cache entries to use enums."""
+    if not isinstance(results, list):
+        return []
+    out: List[Tuple[Any, Dict[str, Any], float]] = []
+    for item in results:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            continue
+        algo_raw, params, metric = item
+        out.append(
+            (
+                _rehydrate_algo(algo_raw, enum_cls),
+                params if isinstance(params, dict) else {},
+                float(metric),
+            )
+        )
+    return out
+
+
 # Load cached benchmark results at module initialization
 def _initialize_depthwise_benchmark_cache():
     """Load cached depthwise benchmark results and populate global dictionaries."""
     try:
         fwd_ns = generic_benchmark_get_namespace("sparse_conv_depthwise_forward")
         bwd_ns = generic_benchmark_get_namespace("sparse_conv_depthwise_backward")
-        _BENCHMARK_DEPTHWISE_FORWARD_RESULTS.update(fwd_ns)
-        _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS.update(bwd_ns)
+        if isinstance(fwd_ns, dict):
+            for k, v in fwd_ns.items():
+                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[k] = _rehydrate_benchmark_results(
+                    v, SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE
+                )
+        if isinstance(bwd_ns, dict):
+            for k, v in bwd_ns.items():
+                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[k] = _rehydrate_benchmark_results(
+                    v, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE
+                )
         if _BENCHMARK_DEPTHWISE_FORWARD_RESULTS or _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS:
             logger.info(
                 f"Loaded {len(_BENCHMARK_DEPTHWISE_FORWARD_RESULTS)} depthwise forward and "
@@ -96,8 +149,28 @@ def _initialize_depthwise_benchmark_cache():
         logger.warning(f"Failed to initialize depthwise benchmark cache: {e}")
 
 
+def _on_depthwise_cache_merge(namespace: str, merged_dict: dict) -> None:
+    """Refresh in-memory depthwise results after a cross-rank disk merge."""
+    if namespace == "sparse_conv_depthwise_forward":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_DEPTHWISE_FORWARD_RESULTS:
+                _BENCHMARK_DEPTHWISE_FORWARD_RESULTS[k] = _rehydrate_benchmark_results(
+                    v, SPARSE_DEPTHWISE_CONV_FWD_ALGO_MODE
+                )
+    elif namespace == "sparse_conv_depthwise_backward":
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS:
+                _BENCHMARK_DEPTHWISE_BACKWARD_RESULTS[k] = _rehydrate_benchmark_results(
+                    v, SPARSE_DEPTHWISE_CONV_BWD_ALGO_MODE
+                )
+
+
 # Initialize cache on module load
 _initialize_depthwise_benchmark_cache()
+
+from warpconvnet.utils.benchmark_cache import get_generic_benchmark_cache as _get_cache
+
+_get_cache().register_on_merge_callback(_on_depthwise_cache_merge)
 
 
 def _filter_depthwise_benchmark_params_by_env_config(
