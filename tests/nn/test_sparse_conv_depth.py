@@ -161,7 +161,6 @@ def test_implicit_depthwise_forward(setup_depthwise_conv_data):
             weight,
             kernel_map,
             voxels.coordinate_tensor.shape[0],
-            compute_dtype=None,
         )
 
         # Verify output shape
@@ -195,7 +194,6 @@ def test_explicit_vs_implicit_forward_consistency(setup_depthwise_conv_data):
             weight,
             kernel_map,
             voxels.coordinate_tensor.shape[0],
-            compute_dtype=None,
         )
 
         # Check consistency (allow for small numerical differences)
@@ -251,7 +249,6 @@ def test_implicit_depthwise_backward(setup_depthwise_conv_data):
             voxels.feature_tensor,
             weight,
             kernel_map,
-            compute_dtype=None,
             device=data["device"],
         )
 
