@@ -115,14 +115,15 @@ Each direction supports the same selection modes via `WARPCONVNET_FWD_ALGO_MODE`
 
 ### Environment Variables
 
-| Variable                          | Default                | Description                                                                  |
-| --------------------------------- | ---------------------- | ---------------------------------------------------------------------------- |
-| `WARPCONVNET_FWD_ALGO_MODE`       | `auto`                 | Forward AB gather-scatter algorithm                                          |
-| `WARPCONVNET_DGRAD_ALGO_MODE`     | `auto`                 | Dgrad ABt gather-scatter algorithm, tuned and cached separately from forward |
-| `WARPCONVNET_WGRAD_ALGO_MODE`     | `auto`                 | Wgrad AtB gather-gather algorithm                                            |
-| `WARPCONVNET_USE_FP16_ACCUM`      | `false`                | Use fp16 accumulator for ~15% speedup (lower precision)                      |
-| `WARPCONVNET_AUTOTUNE_LOG`        | `true`                 | Set to `false` to suppress auto-tuning logs                                  |
-| `WARPCONVNET_BENCHMARK_CACHE_DIR` | `~/.cache/warpconvnet` | Cache directory                                                              |
+| Variable                                 | Default                | Description                                                                                                                                  |
+| ---------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WARPCONVNET_FWD_ALGO_MODE`              | `auto`                 | Forward AB gather-scatter algorithm                                                                                                          |
+| `WARPCONVNET_DGRAD_ALGO_MODE`            | `auto`                 | Dgrad ABt gather-scatter algorithm, tuned and cached separately from forward                                                                 |
+| `WARPCONVNET_WGRAD_ALGO_MODE`            | `auto`                 | Wgrad AtB gather-gather algorithm                                                                                                            |
+| `WARPCONVNET_USE_FP16_ACCUM`             | `false`                | Use fp16 accumulator for ~15% speedup (lower precision)                                                                                      |
+| `WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL` | `32`                   | Channel ceiling under which F16-accum pcoff tiles are allowed in auto pool even when `WARPCONVNET_USE_FP16_ACCUM=false`. Set `0` to disable. |
+| `WARPCONVNET_AUTOTUNE_LOG`               | `true`                 | Set to `false` to suppress auto-tuning logs                                                                                                  |
+| `WARPCONVNET_BENCHMARK_CACHE_DIR`        | `~/.cache/warpconvnet` | Cache directory                                                                                                                              |
 
 ```bash
 # Suppress auto-tuning logs

@@ -660,14 +660,21 @@ def _execute_backward(
                     #   50→12 (32x32)         53→22 (64x64 F16Accum)
                     #   51→0  (64x64 2s)      54→24 (64x128 F16Accum)
                     #   52→1  (64x128 2s)
+                    #
+                    # F16Accum tiles (22, 24) accumulate the K*C reduction in
+                    # fp16 — at C>=64 this 2-3x worse rel_diff vs explicit_gemm
+                    # reference degrades MinkUNet ScanNet AMP training
+                    # convergence (per-algo grad sweep 2026-05-21). Gate the
+                    # F16Acc choice on use_fp16_accum, NOT compute_dtype
+                    # (fp16 inputs are normal under AMP and don't imply user
+                    # wants fp16 accumulator).
                     C = max(C_in_g, C_out_g)
-                    is_fp16 = compute_dtype == torch.float16
                     if C <= 48:
                         dgrad_tile = 12  # ex-50: 32x32
                     elif C <= 96:
-                        dgrad_tile = 22 if is_fp16 else 0  # ex-53/51: 64x64 F16Acc / f32
+                        dgrad_tile = 22 if use_fp16_accum else 0  # F16Acc / f32
                     else:
-                        dgrad_tile = 24 if is_fp16 else 1  # ex-54/52: 64x128 F16Acc / f32
+                        dgrad_tile = 24 if use_fp16_accum else 1  # F16Acc / f32
 
                 backend = _mask_gemm_backend()
                 dgrad_fn = backend.dgrad

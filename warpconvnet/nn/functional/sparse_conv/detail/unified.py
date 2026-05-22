@@ -472,22 +472,44 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
         # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose).
         # F32Acc always included; F16Acc added when use_fp16_accum=True.
-        # PCOFF (905-911) require mask_words==1 (kv_bwd <= 32); dispatch raises
-        # for K>32 so we gate at pool construction.
-        # Native dgrad pcoff (64-69, bond #23): no weight transpose, MW=1 only.
+        # PCOFF aliases require mask_words==1 (kv_bwd <= 32) — dispatch raises
+        # for K>32, so we gate at pool construction. Within the kv<=32 band:
+        #   - F32-accum pcoff (909/910/911 fwd_as_dgrad, 68/69 native) always
+        #     in pool — fp32 accumulator matches baseline precision.
+        #   - F16-accum pcoff (905/906/907/908 fwd_as_dgrad, 64/65/66/67
+        #     native) require WARPCONVNET_USE_FP16_ACCUM=true. Bare default
+        #     selecting fp16-accum dgrad kernels degrades MinkUNet ScanNet
+        #     AMP training (verified via bisect 2026-05-20).
         from .algo_params import (
             _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC,
             _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC,
-            _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF,
-            _AB_MASK_GEMM_DGRAD_PCOFF,
+            _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC,
+            _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC,
+            _AB_MASK_GEMM_DGRAD_PCOFF_F16ACC,
+            _AB_MASK_GEMM_DGRAD_PCOFF_F32ACC,
+        )
+
+        # Small-channel F16-accum pcoff allowance: at max(C_in_bwd, C_out_bwd)
+        # <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL the per-row K*C accumulation
+        # is short enough that fp16-accum rounding drift stays under AMP
+        # gradient noise floor. Mirrors _get_adaptive_AB_params gate.
+        from warpconvnet.constants import WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
+
+        _max_ch_bwd = max(C_in_bwd, C_out_bwd)
+        _allow_small_ch_pcoff_f16_bwd = (
+            WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
+            and _max_ch_bwd <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
         )
 
         dgrad_adaptive = list(dgrad_adaptive) + list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
         if use_fp16_accum:
             dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
         if kv_bwd <= 32:
-            dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF)
-            dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF)
+            dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC)
+            dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F32ACC)
+            if use_fp16_accum or _allow_small_ch_pcoff_f16_bwd:
+                dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC)
+                dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F16ACC)
         if wgrad_filter == "trimmed":
             wgrad_adaptive = _get_trimmed_AtB_params(
                 C_in_bwd,
