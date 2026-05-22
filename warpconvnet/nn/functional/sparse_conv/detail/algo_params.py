@@ -14,6 +14,7 @@ from warpconvnet.constants import (
     WARPCONVNET_FWD_ALGO_MODE as WARPCONVNET_AB_ALGO_MODE,
     WARPCONVNET_DGRAD_ALGO_MODE as WARPCONVNET_ABT_ALGO_MODE,
     WARPCONVNET_WGRAD_ALGO_MODE as WARPCONVNET_ATB_ALGO_MODE,
+    WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL,
 )
 from warpconvnet.utils.logger import get_logger
 
@@ -279,12 +280,26 @@ _AB_MASK_GEMM_F16ACC = (
 # F arc (58/59/63) dissolves SM_89 pathologies of their non-E1 ancestors.
 # MW=1 only for now; K>32 configs route through non-pcoff tiles until
 # MW>1 instantiations land.
-_AB_MASK_GEMM_PCOFF = (
+# Split fwd pcoff by accumulator precision. F16-precision variants (54-57)
+# require WARPCONVNET_USE_FP16_ACCUM=true to enter the auto pool — without
+# this gate they degrade training convergence the same way bare F16Accum
+# tiles (28, 19) do (verified via per-tile rel_diff probe: F16-only-accum
+# pcoff shows 6.25x worse rel_diff vs fp64 reference compared to F32-capable
+# pcoff). F32-accum pcoff (58/59/63) always in pool — fp32 accumulator
+# matches baseline precision; per-offset __ldg hoist alone is semantic-preserving.
+_AB_MASK_GEMM_PCOFF_F16ACC = (
     [
         ("mask_gemm", {"tile_id": 54}),  # 64x64 flat_pcoff (F16Acc, Ada winner)
         ("mask_gemm", {"tile_id": 55}),  # 64x64 flat_pcoff (F16K8)
         ("mask_gemm", {"tile_id": 56}),  # 64x128 flat_pcoff (F16K8, A100 flagship)
         ("mask_gemm", {"tile_id": 57}),  # 64x128 flat_pcoff (F16Acc)
+    ]
+    if _HAS_MASK_GEMM
+    else []
+)
+
+_AB_MASK_GEMM_PCOFF_F32ACC = (
+    [
         ("mask_gemm", {"tile_id": 58}),  # 64x64 3s_pcoff
         ("mask_gemm", {"tile_id": 59}),  # 64x64 warp_spec_pcoff
         ("mask_gemm", {"tile_id": 63}),  # 64x128 warp_spec_pcoff
@@ -292,6 +307,10 @@ _AB_MASK_GEMM_PCOFF = (
     if _HAS_MASK_GEMM
     else []
 )
+
+# Back-compat alias for callers that referenced the unified list. New code
+# should use the precision-split variants above.
+_AB_MASK_GEMM_PCOFF = _AB_MASK_GEMM_PCOFF_F32ACC + _AB_MASK_GEMM_PCOFF_F16ACC
 
 _AB_MASK_GEMM_STRIDED_F32ACC = (
     [
@@ -308,13 +327,16 @@ _AB_MASK_GEMM_STRIDED_F32ACC = (
     else []
 )
 
-# Full mask_gemm pool (F32Acc + F16Acc + Pcoff + strided). Referenced by
-# _AB_PARAMS_AUTO so env-var overrides like WARPCONVNET_AB_ALGO_MODE=["mask_gemm"]
-# can still opt into F16Acc and pcoff tiles.
+# Full mask_gemm pool (F32Acc + F32-accum-pcoff + F16Acc + F16-accum-pcoff).
+# Referenced by _AB_PARAMS_AUTO so env-var overrides like
+# WARPCONVNET_AB_ALGO_MODE=["mask_gemm"] still see all variants via the "all"
+# expansion path. The default-auto path uses _get_adaptive_AB_params which
+# gates F16-accum entries behind use_fp16_accum.
 _AB_MASK_GEMM = (
     _AB_MASK_GEMM_F32ACC
+    + _AB_MASK_GEMM_PCOFF_F32ACC
     + _AB_MASK_GEMM_F16ACC
-    + _AB_MASK_GEMM_PCOFF
+    + _AB_MASK_GEMM_PCOFF_F16ACC
     + _AB_MASK_GEMM_STRIDED_F32ACC
 )
 
@@ -324,18 +346,34 @@ _AB_MASK_GEMM = (
 # 900-911) that routes to the underlying fwd kernel after the caller
 # pre-transposes the weight. Previous wcn dispatch used 83-94 in
 # ProdDgradTile plus a WT_TILE_TO_FWD_TILE remap; both are removed.
-_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF = (
+# Split by accumulator precision. F16-accum aliases (905-908) require
+# WARPCONVNET_USE_FP16_ACCUM=true to enter the dgrad pool — otherwise their
+# fp16 accumulation degrades ScanNet AMP training. F32-accum aliases (909-911)
+# stay in the pool unconditionally — full fp32 accumulator.
+_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC = (
     [
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 905}),  # ex-88: 64x64 flat F16Accum
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 906}),  # ex-89: 64x64 flat F16K8
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 907}),  # ex-90: 64x128 flat F16K8
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 908}),  # ex-91: 64x128 flat F16Accum
+    ]
+    if _HAS_MASK_GEMM
+    else []
+)
+
+_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC = (
+    [
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 909}),  # ex-92: 64x64 3s
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 910}),  # ex-93: 64x64 WS
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 911}),  # ex-94: 64x128 WS
     ]
     if _HAS_MASK_GEMM
     else []
+)
+
+# Back-compat alias.
+_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF = (
+    _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC
 )
 
 _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC = (
@@ -367,18 +405,30 @@ _AB_MASK_GEMM_FWD_AS_DGRAD = (
 # (E1 offset-precompute on dgrad path, no weight transpose pre-op).
 # fp16 only; MW=1 only (kv <= 32). Mirror fwd pcoff family 54-59/63 in DgradTile
 # namespace for the dgrad kernel template specialization.
-_AB_MASK_GEMM_DGRAD_PCOFF = (
+# Split native dgrad pcoff by accumulator precision. Same gating rationale
+# as the fwd_as_dgrad pcoff split above.
+_AB_MASK_GEMM_DGRAD_PCOFF_F16ACC = (
     [
         ("mask_gemm", {"tile_id": 64}),  # 64x64 1s_flat_pcoff F16Accum
         ("mask_gemm", {"tile_id": 65}),  # 64x64 1s_flat_pcoff F16K8
         ("mask_gemm", {"tile_id": 66}),  # 64x128 1s_flat_pcoff F16K8
         ("mask_gemm", {"tile_id": 67}),  # 64x128 1s_flat_pcoff F16Accum
+    ]
+    if _HAS_MASK_GEMM
+    else []
+)
+
+_AB_MASK_GEMM_DGRAD_PCOFF_F32ACC = (
+    [
         ("mask_gemm", {"tile_id": 68}),  # 64x64 3s_pcoff
         ("mask_gemm", {"tile_id": 69}),  # 64x128 3s_pcoff
     ]
     if _HAS_MASK_GEMM
     else []
 )
+
+# Back-compat alias.
+_AB_MASK_GEMM_DGRAD_PCOFF = _AB_MASK_GEMM_DGRAD_PCOFF_F32ACC + _AB_MASK_GEMM_DGRAD_PCOFF_F16ACC
 
 # tile_ids match warpgemm canonical mask_gemm_dispatch_table.inc (wgrad op).
 # Migration map: ex-wcn 60→0, 61→4, 62→7, 63→9, 64→1, 65→2, 66→3.
@@ -458,9 +508,27 @@ def _get_adaptive_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
+    # Small-channel F16-accum pcoff allowance. F16-accum precision loss
+    # scales with the number of K*C accumulations into the half-precision
+    # fragment; at max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL the
+    # per-row reduction is short enough that the rounding drift stays
+    # under the AMP gradient noise floor, while pcoff's per-offset __ldg
+    # hoist still recovers significant kernel-time win on these shapes.
+    # Larger channels would accumulate too much drift and require explicit
+    # opt-in via WARPCONVNET_USE_FP16_ACCUM=true.
+    # Set WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0 to disable.
+    _allow_small_ch_pcoff_f16 = (
+        WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
+        and max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
+    )
+
     _ab_prod = list(_AB_MASK_GEMM_F32ACC)
+    _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F32ACC)
     if use_fp16_accum:
         _ab_prod.extend(_AB_MASK_GEMM_F16ACC)
+        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
+    elif _allow_small_ch_pcoff_f16:
+        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
@@ -524,9 +592,20 @@ def _get_trimmed_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
+    # Mirror small-channel F16-accum pcoff allowance from _get_adaptive_AB_params
+    # (see comment there). Same WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL threshold.
+    _allow_small_ch_pcoff_f16 = (
+        WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
+        and max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
+    )
+
     _ab_prod = list(_AB_MASK_GEMM_F32ACC)
+    _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F32ACC)
     if use_fp16_accum:
         _ab_prod.extend(_AB_MASK_GEMM_F16ACC)
+        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
+    elif _allow_small_ch_pcoff_f16:
+        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 

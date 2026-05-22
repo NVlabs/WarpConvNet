@@ -1,7 +1,7 @@
 # Accumulator Precision
 
 **Created**: 2026-04-15 14:00:00
-**Edited**: 2026-04-18 16:35:57
+**Edited**: 2026-05-21 19:55:00
 
 WarpConvNet's mask_gemm kernels use tensor core MMA instructions that support two accumulator modes:
 
@@ -75,6 +75,33 @@ output = spatially_sparse_conv(
 2. **Global runtime** `warpconvnet.set_fp16_accum(True)` -- used when module is `None`
 3. **Environment variable** `WARPCONVNET_USE_FP16_ACCUM=true` -- sets initial global value
 4. **Default** `False` (fp32 accumulator)
+
+## Small-Channel F16-Accum Pcoff Allowance
+
+The pcoff (E1 offset-precompute) tiles 54/55/56/57 use F16Accum / F16K8 base
+configs. fp16 accumulator drift scales with the K\*C reduction length; at
+small channel counts the drift stays under the AMP gradient noise floor
+and the pcoff speed win is safe to keep even when `use_fp16_accum=False`.
+
+`WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL` controls this allowance (default
+`32`). When `max(C_in, C_out)` is at or below the ceiling, F16-accum
+pcoff variants enter the auto pool. Above the ceiling they require
+`WARPCONVNET_USE_FP16_ACCUM=true`.
+
+```bash
+# Default — pcoff F16-accum allowed at C <= 32
+export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=32
+
+# Strict — never use pcoff F16-accum unless WARPCONVNET_USE_FP16_ACCUM=true
+export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0
+
+# Broader — pcoff F16-accum up to C <= 64 (verify training stability first)
+export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=64
+```
+
+The F32-accum pcoff tiles (58, 59, 63 fwd; 68, 69 native dgrad; 909, 910,
+911 fwd_as_dgrad) are always in the pool regardless of this setting --
+their fp32 accumulator matches baseline precision.
 
 ## What the Flag Does
 

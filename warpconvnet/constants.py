@@ -25,6 +25,19 @@ def _get_env_bool(env_var_name: str, default_value: bool) -> bool:
     return result
 
 
+def _get_env_int(env_var_name: str, default_value: int) -> int:
+    """Helper function to read and validate integer environment variables."""
+    env_value = os.environ.get(env_var_name)
+    if env_value is None:
+        return default_value
+    try:
+        result = int(env_value)
+    except ValueError as exc:
+        raise ValueError(f"{env_var_name} must be an integer, got {env_value!r}") from exc
+    logger.info(f"{env_var_name} is set to {result} by environment variable")
+    return result
+
+
 def _get_env_string(
     env_var_name: str, default_value: str, valid_values: Optional[List[str]] = None
 ) -> str:
@@ -163,7 +176,7 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
     "WARPCONVNET_BENCHMARK_CACHE_DIR", "~/.cache/warpconvnet"
 )
 
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 13.0
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 14.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory
@@ -184,6 +197,25 @@ WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
 #   export WARPCONVNET_USE_FP16_ACCUM=true   # global fp16 accumulator
 #   export WARPCONVNET_USE_FP16_ACCUM=false  # global fp32 accumulator (default)
 WARPCONVNET_USE_FP16_ACCUM = _get_env_bool("WARPCONVNET_USE_FP16_ACCUM", False)
+
+
+# Channel-count ceiling under which F16-accumulator pcoff (E1 offset-precompute)
+# mask_gemm tiles 54/55/56/57 (and dgrad aliases 64-67 / 905-908) are allowed
+# in the auto-tune pool even when WARPCONVNET_USE_FP16_ACCUM=false.
+#
+# Rationale: fp16-accum drift scales with K * C accumulation length. At
+# max(C_in, C_out) <= 32 the worst-case chain stays under the AMP gradient
+# noise floor, so the pcoff perf win can be reaped without degrading
+# convergence (verified via MinkUNet ScanNet bisect 2026-05-20).
+#
+# Set 0 to disable (no F16-accum pcoff unless use_fp16_accum=True). Default
+# 32 = match the natural break in the channel-bucket heuristic.
+#
+# Examples:
+#   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0    # disable entirely
+#   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=64   # broader allowance
+#   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=32   # default
+WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL = _get_env_int("WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL", 32)
 
 
 def get_fp16_accum() -> bool:
