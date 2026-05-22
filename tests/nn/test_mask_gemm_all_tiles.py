@@ -27,6 +27,7 @@ import pytest
 import torch
 
 from warpconvnet.geometry.coords.ops.batch_index import batch_indexed_coordinates
+from warpconvnet.geometry.coords.ops.stride import stride_coords
 from warpconvnet.geometry.coords.search.torch_discrete import generate_kernel_map
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.sparse_conv import (
@@ -123,7 +124,13 @@ def _rdiff(a, b):
 
 def _kernel_map(voxels: Voxels, kernel_size=(3, 3, 3), stride=1):
     in_coords = batch_indexed_coordinates(voxels.coordinate_tensor, voxels.offsets)
-    out_coords = in_coords  # stride=1 covers the common case
+    if stride == 1:
+        out_coords = in_coords
+    else:
+        out_coords, _ = stride_coords(
+            in_coords,
+            stride=(stride,) * len(kernel_size),
+        )
     kmap = generate_kernel_map(
         in_coords,
         out_coords,
@@ -191,6 +198,52 @@ def test_mask_gemm_fwd_all_tiles(tile_id, split_k, C_in, C_out, dtype):
     tol = _fwd_tile_tol(tile_id, dtype)
     r = _rdiff(out_prod, out_ref)
     assert r < tol, f"fwd tile={tile_id} C={C_in},{C_out} dtype={dtype} rdiff={r:.3e} > {tol}"
+
+
+_STRIDED_FWD_SHAPES = [
+    (300, 64, 64),
+    (301, 64, 64),
+    (302, 64, 128),
+    (303, 64, 128),
+    (304, 128, 64),
+    (305, 64, 64),
+    (306, 64, 128),
+    (307, 128, 64),
+]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize(
+    "tile_id,C_in,C_out",
+    _STRIDED_FWD_SHAPES,
+    ids=[f"tile{t}_{ci}x{co}" for t, ci, co in _STRIDED_FWD_SHAPES],
+)
+def test_mask_gemm_strided_fwd_tiles_stride2(tile_id, C_in, C_out, dtype):
+    """Native strided fwd tiles must consume stride-2 pair tables directly."""
+    if dtype == torch.bfloat16 and torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("bf16 requires Ampere or newer")
+
+    kernel_size = (3, 3, 3)
+    voxels = _make_voxels(N=1500, coord_range=20, C_in=C_in, seed=11)
+    weight = (torch.randn(27, C_in, C_out, device="cuda", dtype=dtype) * 0.1).contiguous()
+    in_feats = voxels.feature_tensor.to(dtype)
+    kmap, num_out = _kernel_map(voxels, kernel_size, stride=2)
+
+    out_prod = _execute_forward(
+        "mask_gemm",
+        {"tile_id": tile_id},
+        in_feats,
+        weight,
+        kmap,
+        num_out,
+        dtype,
+        None,
+    )
+    out_ref = _explicit_gemm_forward_logic(in_feats, weight, kmap, num_out, dtype)
+
+    tol = 8e-2 if dtype == torch.bfloat16 else 4e-2
+    fwd_r = _rdiff(out_prod, out_ref)
+    assert fwd_r < tol, f"strided fwd tile={tile_id} dtype={dtype} rdiff={fwd_r:.3e} > {tol}"
 
 
 # ---------------------------------------------------------------------------

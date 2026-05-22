@@ -201,6 +201,7 @@ def spatially_sparse_conv(
     _kernel_size = ntuple(kernel_size, ndim=num_spatial_dims)
     _kernel_dilation = ntuple(kernel_dilation, ndim=num_spatial_dims)
     _stride = ntuple(stride, ndim=num_spatial_dims)
+    _requested_stride = _stride
 
     num_total_kernels = np.prod(_kernel_size)
     if np.prod(_kernel_size) == 1 and np.prod(_stride) == 1:
@@ -286,6 +287,12 @@ def spatially_sparse_conv(
         order=order,
     )
     num_out_coords = batch_indexed_out_coords.shape[0]
+    conv_cache_metadata = {
+        "conv_stride": _requested_stride,
+        "transposed": transposed,
+        "generative": generative,
+        "stride_mode": getattr(stride_mode, "value", str(stride_mode)),
+    }
 
     # Pre-cast features and weight to compute_dtype BEFORE Function.apply()
     # so that save_for_backward stores them in compute precision (fp16 under
@@ -311,6 +318,7 @@ def spatially_sparse_conv(
         implicit_matmul_fwd_block_size,
         implicit_matmul_bwd_block_size,
         in_tensor_stride,
+        conv_cache_metadata,
         groups,
         use_fp16_accum,
     )

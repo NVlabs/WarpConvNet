@@ -60,6 +60,8 @@ _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
 # 32x32_F16Accum (ex-wcn 40).
 _MW1_ONLY_FWD_TILES = frozenset({28}) | _PCOFF_FWD_TILES
 
+_STRIDED_FWD_TILES = frozenset(range(300, 308))
+
 # dgrad_wt tile_ids (canonical 900-911) that route through fwd kernels but
 # are MW=1 only. Includes the 32x32 F16Accum alias (903) and the 7 pcoff
 # aliases (905-911). The 64x64 sa (900), 64x128 3s (901), 128x64 (902),
@@ -276,10 +278,11 @@ def _execute_forward(
         vec_width = 16 // _in.element_size()
         cin_aligned = C_in_g % vec_width == 0
         cout_aligned = C_out_g % vec_width == 0
-        use_f32_out_tile = use_f32_output and mask_words == 1
+        use_strided_tile = tile_id in _STRIDED_FWD_TILES
+        use_f32_out_tile = use_f32_output and mask_words == 1 and not use_strided_tile
         if use_f32_out_tile:
             tile_id = 80 if (cin_aligned and cout_aligned) else 82
-        elif not cin_aligned or not cout_aligned:
+        elif not use_strided_tile and (not cin_aligned or not cout_aligned):
             # Scalar path. Only tile 70 supports mask_words > 1; force it.
             if mask_words > 1:
                 tile_id = 70

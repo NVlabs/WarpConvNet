@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025-present NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """
 Utility script to inspect and pretty print the stored benchmark cache.
 
@@ -118,6 +120,53 @@ def format_value(value: Any, indent: int = 0, top_k: int = None) -> str:
         return str(value)
 
 
+_SPARSE_CONV_CONFIG_FIELDS = (
+    "log_num_in_coords",
+    "log_num_out_coords",
+    "in_channels",
+    "out_channels",
+    "kernel_volume",
+    "groups",
+    "use_fp16_accum",
+    "in_dtype",
+    "sm_capability",
+    "conv_stride",
+    "transposed",
+    "generative",
+    "stride_mode",
+)
+
+
+def _is_sparse_conv_config(config_key: Any) -> bool:
+    return all(hasattr(config_key, attr) for attr in ("in_channels", "out_channels"))
+
+
+def _config_sort_key(item):
+    config_key, _result = item
+    if _is_sparse_conv_config(config_key):
+        return (
+            getattr(config_key, "in_channels", 999999),
+            getattr(config_key, "out_channels", 999999),
+            getattr(config_key, "kernel_volume", 999999),
+            getattr(config_key, "conv_stride", ()),
+            getattr(config_key, "transposed", False),
+            getattr(config_key, "generative", False),
+            getattr(config_key, "stride_mode", ""),
+        )
+    return (999999, 999999, 999999, (), False, False, "")
+
+
+def _print_config_key(config_key: Any) -> None:
+    if _is_sparse_conv_config(config_key):
+        print("Config Parameters:")
+        for field_name in _SPARSE_CONV_CONFIG_FIELDS:
+            if hasattr(config_key, field_name):
+                print(f"  {field_name}: {getattr(config_key, field_name)!r}")
+        return
+
+    print(f"Config Key: {config_key}")
+
+
 def pretty_print_benchmark_results(results: Dict, title: str, top_k: int = None) -> None:
     """Pretty print benchmark results with clear formatting."""
     print(f"\n{'='*60}")
@@ -140,60 +189,15 @@ def pretty_print_benchmark_results(results: Dict, title: str, top_k: int = None)
         print(f"(Showing top {top_k} performing algorithms for each configuration)")
     print()
 
-    # Sort configurations by in_channels (primary) and out_channels (secondary) when possible
-    def get_sort_key(item):
-        config_key, result = item
-        config_str = str(config_key)
-
-        # Default values if parsing fails
-        in_channels = 999999
-        out_channels = 999999
-
-        if "SpatiallySparseConvConfig" in config_str:
-            # Extract parameters from the config string
-            try:
-                # Remove the class name and parentheses
-                params_str = config_str.replace("SpatiallySparseConvConfig(", "").replace(")", "")
-                parts = params_str.split(", ")
-
-                for part in parts:
-                    if "=" in part:
-                        key, value = part.split("=", 1)
-                        key = key.strip()
-                        value = value.strip()
-
-                        if key == "in_channels":
-                            in_channels = int(value)
-                        elif key == "out_channels":
-                            out_channels = int(value)
-            except (ValueError, IndexError):
-                # If parsing fails, use default values which will sort last
-                pass
-
-        return (in_channels, out_channels)
-
     # Sort the results
-    sorted_results = sorted(results.items(), key=get_sort_key)
+    sorted_results = sorted(results.items(), key=_config_sort_key)
 
     for i, (config_key, result) in enumerate(sorted_results, 1):
         print(f"{'-'*40}")
         print(f"Configuration {i}:")
         print(f"{'-'*40}")
 
-        # Format the configuration key more readably
-        config_str = str(config_key)
-        if "SpatiallySparseConvConfig" in config_str:
-            # Extract key parameters for a more readable format
-            print("Config Parameters:")
-            parts = (
-                config_str.replace("SpatiallySparseConvConfig(", "").replace(")", "").split(", ")
-            )
-            for part in parts:
-                if "=" in part:
-                    key, value = part.split("=", 1)
-                    print(f"  {key.strip()}: {value.strip()}")
-        else:
-            print(f"Config Key: {config_str}")
+        _print_config_key(config_key)
         print()
 
         # Print the result

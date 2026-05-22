@@ -71,6 +71,31 @@ if _HAS_CUTE_GROUPED_SM90:
 logger = get_logger(__name__)
 
 
+_STRIDED_FWD_TILE_IDS = frozenset(range(300, 308))
+
+
+def _params_include_tile(
+    params_list: List[Tuple[str, Dict[str, Any]]], tile_ids: frozenset[int]
+) -> bool:
+    return any(
+        algo == "mask_gemm" and params.get("tile_id") in tile_ids for algo, params in params_list
+    )
+
+
+def _results_include_tile(results: Any, tile_ids: frozenset[int]) -> bool:
+    if isinstance(results, tuple):
+        result_iter = [results]
+    else:
+        result_iter = results or []
+    for item in result_iter:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        algo, params = item[0], item[1]
+        if algo == "mask_gemm" and isinstance(params, dict) and params.get("tile_id") in tile_ids:
+            return True
+    return False
+
+
 class UnifiedSpatiallySparseConvFunction(Function):
     @staticmethod
     def forward(
@@ -86,6 +111,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         fwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         bwd_block_size: Optional[int],  # For implicit GEMM if not AUTO
         voxel_size: Optional[Tuple[int, ...]] = None,
+        conv_cache_metadata: Optional[Dict[str, Any]] = None,
         groups: int = 1,
         use_fp16_accum: bool = False,
     ) -> Float[Tensor, "M C_out"]:
@@ -138,7 +164,12 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 voxel_size=voxel_size,
                 use_fp16_accum=use_fp16_accum,
             )
+        if num_out_coords != in_features.shape[0]:
+            from .algo_params import _AB_MASK_GEMM_STRIDED_F32ACC
 
+            adaptive_fwd_params = list(_AB_MASK_GEMM_STRIDED_F32ACC) + list(adaptive_fwd_params)
+
+        cache_metadata = conv_cache_metadata or {}
         config = SpatiallySparseConvConfig(
             num_in_coords=in_features.shape[0],
             num_out_coords=num_out_coords,
@@ -148,10 +179,22 @@ class UnifiedSpatiallySparseConvFunction(Function):
             in_dtype=in_features.dtype,
             groups=groups,
             use_fp16_accum=use_fp16_accum,
+            **cache_metadata,
         )
 
         # Step 3: Check cache first
         cached_result = _BENCHMARK_AB_RESULTS.get(config)
+        if (
+            cached_result is not None
+            and _params_include_tile(adaptive_fwd_params, _STRIDED_FWD_TILE_IDS)
+            and not _results_include_tile(cached_result, _STRIDED_FWD_TILE_IDS)
+        ):
+            logger.info(
+                "Ignoring stale strided forward autotune cache entry without "
+                "tile_id 300..307 candidates"
+            )
+            _BENCHMARK_AB_RESULTS.pop(config, None)
+            cached_result = None
         if cached_result is not None:
             # Support tuple (best) or list-of-tuples (best-first)
             if isinstance(cached_result, tuple):
@@ -188,7 +231,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                             custom_params=filtered_params,
                             groups=groups,
                         )
-                        _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
+                        _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results
                         # Save a serialized copy (algo as string) to the generic cache
                         generic_benchmark_update_entry(
                             "AB_gather_scatter",
@@ -220,7 +263,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 custom_params=filtered_params,
                 groups=groups,
             )
-            _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results[0]
+            _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results
             # Persist a serialized copy to generic cache
             generic_benchmark_update_entry(
                 "AB_gather_scatter",
@@ -301,6 +344,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 "initial_dgrad_algo": dgrad_algo,
                 "initial_wgrad_algo": wgrad_algo,
                 "initial_bwd_block_size": bwd_block_size,
+                "conv_cache_metadata": cache_metadata,
             }
 
         return output_feature_tensor
@@ -320,12 +364,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         None,
         None,
         None,
+        None,
     ]:
         kernel_map = getattr(ctx, "kernel_map", None)
         config_params = getattr(ctx, "config_params_for_bwd", None)
         if kernel_map is None or config_params is None or len(ctx.saved_tensors) == 0:
             # Forward ran without grad (e.g., frozen backbone with torch.no_grad())
-            return _pad_tuple(None, None, 13)
+            return _pad_tuple(None, None, 14)
 
         in_features, weight = ctx.saved_tensors
         num_out_coords = config_params["num_out_coords"]
@@ -337,7 +382,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         grad_in_features, grad_weight = None, None
 
         if not ctx.needs_input_grad[0] and not ctx.needs_input_grad[1]:
-            return _pad_tuple(None, None, 13)
+            return _pad_tuple(None, None, 14)
 
         groups = getattr(ctx, "groups", 1)
         use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
@@ -354,7 +399,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             grad_in_final = torch.zeros_like(in_features) if ctx.needs_input_grad[0] else None
             grad_weight_final = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
-            return _pad_tuple(grad_in_final, grad_weight_final, 13)
+            return _pad_tuple(grad_in_final, grad_weight_final, 14)
 
         # --- Split dgrad/wgrad auto-tuning ---
         # Each direction is auto-tuned independently so the best algorithm
@@ -369,6 +414,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         N_out_bwd = config_params["num_out_coords"]
 
         use_fp16_accum_bwd = getattr(ctx, "use_fp16_accum", False)
+        cache_metadata = config_params.get("conv_cache_metadata", {})
         # Dgrad config: swapped perspective — the ABt kernel iterates N_in rows,
         # gathers from N_out, reduces over C_out, outputs C_in.
         dgrad_config = SpatiallySparseConvConfig(
@@ -380,6 +426,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
             in_dtype=grad_output.dtype,
             groups=groups,
             use_fp16_accum=use_fp16_accum_bwd,
+            **cache_metadata,
         )
         # Wgrad config: reduction over gathered pairs, no swap needed.
         wgrad_config = SpatiallySparseConvConfig(
@@ -391,6 +438,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
             in_dtype=grad_output.dtype,
             groups=groups,
             use_fp16_accum=use_fp16_accum_bwd,
+            **cache_metadata,
         )
 
         def _normalize_algo(algo):
@@ -483,7 +531,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 needs_input_grad=needs_grad_tuple,
                 groups=groups,
             )
-            cache_dict[cfg] = results[0]
+            cache_dict[cfg] = results
             generic_benchmark_update_entry(
                 cache_ns,
                 cfg,
@@ -618,7 +666,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ctx.kernel_map = None
         ctx.config_params_for_bwd = None
 
-        return _pad_tuple(grad_in_features, grad_weight, 13)
+        return _pad_tuple(grad_in_features, grad_weight, 14)
 
 
 # Algorithm execution dispatch moved to dispatch.py

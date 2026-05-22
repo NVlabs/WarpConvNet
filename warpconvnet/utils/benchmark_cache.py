@@ -63,6 +63,19 @@ _SPARSE_CONV_CONFIG_DTYPE_TO_INT = {
 }
 
 
+def _normalize_int_tuple(value: Optional[Sequence[int]]) -> Tuple[int, ...]:
+    if value is None:
+        return ()
+    return tuple(int(v) for v in value)
+
+
+def _stable_string_hash(value: str) -> int:
+    h = 0
+    for ch in value:
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return h
+
+
 # ----------------------
 # Small shared utilities
 # ----------------------
@@ -185,6 +198,10 @@ def _to_msgpack(obj: Any) -> Any:
             "fa": int(obj.use_fp16_accum),
             "dt": _DTYPE_STR_MAP.get(obj.in_dtype, str(obj.in_dtype)),
             "sm": list(obj.sm_capability),
+            "cs": list(getattr(obj, "conv_stride", ())),
+            "tr": int(getattr(obj, "transposed", False)),
+            "gn": int(getattr(obj, "generative", False)),
+            "smode": getattr(obj, "stride_mode", ""),
         }
     return str(obj)
 
@@ -214,6 +231,10 @@ def _from_msgpack(obj: Any) -> Any:
             config.use_fp16_accum = bool(obj["fa"])
             config.in_dtype = _STR_DTYPE_MAP.get(obj["dt"], torch.float32)
             config.sm_capability = tuple(obj["sm"])
+            config.conv_stride = tuple(obj.get("cs", ()))
+            config.transposed = bool(obj.get("tr", False))
+            config.generative = bool(obj.get("gn", False))
+            config.stride_mode = str(obj.get("smode", ""))
             return config
         # Regular dict — deserialize keys and values
         return {_from_msgpack(k): _from_msgpack(v) for k, v in obj.items()}
@@ -360,6 +381,10 @@ class SpatiallySparseConvConfig:
     use_fp16_accum: bool
     in_dtype: torch.dtype
     sm_capability: Tuple[int, int]
+    conv_stride: Tuple[int, ...]
+    transposed: bool
+    generative: bool
+    stride_mode: str
 
     def __init__(
         self,
@@ -371,6 +396,10 @@ class SpatiallySparseConvConfig:
         in_dtype: torch.dtype,
         groups: int = 1,
         use_fp16_accum: bool = False,
+        conv_stride: Optional[Sequence[int]] = None,
+        transposed: bool = False,
+        generative: bool = False,
+        stride_mode: str = "",
     ):
         # Use clamped log10 bins: ceil(log10(N)) clamped to [3, inf).
         # This treats all N < 10K identically (bin 3-4), which covers the
@@ -388,6 +417,10 @@ class SpatiallySparseConvConfig:
         assert in_dtype in _SPARSE_CONV_CONFIG_DTYPE_TO_INT, f"Unsupported in_dtype: {in_dtype}"
         self.in_dtype = in_dtype
         self.sm_capability = _get_sm_capability()
+        self.conv_stride = _normalize_int_tuple(conv_stride)
+        self.transposed = bool(transposed)
+        self.generative = bool(generative)
+        self.stride_mode = str(stride_mode)
 
     def __hash__(self):
         return _int_sequence_hash(
@@ -401,6 +434,11 @@ class SpatiallySparseConvConfig:
                 int(self.use_fp16_accum),
                 _SPARSE_CONV_CONFIG_DTYPE_TO_INT[self.in_dtype],
                 self.sm_capability[0] * 10 + self.sm_capability[1],
+                len(self.conv_stride),
+                *_normalize_int_tuple(self.conv_stride),
+                int(self.transposed),
+                int(self.generative),
+                _stable_string_hash(self.stride_mode),
             ]
         )
 
@@ -417,6 +455,10 @@ class SpatiallySparseConvConfig:
             and self.use_fp16_accum == other.use_fp16_accum
             and self.in_dtype == other.in_dtype
             and self.sm_capability == other.sm_capability
+            and self.conv_stride == other.conv_stride
+            and self.transposed == other.transposed
+            and self.generative == other.generative
+            and self.stride_mode == other.stride_mode
         )
 
 
