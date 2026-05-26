@@ -7,6 +7,7 @@ from typing import Literal, Tuple
 import torch
 from jaxtyping import Float, Int
 from torch import Tensor
+from torch_scatter import segment_csr
 
 
 class REDUCTIONS(Enum):
@@ -20,9 +21,7 @@ class REDUCTIONS(Enum):
     RANDOM = "random"
 
 
-REDUCTION_TYPES_STR = Literal[
-    "min", "max", "mean", "sum", "mul", "var", "std", "random"
-]
+REDUCTION_TYPES_STR = Literal["min", "max", "mean", "sum", "mul", "var", "std", "random"]
 
 
 def _var(
@@ -32,22 +31,6 @@ def _var(
     out_mean = segment_csr(features, row_offsets, reduce="mean")
     out_var = segment_csr(features**2, row_offsets, reduce="mean") - out_mean**2
     return out_var, out_mean
-
-
-def _segment_reduce(
-    features: Float[Tensor, "N F"],
-    row_offsets: Int[Tensor, "M+1"],  # noqa
-    reduction: REDUCTIONS,
-) -> Float[Tensor, "M F"]:  # noqa
-    reduce_name = {
-        REDUCTIONS.MIN: "min",
-        REDUCTIONS.MAX: "max",
-        REDUCTIONS.MEAN: "mean",
-        REDUCTIONS.SUM: "sum",
-        REDUCTIONS.MUL: "prod",
-    }[reduction]
-    lengths = row_offsets.diff().to(features.device)
-    return torch.segment_reduce(features, reduce_name, lengths=lengths)
 
 
 def row_reduction(
@@ -70,7 +53,12 @@ def row_reduction(
         REDUCTIONS.SUM,
         REDUCTIONS.MUL,
     ]:
-        out_feature = _segment_reduce(features, row_offsets, reduction)
+        # NOTE: do NOT swap to torch.segment_reduce. Its MAX/MIN backward
+        # leaks gradient at tie positions: forward is bit-identical but
+        # backward differs at ~1/32000 elements per call, accumulating across
+        # repeated SparseMaxPool calls and silently changing validation
+        # convergence while train loss looks fine.
+        out_feature = segment_csr(features, row_offsets, reduce=str(reduction.value))
     elif reduction == REDUCTIONS.VAR:
         out_feature = _var(features, row_offsets)[0]
     elif reduction == REDUCTIONS.STD:
@@ -78,9 +66,7 @@ def row_reduction(
     elif reduction == REDUCTIONS.RANDOM:
         num_per_row = row_offsets.diff()
         rand_idx = (
-            (torch.rand(len(num_per_row), device=num_per_row.device) * num_per_row)
-            .floor()
-            .long()
+            (torch.rand(len(num_per_row), device=num_per_row.device) * num_per_row).floor().long()
         )
         sample_idx = rand_idx + row_offsets[:-1]
         out_feature = features[sample_idx.to(features.device)]
