@@ -1,7 +1,7 @@
 # Accumulator Precision
 
 **Created**: 2026-04-15 14:00:00
-**Edited**: 2026-05-21 19:55:00
+**Edited**: 2026-05-26 14:30:00
 
 WarpConvNet's mask_gemm kernels use tensor core MMA instructions that support two accumulator modes:
 
@@ -79,29 +79,36 @@ output = spatially_sparse_conv(
 ## Small-Channel F16-Accum Pcoff Allowance
 
 The pcoff (E1 offset-precompute) tiles 54/55/56/57 use F16Accum / F16K8 base
-configs. fp16 accumulator drift scales with the K\*C reduction length; at
-small channel counts the drift stays under the AMP gradient noise floor
-and the pcoff speed win is safe to keep even when `use_fp16_accum=False`.
-
-`WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL` controls this allowance (default
-`32`). When `max(C_in, C_out)` is at or below the ceiling, F16-accum
-pcoff variants enter the auto pool. Above the ceiling they require
+configs. Default is **off** (`WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0`) —
+F16-accum pcoff tiles require explicit opt-in via
 `WARPCONVNET_USE_FP16_ACCUM=true`.
 
-```bash
-# Default — pcoff F16-accum allowed at C <= 32
-export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=32
+The previous default (`32`) was reverted after a regression at
+training-realistic sparse convolution sizes. At `(C=32, K=3x3x3, N>=200k)` —
+an early-encoder shape in large 3D backbones — tiles 54/55/56 saturate
+isolated output cells with `max_rel` reaching several hundred against the fp64
+reference (verified on both sm_80 A100 and sm_89 Ada). `p99` stays at the AMP
+noise floor (~1e-3), so per-tile sweeps that report only `p99` or mean drift
+miss the failure mode entirely; only `max_rel` surfaces it. The training
+symptom is the classic outlier pattern: train/loss descends normally, val mAP
+collapses to ~0 because instance-level metrics are sensitive to per-cell
+corruption while the mean-reduced loss tolerates outliers.
 
-# Strict — never use pcoff F16-accum unless WARPCONVNET_USE_FP16_ACCUM=true
+```bash
+# Default (disabled) — F16-accum pcoff requires WARPCONVNET_USE_FP16_ACCUM=true
 export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0
 
-# Broader — pcoff F16-accum up to C <= 64 (verify training stability first)
-export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=64
+# Opt back into prior behavior (validate val metric on your workload first)
+export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=32
 ```
 
 The F32-accum pcoff tiles (58, 59, 63 fwd; 68, 69 native dgrad; 909, 910,
-911 fwd_as_dgrad) are always in the pool regardless of this setting --
-their fp32 accumulator matches baseline precision.
+911 fwd_as_dgrad) are unaffected — they remain in the pool by default
+and capture the pcoff E1-offset-hoist speed win without the accumulator
+drift, because the hoist is independent of accumulator precision. Users
+who set a non-zero ceiling are responsible for validating training
+stability + val metrics; the regression test in
+`tests/nn/test_pcoff_f16acc_regression.py` keeps the gate load-bearing.
 
 ## What the Flag Does
 

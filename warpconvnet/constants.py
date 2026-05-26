@@ -203,19 +203,21 @@ WARPCONVNET_USE_FP16_ACCUM = _get_env_bool("WARPCONVNET_USE_FP16_ACCUM", False)
 # mask_gemm tiles 54/55/56/57 (and dgrad aliases 64-67 / 905-908) are allowed
 # in the auto-tune pool even when WARPCONVNET_USE_FP16_ACCUM=false.
 #
-# Rationale: fp16-accum drift scales with K * C accumulation length. At
-# max(C_in, C_out) <= 32 the worst-case chain stays under the AMP gradient
-# noise floor, so the pcoff perf win can be reaped without degrading
-# convergence (verified via MinkUNet ScanNet bisect 2026-05-20).
+# Default 0 (disabled) — F16-accum pcoff requires explicit
+# WARPCONVNET_USE_FP16_ACCUM=true. The prior ceiling=32 allowance silently
+# admitted F16Acc pcoff tiles for narrow-channel layers (C<=32). Worst-case
+# kernel correctness at a training-realistic encoder shape (C=32, K=27, N=250k)
+# saturated isolated output cells with max_rel up to 525 against fp64
+# reference, collapsing validation metrics while train loss looked fine
+# (notes/2026-05-26_pcoff_f16acc_small_ch_regression.md).
 #
-# Set 0 to disable (no F16-accum pcoff unless use_fp16_accum=True). Default
-# 32 = match the natural break in the channel-bucket heuristic.
+# Users who want the small-channel pcoff F16Acc speedup must set this
+# explicitly and validate val metric on their workload.
 #
 # Examples:
-#   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0    # disable entirely
+#   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=32   # opt back into prior behavior
 #   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=64   # broader allowance
-#   export WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=32   # default
-WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL = _get_env_int("WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL", 32)
+WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL = _get_env_int("WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL", 0)
 
 
 def get_fp16_accum() -> bool:
