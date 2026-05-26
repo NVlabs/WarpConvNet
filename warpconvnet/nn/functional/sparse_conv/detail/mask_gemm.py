@@ -157,13 +157,23 @@ def _build_mask_and_argsort(
     # Fast path: cub::DeviceRadixSort via direct binding bypasses torch.argsort
     # Python+dispatcher overhead. Saves ~150us per call at N=2928 vs
     # torch.argsort(stable=True). Non-stable: voxels with identical mask
-    # may be reordered within their group — semantic-preserving for the
-    # cache-coherence use case.
-    if hasattr(_C.gemm, "mask_argsort_cuda"):
+    # may be reordered within their group — usually semantic-preserving for
+    # cache coherence, but under investigation as a slow-drift training
+    # convergence delta vs previous stable-sort behavior.
+    #
+    # Set WARPCONVNET_FORCE_STABLE_ARGSORT=1 to force torch.argsort(stable=True)
+    # — diagnostic A/B for train-trajectory-divergence checks. Adds
+    # ~150us per call; only set when investigating numerics.
+    _force_stable = os.environ.get("WARPCONVNET_FORCE_STABLE_ARGSORT", "0").strip() in (
+        "1",
+        "true",
+        "True",
+    )
+    if _force_stable or not hasattr(_C.gemm, "mask_argsort_cuda"):
+        mask_argsort = torch.argsort(key, stable=True).int()
+    else:
         mask_argsort = torch.empty(N, dtype=torch.int32, device=device)
         _C.gemm.mask_argsort_cuda(key.contiguous(), mask_argsort)
-    else:
-        mask_argsort = torch.argsort(key, stable=True).int()
     return pair_mask, mask_argsort
 
 
