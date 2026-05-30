@@ -261,13 +261,13 @@ def spatially_sparse_conv(
 
         # Inference default: enable fp16 accumulator for low-precision
         # inference even when the global setting is False. Training stability
-        # (the reason fp32 accum is the global default) is moot with grad
-        # disabled, and fp16 accum gives ~2x tensor-core throughput. Gated on
-        # half-precision compute (float16 or bfloat16) and a grad-disabled
-        # context covering both torch.no_grad() and torch.inference_mode().
+        # (the reason fp32 accum is the global default) is moot here, and
+        # fp16 accum gives ~2x tensor-core throughput. Gated on half-precision
+        # compute (float16 or bfloat16) inside a torch.inference_mode()
+        # context only (not plain torch.no_grad()).
         if (
             not use_fp16_accum
-            and not torch.is_grad_enabled()
+            and torch.is_inference_mode_enabled()
             and effective_compute_dtype in (torch.float16, torch.bfloat16)
         ):
             use_fp16_accum = True
