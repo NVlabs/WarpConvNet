@@ -1,7 +1,7 @@
 # Accumulator Precision
 
 **Created**: 2026-04-15 14:00:00
-**Edited**: 2026-05-26 14:30:00
+**Edited**: 2026-05-29 21:08:44
 
 WarpConvNet's mask_gemm kernels use tensor core MMA instructions that support two accumulator modes:
 
@@ -69,12 +69,59 @@ output = spatially_sparse_conv(
 )
 ```
 
+## Automatic FP16 Accumulator under `torch.inference_mode()`
+
+When `use_fp16_accum` is left unresolved (per-module `None` **and** global
+setting `False`), the fp16 accumulator is **auto-enabled** if both of these
+hold at call time:
+
+1. The convolution runs inside a `torch.inference_mode()` context, and
+2. The effective compute dtype is half precision (`torch.float16` or
+   `torch.bfloat16`).
+
+Rationale: the global default is fp32 accum for training-convergence safety,
+but that concern is moot during inference. fp16 accum gives ~2x tensor-core
+throughput at no training cost, so it is the better default for low-precision
+inference.
+
+```python
+import torch
+from warpconvnet.nn.modules.sparse_conv import SparseConv3d
+
+conv = SparseConv3d(64, 128, kernel_size=3)  # use_fp16_accum=None
+
+# Training / no_grad eval: stays fp32 accum (global default)
+with torch.no_grad():
+    out = conv(x_fp16)            # fp32 accumulator
+
+# inference_mode + half precision: auto-enabled fp16 accum
+with torch.inference_mode():
+    out = conv(x_fp16)            # fp16 accumulator (auto)
+    out = conv(x_bf16)            # fp16 accumulator (auto)
+    out = conv(x_fp32)            # fp32 accumulator (not half precision)
+```
+
+Notes:
+
+- **Only `torch.inference_mode()` triggers it.** Plain `torch.no_grad()` or a
+  bare `model.eval()` (which does *not* disable grad) will **not** auto-enable
+  it. `model.eval()` only flips BN/dropout; grad stays on.
+- **Explicit settings still win.** A per-module or global `True`/`False` is
+  respected — the auto-enable only fills in the unresolved (`None` + global
+  `False`) case.
+- **Separate autotune cache entry.** The autotune cache key includes
+  `use_fp16_accum`, so the inference path (`fa=1`) and the training path
+  (`fa=0`) keep independent entries. The first half-precision
+  `inference_mode` pass warms a fresh cache entry rather than reusing the
+  training one.
+
 ## Precedence
 
 1. **Per-module** `use_fp16_accum=True/False` -- highest priority
 2. **Global runtime** `warpconvnet.set_fp16_accum(True)` -- used when module is `None`
 3. **Environment variable** `WARPCONVNET_USE_FP16_ACCUM=true` -- sets initial global value
-4. **Default** `False` (fp32 accumulator)
+4. **Auto-enable** -- when unresolved (`None` + global `False`), fp16 accum is turned on inside `torch.inference_mode()` with half-precision (fp16/bf16) compute
+5. **Default** `False` (fp32 accumulator)
 
 ## Small-Channel F16-Accum Pcoff Allowance
 
@@ -140,7 +187,7 @@ Wgrad always uses fp32 accumulator regardless of this setting, since weight grad
 ## Recommendations
 
 - **Training**: Use fp32 accumulator (default). Switch to fp16 only after verifying convergence is unaffected on your model. The F16Acc tiles' per-step relative difference (up to ~7.5e-4 at C=256) accumulates across epochs and has been observed to slow convergence on ScanNet MinkUNet-style models.
-- **Inference**: fp16 accumulator is safe and recommended for maximum throughput.
+- **Inference**: fp16 accumulator is safe and recommended for maximum throughput. Under `torch.inference_mode()` with half-precision (fp16/bf16) compute it is now enabled **automatically** — see [Automatic FP16 Accumulator under `torch.inference_mode()`](#automatic-fp16-accumulator-under-torchinference_mode).
 - **Large channels (C >= 128)**: Largest speedup from fp16 accumulator (~15%).
 - **Small channels (C \<= 32)**: Minimal benefit since the computation is memory-bound, not compute-bound.
 - **After switching**: clear the cache (`rm ~/.cache/warpconvnet/benchmark_cache_generic.*`) so the pool change triggers a fresh autotune pass.
