@@ -243,12 +243,6 @@ def spatially_sparse_conv(
             o < i for o, i in zip(out_tensor_stride, in_tensor_stride)
         ), "Output stride is larger than input stride"
 
-    # Resolve use_fp16_accum: None means use global setting
-    if use_fp16_accum is None:
-        from warpconvnet.constants import get_fp16_accum
-
-        use_fp16_accum = get_fp16_accum()
-
     # Determine effective compute_dtype. Under AMP autocast, use the
     # autocast dtype (fp16/bf16) rather than the tensor's storage dtype
     # (fp32) so that saved-for-backward tensors are in compute precision.
@@ -258,6 +252,25 @@ def spatially_sparse_conv(
         effective_compute_dtype = torch.get_autocast_dtype("cuda")
     else:
         effective_compute_dtype = input_sparse_tensor.feature_tensor.dtype
+
+    # Resolve use_fp16_accum: None means use global setting
+    if use_fp16_accum is None:
+        from warpconvnet.constants import get_fp16_accum
+
+        use_fp16_accum = get_fp16_accum()
+
+        # Inference default: enable fp16 accumulator for low-precision
+        # inference even when the global setting is False. Training stability
+        # (the reason fp32 accum is the global default) is moot with grad
+        # disabled, and fp16 accum gives ~2x tensor-core throughput. Gated on
+        # half-precision compute (float16 or bfloat16) and a grad-disabled
+        # context covering both torch.no_grad() and torch.inference_mode().
+        if (
+            not use_fp16_accum
+            and not torch.is_grad_enabled()
+            and effective_compute_dtype in (torch.float16, torch.bfloat16)
+        ):
+            use_fp16_accum = True
 
     if stride_mode == STRIDED_CONV_MODE.REDUCE_AND_STRIDE and any(s != 1 for s in _stride):
         reduced_input_voxels = sparse_reduce(
