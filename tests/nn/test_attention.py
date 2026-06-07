@@ -10,8 +10,8 @@ from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.modules.attention import (
     Attention,
     PatchAttention,
+    GeometryToPaddedBatch,
     SpatialFeatureAttention,
-    ToAttention,
     TransformerBlock,
     ZeroOutPoints,
 )
@@ -58,7 +58,7 @@ def test_basic_attention(setup_points):
     dim = C * 8
     num_heads = 8
     lift = Linear(C, dim).to(device)
-    to_attn = ToAttention(
+    to_attn = GeometryToPaddedBatch(
         out_channels=dim,
         num_heads=num_heads,
         num_encoding_channels=32,
@@ -117,7 +117,7 @@ def test_attention_with_flash(setup_batch_tensor, enable_flash):
 
 @pytest.mark.parametrize("use_encoding", [True, False])
 def test_to_attention(setup_points, use_encoding):
-    """Test ToAttention module with and without positional encoding."""
+    """Test GeometryToPaddedBatch module with and without positional encoding."""
     pc: Points = setup_points[0]
     B, Ns, C = setup_points[1:]
     device = pc.device
@@ -126,7 +126,7 @@ def test_to_attention(setup_points, use_encoding):
     dim = C * 8
     num_heads = 8
     lift = Linear(C, dim).to(device)
-    to_attn = ToAttention(
+    to_attn = GeometryToPaddedBatch(
         out_channels=dim,
         use_encoding=use_encoding,
         num_heads=num_heads,
@@ -298,3 +298,78 @@ def test_attention_consistency():
 
     # Check that outputs are close (allow for numerical differences)
     assert torch.allclose(out_flash, out_standard, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("enable_flash", [True, False])
+def test_attention_masking_padding_invariance(enable_flash):
+    """Padded tokens must not influence active-token outputs (issue #26).
+
+    Both the flash (varlen) and non-flash (masked_fill) paths should produce
+    identical active-token outputs regardless of what garbage sits in the
+    padded region.
+    """
+    if enable_flash and not FLASH_ATTN_AVAILABLE:
+        pytest.skip("flash_attn not available")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    device = torch.device("cuda:0")
+
+    from warpconvnet.nn.modules.attention import offset_to_mask
+
+    B, N, C = 2, 128, 256
+    num_heads = 8
+    num_points = torch.tensor([100, 128], device=device)
+    offsets = torch.nn.functional.pad(num_points.cumsum(0), (1, 0)).cpu()
+    valid = torch.arange(N, device=device)[None, :] < num_points[:, None]  # [B, N]
+
+    torch.manual_seed(0)
+    x = torch.randn(B, N, C, device=device)
+    x[~valid] = 0.0  # clean padding
+
+    attn = (
+        Attention(
+            dim=C,
+            num_heads=num_heads,
+            enable_flash=enable_flash,
+            attn_drop=0.0,
+            proj_drop=0.0,
+        )
+        .to(device)
+        .eval()
+    )
+
+    mask = offset_to_mask(x, offsets, N)
+
+    with torch.no_grad():
+        out_clean = attn(x, mask=mask, num_points=num_points)
+        # Fill padded region with large garbage; active outputs must not move.
+        x_dirty = x.clone()
+        x_dirty[~valid] = 1e3 * torch.randn_like(x_dirty[~valid])
+        out_dirty = attn(x_dirty, mask=mask, num_points=num_points)
+
+    atol = 2e-3 if enable_flash else 1e-5
+    assert torch.allclose(out_clean[valid], out_dirty[valid], atol=atol, rtol=1e-3)
+    # Padded outputs must be zeroed.
+    assert torch.count_nonzero(out_clean[~valid]) == 0
+
+
+def test_attention_empty_batch_element_no_nan():
+    """A batch element with zero points must not produce NaNs (non-flash path)."""
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    from warpconvnet.nn.modules.attention import offset_to_mask
+
+    B, N, C = 2, 8, 32
+    num_points = torch.tensor([0, 5], device=device)
+    offsets = torch.nn.functional.pad(num_points.cumsum(0), (1, 0)).cpu()
+
+    x = torch.randn(B, N, C, device=device)
+    attn = (
+        Attention(dim=C, num_heads=4, enable_flash=False, attn_drop=0.0, proj_drop=0.0)
+        .to(device)
+        .eval()
+    )
+    mask = offset_to_mask(x, offsets, N)
+
+    with torch.no_grad():
+        out = attn(x, mask=mask, num_points=num_points)
+    assert not torch.isnan(out).any()

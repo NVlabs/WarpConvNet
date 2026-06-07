@@ -14,8 +14,8 @@ from warpconvnet.geometry.features.cat import CatFeatures
 from warpconvnet.geometry.features.ops.convert import cat_to_pad_tensor
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.modules.attention import (
-    ToAttention,
-    ToSpatialFeatures,
+    GeometryToPaddedBatch,
+    PaddedBatchToGeometry,
     zero_out_points,
 )
 from warpconvnet.nn.modules.base_module import BaseSpatialModel
@@ -140,7 +140,7 @@ class CrossAttention(nn.Module):
         return x
 
 
-class ToAttentionWithoutMask(ToAttention):
+class GeometryToPaddedBatchNoMask(GeometryToPaddedBatch):
     def forward(self, x: Geometry) -> Tuple[
         Float[Tensor, "B M C"],
         Union[Float[Tensor, "B M C"], None],
@@ -193,7 +193,7 @@ class SpatialFeatureCrossAttention(CrossAttention):
             enable_flash=enable_flash,
             use_batched_kv=use_batched_kv,
         )
-        self.to_attn = ToAttentionWithoutMask(
+        self.to_attn = GeometryToPaddedBatchNoMask(
             dim,
             use_encoding=use_encoding,
             num_encoding_channels=num_encoding_channels,
@@ -202,7 +202,7 @@ class SpatialFeatureCrossAttention(CrossAttention):
             concat_input=True,
             num_spatial_features=3,
         )
-        self.from_attn = ToSpatialFeatures()
+        self.from_attn = PaddedBatchToGeometry()
 
     def forward(self, q: Float[Tensor, "B Q C"], kv: Geometry) -> Float[Tensor, "B Q C"]:
         features, pos_enc, num_points = self.to_attn(kv)

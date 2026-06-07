@@ -74,7 +74,7 @@ def offset_to_mask(
     return mask
 
 
-class ToAttention(BaseSpatialModule):
+class GeometryToPaddedBatch(BaseSpatialModule):
     def __init__(
         self,
         out_channels: int,
@@ -132,7 +132,7 @@ class ToAttention(BaseSpatialModule):
         return features, pos_enc, mask, num_points
 
 
-class ToSpatialFeatures(nn.Module):
+class PaddedBatchToGeometry(nn.Module):
     def forward(self, x: Float[Tensor, "B N C"], target: Geometry) -> Geometry:
         feats = pad_to_cat_tensor(x, target.offsets)
         return target.replace(batched_features=feats)
@@ -222,9 +222,19 @@ class Attention(nn.Module):
 
             attn = (q @ k.transpose(-2, -1)) * self.scale
             if mask is not None:
-                attn = attn + mask
-
-            attn = attn.softmax(dim=-1)
+                # mask is a bool key-validity mask [B, 1, M, M] (True = valid
+                # key). Padded keys must be removed from the softmax, so set
+                # their scores to -inf instead of adding the mask (which only
+                # shifted valid scores by +1 and left padded keys participating).
+                attn = attn.masked_fill(~mask, float("-inf"))
+                # An empty batch element (num_points==0) leaves a fully-masked
+                # row whose softmax is NaN; those padded-query rows are dropped
+                # by zero_out_points anyway, so map NaN->0 to keep grads finite.
+                # Only reachable when masking set a row fully to -inf, so the
+                # scan is skipped on the unmasked hot path.
+                attn = torch.nan_to_num(attn.softmax(dim=-1))
+            else:
+                attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
 
             x = attn @ v
@@ -239,11 +249,39 @@ class Attention(nn.Module):
             else:
                 qkv_flash = qkv
 
-            x = flash_attn.flash_attn_qkvpacked_func(
-                qkv_flash,
-                dropout_p=self.attn_drop_p if self.training else 0.0,
-                softmax_scale=self.scale,
-            ).reshape(B, N, C)
+            if num_points is not None:
+                # Padded batch: unpad to a variable-length packed layout so
+                # padded tokens never enter the softmax. flash_attn_qkvpacked_func
+                # has no mask argument, so masking is impossible on the dense
+                # [B, N, ...] path; varlen is the only correct option (same
+                # approach as PatchAttention).
+                num_points_dev = num_points.to(qkv_flash.device)
+                valid = (
+                    torch.arange(N, device=qkv_flash.device)[None, :] < num_points_dev[:, None]
+                )  # [B, N] bool
+                qkv_unpad = qkv_flash[valid]  # [total, 3, num_heads, head_dim]
+                # cumsum upcasts int32->int64, and flash requires int32 cu_seqlens,
+                # so cast again after the pad.
+                cu_seqlens = F.pad(num_points_dev.cumsum(0), (1, 0)).to(torch.int32)
+                # N is the pad width (== max num_points), a valid upper bound
+                # for max_seqlen. Using it avoids a per-forward device->host
+                # sync from num_points.max().
+                max_seqlen = N
+                out_unpad = flash_attn.flash_attn_varlen_qkvpacked_func(
+                    qkv_unpad,
+                    cu_seqlens,
+                    max_seqlen=max_seqlen,
+                    dropout_p=self.attn_drop_p if self.training else 0.0,
+                    softmax_scale=self.scale,
+                ).reshape(-1, C)
+                x = torch.zeros(B, N, C, dtype=out_unpad.dtype, device=out_unpad.device)
+                x[valid] = out_unpad
+            else:
+                x = flash_attn.flash_attn_qkvpacked_func(
+                    qkv_flash,
+                    dropout_p=self.attn_drop_p if self.training else 0.0,
+                    softmax_scale=self.scale,
+                ).reshape(B, N, C)
 
             # Convert back to original dtype if necessary
             if x.dtype != original_dtype:
@@ -283,7 +321,7 @@ class SpatialFeatureAttention(Attention):
             enable_flash,
             use_batched_qkv,
         )
-        self.to_attn = ToAttention(
+        self.to_attn = GeometryToPaddedBatch(
             dim,
             use_encoding=use_encoding,
             num_encoding_channels=num_encoding_channels,
@@ -292,7 +330,7 @@ class SpatialFeatureAttention(Attention):
             concat_input=True,
             num_spatial_features=3,
         )
-        self.from_attn = ToSpatialFeatures()
+        self.from_attn = PaddedBatchToGeometry()
 
     def forward(self, x: Geometry) -> Geometry:
         features, pos_enc, mask, num_points = self.to_attn(x)
