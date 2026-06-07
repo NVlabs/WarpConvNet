@@ -59,9 +59,45 @@ voxels_cat = Voxels(coords_cat, feats_cat, offsets)
 
 ## Conversions
 
-Downsample `Points` to `Voxels` and convert grids to/from dense:
+Conversions between geometry types live in
+`warpconvnet.geometry.types.conversion` and follow a `<src>_to_<dst>` naming
+convention, each returning a geometry type.
+
+Downsample `Points` to `Voxels` (also available as the `points.to_voxels(...)`
+method):
 
 ```python
 from warpconvnet.geometry.types.conversion.to_voxels import points_to_voxels
 voxels = points_to_voxels(points, voxel_size=0.02, reduction="mean")
 ```
+
+Rasterize `Points` or `Voxels` onto a dense `Grid`. `grid_shape` is `(H, W, D)`;
+point features are aggregated into cells by a neighbor search (`radius`, `knn`,
+or `voxel`):
+
+```python
+from warpconvnet.geometry.types.conversion.to_grid import (
+    points_to_grid,
+    voxels_to_grid,
+)
+
+grid = points_to_grid(points, grid_shape=(64, 64, 64), search_type="radius")
+grid = voxels_to_grid(voxels, grid_shape=(64, 64, 64))
+```
+
+Build a factorized multi-plane `FactorGrid` (one grid per memory format):
+
+```python
+from warpconvnet.geometry.types.conversion.to_factor_grid import points_to_factor_grid
+
+factor_grid = points_to_factor_grid(
+    points,
+    grid_shapes=[(64, 64, 1), (64, 1, 64), (1, 64, 64)],
+    memory_formats=["b_zc_x_y", "b_xc_y_z", "b_yc_x_z"],
+)
+```
+
+> Padded-batch helpers used by attention (`GeometryToPaddedBatch`,
+> `PaddedBatchToGeometry`) are **not** type conversions — they produce dense
+> padded tensors, not a geometry. See the attention modules in
+> `warpconvnet.nn.modules.attention`.
