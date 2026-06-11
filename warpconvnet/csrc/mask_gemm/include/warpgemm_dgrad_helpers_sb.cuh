@@ -70,6 +70,12 @@ __device__ void _load_dense_B_generic(const ElementInput *ptr_B,
   // For N-contiguous: cp.async loads kVec elements along N. Iterate all K rows × N vectors.
   // For K-contiguous: cp.async loads kVec elements along K. Iterate all N rows × K vectors.
   constexpr int total_vecs = IsTransposed ? (tN * k_vecs) : (tK * n_vecs);
+  // 128-bit cp.async needs a 16B-aligned source even when src_bytes<16. A
+  // sub-16B weight base (DeepSpeed ZeRO contiguous-view weights) faults
+  // "misaligned address". Guard on (base | stride*sizeof); scalar fallback
+  // when misaligned. Stride: N (fwd, N-contig) / K_dim (transposed).
+  int _b_stride_bytes = (IsTransposed ? K_dim : N) * (int)sizeof(ElementInput);
+  bool b_aligned = ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)_b_stride_bytes) & 15u) == 0;
   CUTLASS_PRAGMA_UNROLL
   for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
     int k_local, n_local;
@@ -98,16 +104,31 @@ __device__ void _load_dense_B_generic(const ElementInput *ptr_B,
       src_bytes = valid_k * (int)sizeof(ElementInput);
       src = &ptr_B[n_global * K_dim + k_global];
     }
-    if (src_bytes > 0) {
+    if (src_bytes > 0 && b_aligned) {
       asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                    "l"(src),
                    "n"(16),
                    "r"(src_bytes));
-    } else {
+    } else if (b_aligned) {
       asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                    "l"(ptr_B),
                    "n"(16),
                    "r"(0));
+    } else {
+      int4 frag = make_int4(0, 0, 0, 0);
+      if (src_bytes > 0) {
+        const ElementInput *s = reinterpret_cast<const ElementInput *>(src);
+        ElementInput *d = reinterpret_cast<ElementInput *>(&frag);
+        int nvalid = src_bytes / (int)sizeof(ElementInput);
+        CUTLASS_PRAGMA_UNROLL
+        for (int e = 0; e < kVec; ++e)
+          if (e < nvalid) d[e] = s[e];
+      }
+      asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                   "r"(frag.x),
+                   "r"(frag.y),
+                   "r"(frag.z),
+                   "r"(frag.w));
     }
   }
 }
@@ -124,6 +145,14 @@ __device__ void _load_B_kblock(const ElementInput *ptr_B,
   static_assert(tN % kVec == 0);
   constexpr int k_offset = KB * kMmaK;
 
+  // 128-bit cp.async requires a 16B-aligned source even when src_bytes<16.
+  // A sub-16B weight base (DeepSpeed ZeRO contiguous-view weights) faults
+  // "misaligned address". Guard the cp.async path on (base | stride*sizeof);
+  // fall back to per-element scalar load + st.shared.v4 when misaligned.
+  // Stride between contiguous rows: N (fwd, N-contig) / K_dim (transposed).
+  int _b_stride_bytes = (IsTransposed ? K_dim : N) * (int)sizeof(ElementInput);
+  bool b_aligned = ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)_b_stride_bytes) & 15u) == 0;
+
   if constexpr (!IsTransposed) {
     // Forward (N-contiguous): each cp.async loads kVec N-elements at 1 K-row.
     // Warp-raked: K outer (step=1), N-vec inner (step=kVec).
@@ -138,17 +167,31 @@ __device__ void _load_B_kblock(const ElementInput *ptr_B,
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
       int valid_n = (k_global < K_dim && n_global < N) ? min(kVec, N - n_global) : 0;
       int src_bytes = valid_n * (int)sizeof(ElementInput);
-      if (src_bytes > 0) {
+      if (src_bytes > 0 && b_aligned) {
         const void *src = &ptr_B[k_global * N + n_global];
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                      "l"(src),
                      "n"(16),
                      "r"(src_bytes));
-      } else {
+      } else if (b_aligned) {
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                      "l"(ptr_B),
                      "n"(16),
                      "r"(0));
+      } else {
+        int4 frag = make_int4(0, 0, 0, 0);
+        if (src_bytes > 0) {
+          const ElementInput *s = &ptr_B[k_global * N + n_global];
+          ElementInput *d = reinterpret_cast<ElementInput *>(&frag);
+          CUTLASS_PRAGMA_UNROLL
+          for (int e = 0; e < kVec; ++e)
+            if (n_global + e < N) d[e] = s[e];
+        }
+        asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                     "r"(frag.x),
+                     "r"(frag.y),
+                     "r"(frag.z),
+                     "r"(frag.w));
       }
     }
   } else {
@@ -172,17 +215,31 @@ __device__ void _load_B_kblock(const ElementInput *ptr_B,
         uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
         int valid_k = (n_global < N && k_global < K_dim) ? min(kVec, K_dim - k_global) : 0;
         int src_bytes = valid_k * (int)sizeof(ElementInput);
-        if (src_bytes > 0) {
+        if (src_bytes > 0 && b_aligned) {
           const void *src = &ptr_B[n_global * K_dim + k_global];
           asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                        "l"(src),
                        "n"(16),
                        "r"(src_bytes));
-        } else {
+        } else if (b_aligned) {
           asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                        "l"(ptr_B),
                        "n"(16),
                        "r"(0));
+        } else {
+          int4 frag = make_int4(0, 0, 0, 0);
+          if (src_bytes > 0) {
+            const ElementInput *s = &ptr_B[n_global * K_dim + k_global];
+            ElementInput *d = reinterpret_cast<ElementInput *>(&frag);
+            CUTLASS_PRAGMA_UNROLL
+            for (int e = 0; e < kVec; ++e)
+              if (k_global + e < K_dim) d[e] = s[e];
+          }
+          asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                       "r"(frag.x),
+                       "r"(frag.y),
+                       "r"(frag.z),
+                       "r"(frag.w));
         }
       }
     }
@@ -202,6 +259,11 @@ __device__ void _load_B_kblock_generic(const ElementInput *ptr_B,
   constexpr int k_offset = KB * kMmaK;
   constexpr int k_vecs = kMmaK / kVec;
   constexpr int total_vecs = IsTransposed_unused ? (tN * k_vecs) : (kMmaK * n_vecs);
+  // Guard 128-bit cp.async on a 16B-aligned weight base (DeepSpeed ZeRO
+  // contiguous-view weights are sub-16B → "misaligned address"). Stride:
+  // N (fwd, N-contig) / K_dim (transposed). Scalar fallback when misaligned.
+  int _b_stride_bytes = (IsTransposed_unused ? K_dim : N) * (int)sizeof(ElementInput);
+  bool b_aligned = ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)_b_stride_bytes) & 15u) == 0;
 
   CUTLASS_PRAGMA_UNROLL
   for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
@@ -225,15 +287,28 @@ __device__ void _load_B_kblock_generic(const ElementInput *ptr_B,
       pred = (n_global < N) && (k_global + kVec <= K_dim);
       src = &ptr_B[n_global * K_dim + k_global];
     }
-    if (pred) {
+    if (pred && b_aligned) {
       asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                    "l"(src),
                    "n"(16));
-    } else {
+    } else if (b_aligned) {
       asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
                    "l"(ptr_B),
                    "n"(16),
                    "r"(0));
+    } else {
+      int4 frag = make_int4(0, 0, 0, 0);
+      if (pred) {
+        const ElementInput *s = reinterpret_cast<const ElementInput *>(src);
+        ElementInput *d = reinterpret_cast<ElementInput *>(&frag);
+        CUTLASS_PRAGMA_UNROLL
+        for (int e = 0; e < kVec; ++e) d[e] = s[e];
+      }
+      asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" ::"r"(smem_addr),
+                   "r"(frag.x),
+                   "r"(frag.y),
+                   "r"(frag.z),
+                   "r"(frag.w));
     }
   }
 }
@@ -259,13 +334,15 @@ __device__ void _epilogue_direct(Accumulator &accum,
     // Shared memory staging epilogue (CUTLASS pattern)
     constexpr int EPL_PAD = 8;
     constexpr int EPL_STRIDE = tN + EPL_PAD;
-    __half *epi_smem = reinterpret_cast<__half *>(smem_buf);
+    // Stage in ElementOutput (half_t OR bfloat16_t), not __half — otherwise
+    // bf16 output gets fp16 bits and the uint64 packed stores emit garbage.
+    ElementOutput *epi_smem = reinterpret_cast<ElementOutput *>(smem_buf);
 
     CUTE_UNROLL
     for (int i = 0; i < size(accum); ++i) {
       auto coord = tCrC(i);
       float val = (alpha == 1.0f) ? float(accum(i)) : alpha * float(accum(i));
-      epi_smem[get<0>(coord) * EPL_STRIDE + get<1>(coord)] = __float2half(val);
+      epi_smem[get<0>(coord) * EPL_STRIDE + get<1>(coord)] = static_cast<ElementOutput>(val);
     }
     __syncthreads();
 
@@ -301,7 +378,7 @@ __device__ void _epilogue_direct(Accumulator &accum,
           for (int v = 0; v < VEC; ++v) {
             int n_global = n_start + col_start + v;
             if (n_global < C_in) {
-              __half h = epi_smem[row * EPL_STRIDE + col_start + v];
+              ElementOutput h = epi_smem[row * EPL_STRIDE + col_start + v];
               memcpy(&ptr_D[out_row * stride_out + n_global], &h, 2);
             }
           }
@@ -328,10 +405,12 @@ __device__ void _epilogue_direct(Accumulator &accum,
           int out_row = mask_argsort[sorted_row];
           float v0 = (alpha == 1.0f) ? float(accum(base)) : alpha * float(accum(base));
           float v1 = (alpha == 1.0f) ? float(accum(base + 1)) : alpha * float(accum(base + 1));
-          __half h0 = __float2half(v0), h1 = __float2half(v1);
+          // dtype-generic pack (half_t OR bfloat16_t); __float2half would
+          // corrupt bf16 output. static_cast rounds float->ElementOutput.
+          ElementOutput e0 = static_cast<ElementOutput>(v0), e1 = static_cast<ElementOutput>(v1);
           unsigned short s0, s1;
-          memcpy(&s0, &h0, 2);
-          memcpy(&s1, &h1, 2);
+          memcpy(&s0, &e0, 2);
+          memcpy(&s1, &e1, 2);
           uint32_t packed = (uint32_t)s0 | ((uint32_t)s1 << 16);
           char *base_ptr = reinterpret_cast<char *>(ptr_D);
           *reinterpret_cast<uint32_t *>(base_ptr + ((size_t)out_row * stride_out + n_global) * 2) =
@@ -395,9 +474,13 @@ __device__ void _epilogue_atomic(Accumulator &accum,
     if (sorted_row < N_in && n_global < C_in) {
       int out_row = mask_argsort[sorted_row];
       float val = (alpha == 1.0f) ? float(accum(i)) : alpha * float(accum(i));
-      if constexpr (sizeof(ElementOutput) == 2) {
+      if constexpr (cute::is_same<ElementOutput, cutlass::half_t>::value) {
         atomicAdd(reinterpret_cast<__half *>(ptr_D + out_row * stride_out + n_global),
                   __float2half(val));
+      } else if constexpr (cute::is_same<ElementOutput, cutlass::bfloat16_t>::value) {
+        // bf16 atomicAdd (SM80+); __float2half would corrupt the bf16 target.
+        atomicAdd(reinterpret_cast<__nv_bfloat16 *>(ptr_D + out_row * stride_out + n_global),
+                  __float2bfloat16(val));
       } else {
         atomicAdd(ptr_D + out_row * stride_out + n_global, static_cast<ElementOutput>(val));
       }
