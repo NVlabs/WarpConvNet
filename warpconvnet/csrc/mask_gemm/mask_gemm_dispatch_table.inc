@@ -6405,7 +6405,7 @@ MASK_GEMM_KERNEL(307,
                  "none",
                  "80,86,89,90")
 
-// --- dgrad (69 tiles) ---
+// --- dgrad (61 tiles) ---
 MASK_GEMM_KERNEL(0,
                  "dgrad",
                  "MaskGemm_dgrad_64x64x32_2s",
@@ -10551,7 +10551,7 @@ MASK_GEMM_KERNEL(911,
                  "none",
                  "80,86,89,90")
 
-// --- wgrad (32 tiles) ---
+// --- wgrad (24 tiles) ---
 MASK_GEMM_KERNEL(0,
                  "wgrad",
                  "MaskGemm_wgrad_64x64x32_2s_f32",

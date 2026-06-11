@@ -275,6 +275,14 @@ private:
                                   int C_in) const {
     constexpr int kVecsPerRow = tN / kVec;
     constexpr int kTotalVecs = tK * kVecsPerRow;
+    // 128-bit cp.async requires a 16B-aligned source. Row stride is C_out
+    // elements; the weight base ptr_B_v can be 2/4/8B-aligned (DeepSpeed
+    // ZeRO contiguous-view weights are NOT 16B-aligned). Guard the vector
+    // path on (base | C_out*sizeof) — mirror _load_A_strided / _load_B_tile.
+    // Without this, a misaligned weight base faults "misaligned address".
+    int _b_stride_bytes = C_out * (int)sizeof(ElementInput);
+    bool ptr_B_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_B_v) | (uintptr_t)_b_stride_bytes) & 15u) == 0;
     CUTLASS_PRAGMA_UNROLL
     for (int idx = threadIdx.x; idx < kTotalVecs; idx += MaxThreadsPerBlock) {
       int ki = idx / kVecsPerRow;
@@ -285,7 +293,7 @@ private:
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, ki));
       bool k_valid = (k_global < C_in);
       bool n_full = (n_global + kVec <= C_out);
-      if (k_valid && n_full) {
+      if (k_valid && n_full && ptr_B_aligned) {
         const void *src = &ptr_B_v[(size_t)k_global * C_out + n_global];
         asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
                      "l"(src),

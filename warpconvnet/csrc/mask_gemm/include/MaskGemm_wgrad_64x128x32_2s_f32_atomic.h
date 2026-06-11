@@ -291,6 +291,9 @@ struct MaskGemm_wgrad_64x128x32_2s_f32_atomic {
           float val = float(accum(i));
           if constexpr (sizeof(ElementOutput) == 4) {
             atomicAdd(reinterpret_cast<float *>(&out_ptr[m_global * C_out + n_global]), val);
+          } else if constexpr (cute::is_same<ElementOutput, cutlass::bfloat16_t>::value) {
+            atomicAdd(reinterpret_cast<__nv_bfloat16 *>(&out_ptr[m_global * C_out + n_global]),
+                      __float2bfloat16(val));
           } else {
             atomicAdd(reinterpret_cast<__half *>(&out_ptr[m_global * C_out + n_global]),
                       __float2half(val));

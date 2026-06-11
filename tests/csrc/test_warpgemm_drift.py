@@ -35,11 +35,23 @@ mask_codegen = pytest.importorskip(
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+INCLUDE_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "include"
 OFFSET_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "offset_gemm"
 MASK_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "mask_gemm"
 MASK_GEMM_INCLUDE_DIR = MASK_GEMM_DIR / "include"
 SUPPORTED_OFFSET_GEMM_SCHEMA_MAJOR = 3
 SUPPORTED_TILE_METADATA_SCHEMA = 5
+
+# warpgemm.codegen.write_mask_to() emits these 4 canonical files alongside the
+# named kernels (intentional, long-standing). setup.py _generate_warpgemm_codegen()
+# routes them to csrc/include/ (the 3 headers) and csrc/mask_gemm/ (the .inc), NOT
+# the names-path dir csrc/mask_gemm/include/. Verify them at their real homes.
+CANONICAL_TRACKED_DIRS = {
+    "gemm_mma_tiles.h": INCLUDE_DIR,
+    "cute_gemm_config.h": INCLUDE_DIR,
+    "mask_gemm_tile_enums.h": INCLUDE_DIR,
+    "mask_gemm_dispatch_table.inc": MASK_GEMM_DIR,
+}
 
 
 def test_offset_gemm_schema_major_pinned() -> None:
@@ -60,11 +72,20 @@ def test_tile_metadata_schema_pinned() -> None:
     )
 
 
-def _diff_emit(emitted_paths: list[Path], tmp: str, tracked_root: Path) -> list[str]:
+def _diff_emit(
+    emitted_paths: list[Path],
+    tmp: str,
+    tracked_root: Path,
+    overrides: dict[str, Path] | None = None,
+) -> list[str]:
+    overrides = overrides or {}
     diffs: list[str] = []
     for emitted in emitted_paths:
         rel = emitted.relative_to(tmp)
-        tracked = tracked_root / rel
+        if rel.name in overrides:
+            tracked = overrides[rel.name] / rel.name
+        else:
+            tracked = tracked_root / rel
         if not tracked.is_file():
             diffs.append(f"missing tracked file: {rel}")
             continue
@@ -123,7 +144,7 @@ def test_mask_gemm_snapshot_matches_emit() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         emitted = [Path(p) for p in write_mask_to(tmp, names=tracked_headers)]
-        diffs = _diff_emit(emitted, tmp, MASK_GEMM_INCLUDE_DIR)
+        diffs = _diff_emit(emitted, tmp, MASK_GEMM_INCLUDE_DIR, overrides=CANONICAL_TRACKED_DIRS)
         assert not diffs, (
             "Tracked mask GEMM headers drifted from warpgemm emit:\n  "
             + "\n  ".join(diffs)
