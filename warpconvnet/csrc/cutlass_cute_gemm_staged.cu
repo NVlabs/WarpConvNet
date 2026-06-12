@@ -6,6 +6,8 @@
 
 #if defined(WARPCONVNET_SM80_ENABLED)
 
+#include <c10/cuda/CUDAStream.h>
+
 #include "include/cute_gemm_launch.h"
 
 namespace warpconvnet {
@@ -32,12 +34,17 @@ int run_cute_gemm_ad_gather_scatter_staged(const void *a,
                                            int num_stages,
                                            bool use_cp_async) {
   using Base = CuteTileConfig<ElementInput, TileTag>;
+  // Launch on the caller's current PyTorch stream, not the default stream 0.
+  // Otherwise, under a non-default stream (DeepSpeed / autograd / grad-checkpoint)
+  // this kernel and its producers/consumers run on different streams with no
+  // ordering dependency -> cross-stream race -> NaN. mask_gemm already does this.
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
 #define DISPATCH_STAGED_AD(S, CP)                                                   \
   {                                                                                 \
     using Config = CuteTileConfigOverride<Base, S, CP>;                             \
     return launch_cute_gemm_ad_gather_scatter<ElementInput, Config, ElementOutput>( \
-        a, b, c, d, idx_a, idx_d, idx_size, M_A, K, N, M_C, alpha, beta);           \
+        a, b, c, d, idx_a, idx_d, idx_size, M_A, K, N, M_C, alpha, beta, stream);   \
   }
 
   if (num_stages == 2 && !use_cp_async) DISPATCH_STAGED_AD(2, false)
@@ -72,12 +79,14 @@ int run_cute_gemm_trAB_gather_staged(const void *a,
                                      int num_stages,
                                      bool use_cp_async) {
   using Base = CuteTileConfig<ElementInput, TileTag>;
+  // Launch on the caller's current PyTorch stream (see AD variant above).
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
-#define DISPATCH_STAGED_TRAB(S, CP)                                           \
-  {                                                                           \
-    using Config = CuteTileConfigOverride<Base, S, CP>;                       \
-    return launch_cute_gemm_trAB_gather<ElementInput, Config, ElementOutput>( \
-        a, b, c, d, idx_a, idx_b, idx_size, M_A, K, K_B, N, alpha, beta);     \
+#define DISPATCH_STAGED_TRAB(S, CP)                                               \
+  {                                                                               \
+    using Config = CuteTileConfigOverride<Base, S, CP>;                           \
+    return launch_cute_gemm_trAB_gather<ElementInput, Config, ElementOutput>(     \
+        a, b, c, d, idx_a, idx_b, idx_size, M_A, K, K_B, N, alpha, beta, stream); \
   }
 
   if (num_stages == 2 && !use_cp_async) DISPATCH_STAGED_TRAB(2, false)
@@ -108,12 +117,14 @@ int run_cute_gemm_grouped_ad_gather_scatter_staged(const void *a,
                                                    int num_stages,
                                                    bool use_cp_async) {
   using Base = CuteTileConfig<ElementInput, TileTag>;
+  // Launch on the caller's current PyTorch stream (see AD variant above).
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
 #define DISPATCH_STAGED_GROUPED(S, CP)                                                      \
   {                                                                                         \
     using Config = CuteTileConfigOverride<Base, S, CP>;                                     \
     return launch_cute_gemm_grouped_ad_gather_scatter<ElementInput, Config, ElementOutput>( \
-        a, d, in_map, out_map, params, total_m_tiles, K, N, alpha);                         \
+        a, d, in_map, out_map, params, total_m_tiles, K, N, alpha, stream);                 \
   }
 
   if (num_stages == 2 && !use_cp_async) DISPATCH_STAGED_GROUPED(2, false)

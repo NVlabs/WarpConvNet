@@ -23,7 +23,6 @@ __global__ void points_to_closest_voxel_kernel_simple(
     const int* __restrict__ grid_shape,       // 3 (H, W, D)
     const int num_points,
     const int batch_size) {
-  
   // Shared memory for frequently accessed data
   __shared__ scalar_t s_bounds_min[3];
   __shared__ scalar_t s_bounds_max[3];
@@ -31,28 +30,28 @@ __global__ void points_to_closest_voxel_kernel_simple(
   __shared__ scalar_t s_inv_grid_size[3];
   __shared__ int s_batch_voxel_size;
   __shared__ int32_t s_offsets[64];  // Support up to 63 batches in shared memory
-  
+
   // Load shared data cooperatively
   if (threadIdx.x < 3) {
     s_bounds_min[threadIdx.x] = bounds_min[threadIdx.x];
     s_bounds_max[threadIdx.x] = bounds_max[threadIdx.x];
     s_grid_shape[threadIdx.x] = grid_shape[threadIdx.x];
-    s_inv_grid_size[threadIdx.x] = scalar_t(s_grid_shape[threadIdx.x]) / 
+    s_inv_grid_size[threadIdx.x] = scalar_t(s_grid_shape[threadIdx.x]) /
                                    (s_bounds_max[threadIdx.x] - s_bounds_min[threadIdx.x]);
   }
-  
+
   if (threadIdx.x == 0) {
     s_batch_voxel_size = s_grid_shape[0] * s_grid_shape[1] * s_grid_shape[2];
   }
-  
+
   // Load offsets cooperatively (up to 64 offsets)
   const int offsets_to_load = min(batch_size + 1, 64);
   for (int i = threadIdx.x; i < offsets_to_load; i += blockDim.x) {
     s_offsets[i] = offsets[i];
   }
-  
+
   __syncthreads();
-  
+
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_points) return;
 
@@ -146,14 +145,15 @@ torch::Tensor points_to_closest_voxel_mapping(torch::Tensor points,      // N x 
   // Use simple kernel to debug the issue
   AT_DISPATCH_FLOATING_TYPES(points.scalar_type(), "points_to_closest_voxel_simple", [&] {
     warpconvnet::points_to_closest_voxel_kernel_simple<scalar_t>
-        <<<blocks, threads>>>(points.data_ptr<scalar_t>(),
-                              offsets.data_ptr<int32_t>(),
-                              voxel_indices.data_ptr<int32_t>(),
-                              bounds_min.data_ptr<scalar_t>(),
-                              bounds_max.data_ptr<scalar_t>(),
-                              grid_shape.data_ptr<int32_t>(),
-                              num_points,
-                              batch_size);
+        <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            points.data_ptr<scalar_t>(),
+            offsets.data_ptr<int32_t>(),
+            voxel_indices.data_ptr<int32_t>(),
+            bounds_min.data_ptr<scalar_t>(),
+            bounds_max.data_ptr<scalar_t>(),
+            grid_shape.data_ptr<int32_t>(),
+            num_points,
+            batch_size);
   });
 
   // Check for CUDA errors
