@@ -13,6 +13,8 @@
 
 #if defined(WARPCONVNET_SM90_ENABLED)
 
+#include <c10/cuda/CUDAStream.h>
+
 #include "cute_gemm_launch.h"
 #include "gemm_error_codes.h"
 
@@ -33,12 +35,15 @@ int run_cute_gemm_grouped_ad_gather_scatter_sm90_staged(const void *a,
                                                         bool use_cp_async,
                                                         bool use_atomic) {
   using Base = CuteTileConfig<ElementInput, TileTag>;
+  // Launch on the caller's current PyTorch stream, not the default stream 0
+  // (cross-stream race under non-default streams; see SM80 stream fix).
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
 #define DISPATCH_SM90_STAGED_GROUPED(S, CP)                                                      \
   {                                                                                              \
     using Config = CuteTileConfigOverride<Base, S, CP>;                                          \
     return launch_cute_gemm_grouped_ad_gather_scatter_sm90<ElementInput, Config, ElementOutput>( \
-        a, d, in_map, out_map, params, total_m_tiles, K, N, alpha, use_atomic);                  \
+        a, d, in_map, out_map, params, total_m_tiles, K, N, alpha, use_atomic, stream);          \
   }
 
   if (num_stages == 2 && !use_cp_async) DISPATCH_SM90_STAGED_GROUPED(2, false)

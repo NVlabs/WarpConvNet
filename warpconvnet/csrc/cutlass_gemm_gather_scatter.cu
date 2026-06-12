@@ -3,6 +3,7 @@
 
 #if defined(WARPCONVNET_SM80_ENABLED)
 
+#include <c10/cuda/CUDAStream.h>
 #include <cutlass/util/device_memory.h>
 
 #include "include/gemm_error_codes.h"
@@ -448,12 +449,17 @@ int run_cutlass_gemm_with_operations_templated(
       return static_cast<int>(GemmStatus::kErrorProblemNotSupported);
     }
 
-    status = gemm_op.initialize(arguments, workspace.get());
+    // Launch on the caller's current PyTorch stream, not the default stream 0.
+    // Under a non-default stream (DeepSpeed / autograd / grad-checkpoint) a
+    // default-stream launch has no ordering dependency on the current-stream
+    // producers/consumers -> cross-stream race -> NaN. mask_gemm already does this.
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+    status = gemm_op.initialize(arguments, workspace.get(), stream);
     if (status != cutlass::Status::kSuccess) {
       return static_cast<int>(GemmStatus::kErrorKernelInitialization);
     }
 
-    status = gemm_op();
+    status = gemm_op(stream);
     if (status != cutlass::Status::kSuccess) {
       return static_cast<int>(GemmStatus::kErrorKernelExecution);
     }

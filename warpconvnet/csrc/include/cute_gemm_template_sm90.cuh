@@ -12,6 +12,7 @@
 
 #if defined(WARPCONVNET_SM90_ENABLED)
 
+#include <c10/cuda/CUDAStream.h>
 #include <cuda.h>  // CUtensorMap, cuTensorMapEncodeTiled
 #include <cuda_runtime.h>
 
@@ -190,8 +191,11 @@ int run_cute_gemm_sm90_ad_gather_scatter(const void *a,
                                          float alpha,
                                          float beta) {
   using Config = CuteTileConfig<ElementInput, TileTag>;
+  // Launch on the caller's current PyTorch stream, not the default stream 0
+  // (cross-stream race under non-default streams; see SM80 stream fix).
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
   return launch_cute_gemm_sm90_ad_gather_scatter<ElementInput, Config, ElementOutput>(
-      a, b, c, d, idx_a, idx_d, idx_size, M_A, K, N, M_C, alpha, beta);
+      a, b, c, d, idx_a, idx_d, idx_size, M_A, K, N, M_C, alpha, beta, stream);
 }
 
 }  // namespace cute_gemm

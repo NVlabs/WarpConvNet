@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
@@ -36,6 +37,11 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
   }
 
   c10::cuda::CUDAGuard device_guard(keys.device());
+  // Run cub sorts on the caller's current PyTorch stream, not the default
+  // stream 0 — otherwise this sort and its current-stream producers/consumers
+  // race under a non-default stream (DeepSpeed / autograd). See the cute/cutlass
+  // gather-scatter stream fix for the same bug class.
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
   const int num_items = keys.numel();
   const int num_segments = offsets_int32.numel() - 1;
@@ -65,7 +71,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                               num_items,
                                                               num_segments,
                                                               offsets_ptr,
-                                                              offsets_ptr + 1));
+                                                              offsets_ptr + 1,
+                                                              stream));
     } else {
       CUDA_CHECK(cub::DeviceSegmentedSort::SortKeys(nullptr,
                                                     temp_storage_bytes,
@@ -74,7 +81,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                     num_items,
                                                     num_segments,
                                                     offsets_ptr,
-                                                    offsets_ptr + 1));
+                                                    offsets_ptr + 1,
+                                                    stream));
     }
 
     // Allocate temp storage and sort
@@ -90,7 +98,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                               num_items,
                                                               num_segments,
                                                               offsets_ptr,
-                                                              offsets_ptr + 1));
+                                                              offsets_ptr + 1,
+                                                              stream));
     } else {
       CUDA_CHECK(cub::DeviceSegmentedSort::SortKeys(temp_storage_ptr,
                                                     temp_storage_bytes,
@@ -99,7 +108,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                     num_items,
                                                     num_segments,
                                                     offsets_ptr,
-                                                    offsets_ptr + 1));
+                                                    offsets_ptr + 1,
+                                                    stream));
     }
 
     return py::cast(sorted_keys);
@@ -127,7 +137,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                                num_items,
                                                                num_segments,
                                                                offsets_ptr,
-                                                               offsets_ptr + 1));
+                                                               offsets_ptr + 1,
+                                                               stream));
     } else {
       CUDA_CHECK(cub::DeviceSegmentedSort::SortPairs(nullptr,
                                                      temp_storage_bytes,
@@ -138,7 +149,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                      num_items,
                                                      num_segments,
                                                      offsets_ptr,
-                                                     offsets_ptr + 1));
+                                                     offsets_ptr + 1,
+                                                     stream));
     }
 
     // Allocate temp storage and sort
@@ -156,7 +168,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                                num_items,
                                                                num_segments,
                                                                offsets_ptr,
-                                                               offsets_ptr + 1));
+                                                               offsets_ptr + 1,
+                                                               stream));
     } else {
       CUDA_CHECK(cub::DeviceSegmentedSort::SortPairs(temp_storage_ptr,
                                                      temp_storage_bytes,
@@ -167,7 +180,8 @@ py::object cub_segmented_sort(const torch::Tensor& keys,
                                                      num_items,
                                                      num_segments,
                                                      offsets_ptr,
-                                                     offsets_ptr + 1));
+                                                     offsets_ptr + 1,
+                                                     stream));
     }
 
     auto perm = sorted_indices.to(torch::kInt64);
