@@ -35,6 +35,21 @@ template <typename ElementInput, int tN, int tK>
 CUtensorMap create_tma_desc_B(const void *ptr_B, int K_dim, int N) {
   CUtensorMap desc{};
 
+  // TMA (cuTensorMapEncodeTiled) requires a 16-byte-aligned global base and a
+  // 16-byte-aligned row stride. Unlike the cp.async B loader, there is NO in-kernel
+  // scalar fallback for TMA — the alignment is a hardware descriptor constraint. The
+  // dispatch layer therefore guarantees an aligned weight before any SM90 TMA kernel
+  // runs (SM90 algos are excluded from the GEMM self-handling set, so a misaligned
+  // DeepSpeed/ZeRO weight view is cloned at the Python boundary). Fail loudly if that
+  // invariant is ever violated, rather than encoding a bad descriptor that NaNs later.
+  if ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)(N * (int)sizeof(ElementInput))) & 15u) {
+    fprintf(stderr,
+            "create_tma_desc_B: B base/stride not 16B-aligned (ptr%%16=%d, N*sizeof=%d). "
+            "SM90 TMA requires alignment; the dispatch layer must clone misaligned weights.\n",
+            (int)(reinterpret_cast<uintptr_t>(ptr_B) & 15u),
+            (int)(N * (int)sizeof(ElementInput)));
+  }
+
   uint64_t globalDim[2] = {static_cast<uint64_t>(N), static_cast<uint64_t>(K_dim)};
   uint64_t globalStride[1] = {static_cast<uint64_t>(N) * sizeof(ElementInput)};
 

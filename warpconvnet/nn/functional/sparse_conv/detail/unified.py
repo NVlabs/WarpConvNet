@@ -71,6 +71,55 @@ if _HAS_CUTE_GROUPED_SM90:
 logger = get_logger(__name__)
 
 
+# Algorithms that tolerate a non-16B-aligned weight (operand B) base:
+#   - explicit_gemm / explicit_gemm_grouped : torch.matmul -> cuBLAS, which handles
+#     2-byte-aligned bf16/fp16 operands internally (non-128-bit path).
+#   - mask_gemm, cute_implicit_gemm, cute_grouped : dense-B loader guards on
+#     ((ptr | N*sizeof) & 15) and falls back to scalar ld.global + STS.128.
+# The CUTLASS GemmUniversal path (cutlass_implicit_gemm), the SM90 CuTe kernels, and the
+# custom implicit_gemm kernel do NOT self-handle (or are unverified) — they issue 128-bit
+# loads assuming an aligned base and hard-fault, so a pool with them forces a weight clone.
+_ALIGN_SELF_HANDLING = frozenset(
+    {
+        "explicit_gemm",
+        "explicit_gemm_grouped",
+        "mask_gemm",
+        "cute_implicit_gemm",
+        "cute_grouped",
+    }
+)
+
+
+def _pool_self_handles_alignment(algo_filter: Any) -> bool:
+    """True if every candidate algo handles misaligned operand bases in-kernel.
+
+    Only an explicit mask_gemm-only filter qualifies; the auto/all/trimmed pools
+    include cutlass/cute GEMMs that fault on a misaligned base.
+    """
+    if isinstance(algo_filter, str):
+        if algo_filter in ("auto", "all", "trimmed"):
+            return False
+        algo_filter = [algo_filter]
+    if isinstance(algo_filter, list):
+        return len(algo_filter) > 0 and all(a in _ALIGN_SELF_HANDLING for a in algo_filter)
+    return False
+
+
+def _ensure_aligned(t: Optional[Tensor]) -> Optional[Tensor]:
+    """Return a 16-byte-aligned-base view of ``t`` (clone if misaligned).
+
+    A weight or feature tensor that is a contiguous view into a flat parameter
+    buffer (e.g. DeepSpeed/ZeRO) can sit at a non-16B offset; ``.contiguous()``
+    and ``.to(dtype)`` are no-ops there and preserve the misaligned pointer, so a
+    CUTLASS/CuTe kernel hard-faults. This must run BEFORE autotune, which
+    benchmarks the real tensors. clone() forces an allocator-aligned base. Skip
+    the clone when the candidate pool is mask_gemm-only (see _ALIGN_SELF_HANDLING).
+    """
+    if t is not None and t.data_ptr() % 16 != 0:
+        return t.clone()
+    return t
+
+
 _STRIDED_FWD_TILE_IDS = frozenset(range(300, 308))
 
 
@@ -142,6 +191,13 @@ class UnifiedSpatiallySparseConvFunction(Function):
         else:
             # Single algorithm - create list for consistent processing
             algorithm_filter = [str(fwd_algo)]
+
+        # Guarantee a 16B-aligned weight base before autotune, unless the pool is
+        # mask_gemm-only (which self-handles misalignment). Only the weight can be
+        # misaligned in practice (a DeepSpeed/ZeRO flat-buffer view); activations are
+        # fresh allocator-aligned tensors. See _ensure_aligned.
+        if not _pool_self_handles_alignment(algorithm_filter):
+            weight = _ensure_aligned(weight)
 
         # Step 2: Generate configuration for caching
         C_in = in_features.shape[1]
@@ -273,7 +329,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
             chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
 
-        # Step 5: Pre-cast weight once (avoids per-algorithm re-casting)
+        # Step 5: Pre-cast weight once (avoids per-algorithm re-casting).
+        # weight is already 16B-aligned (guarded at function entry).
         if compute_dtype is not None:
             _weight_cast = weight.contiguous().to(dtype=compute_dtype)
         else:
@@ -452,6 +509,15 @@ class UnifiedSpatiallySparseConvFunction(Function):
         dgrad_filter = _normalize_algo(initial_dgrad_algo)
         wgrad_filter = _normalize_algo(initial_wgrad_algo)
 
+        # Guarantee a 16B-aligned weight base before autotune, unless both the dgrad
+        # and wgrad pools are mask_gemm-only (which self-handle). Only the weight can be
+        # misaligned in practice (DeepSpeed/ZeRO flat-buffer view). See _ensure_aligned.
+        if not (
+            _pool_self_handles_alignment(dgrad_filter)
+            and _pool_self_handles_alignment(wgrad_filter)
+        ):
+            weight = _ensure_aligned(weight)
+
         # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
         use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
         if dgrad_filter == "trimmed":
@@ -573,6 +639,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
             _min_dt = torch.float32
 
         def _prepare(t: torch.Tensor, dt: torch.dtype) -> torch.Tensor:
+            # Operands already 16B-aligned (guarded at function entry).
             if t.dtype == dt and t.is_contiguous() and not t.requires_grad:
                 return t
             return t.contiguous().detach().to(dtype=dt)

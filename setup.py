@@ -102,7 +102,16 @@ def _generate_warpgemm_codegen():
         if f.startswith("MaskGemm_") and f.endswith(".h")
     )
     if tracked_mask_names:
-        mask_written = _write_mask(mask_gemm_include_dir, names=tracked_mask_names)
+        # canonical=False: emit ONLY the requested MaskGemm_*.h (+ always-emitted
+        # helper .cuh fragments). Without it, write_mask_to also dumps the shared
+        # canonical SoT artifacts (gemm_mma_tiles.h, cute_gemm_config.h, cute_gemm
+        # bodies, tile_enums, dispatch.inc) into mask_gemm/include/ as UNTRACKED
+        # strays, which a later clean build resolves from the wrong -I dir and
+        # fails on. Those canonical files are routed to their real homes by the
+        # dedicated copy block below.
+        mask_written = _write_mask(
+            mask_gemm_include_dir, names=tracked_mask_names, canonical=False
+        )
         print(
             f"warpgemm mask_gemm codegen: wrote {len(mask_written)} files to "
             f"{mask_gemm_include_dir}"
@@ -123,6 +132,8 @@ def _generate_warpgemm_codegen():
         for fname, dst_dir in [
             ("gemm_mma_tiles.h", include_dir),
             ("cute_gemm_config.h", include_dir),
+            ("cute_gemm_kernel.h", include_dir),
+            ("cute_gemm_grouped_kernel.h", include_dir),
             ("mask_gemm_tile_enums.h", include_dir),
             ("mask_gemm_dispatch_table.inc", mask_gemm_dir),
         ]:

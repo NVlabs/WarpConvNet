@@ -27,7 +27,8 @@
 
 #if defined(WARPCONVNET_SM90_ENABLED)
 
-#include "cute/tensor.hpp"  // MUST come before cute/algorithm headers for CUDA 12.8+ compat
+// clang-format off
+#include "cute/tensor.hpp"  // MUST precede cute/algorithm/* for nvcc 12.9 (else Copy_Atom undefined)
 #include "cute/algorithm/copy.hpp"
 #include "cute/algorithm/gemm.hpp"
 #include "cute/arch/copy_sm80.hpp"      // cp_async_fence, cp_async_wait
@@ -35,6 +36,7 @@
 #include "cute/atom/copy_atom.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cute/atom/mma_traits_sm90_gmma.hpp"
+// clang-format on
 #include "cute_gemm_config_sm90.h"
 
 // This header requires <cuda.h> for CUtensorMap (TMA descriptors).
@@ -203,8 +205,11 @@ struct CuteGemmKernelSm90 {
         _load_A(ptr_A, in_map, sA(_, _, next_stage), m_start, k_start, M, K_dim);
         if constexpr (UseTmaLoadB) {
           cute::cp_async_fence();
-          _load_dense_B_tile_tma(*tma_desc_B, sB(_, _, next_stage),
-                                 &storage.tma_barriers[next_stage], n_start, k_start);
+          _load_dense_B_tile_tma(*tma_desc_B,
+                                 sB(_, _, next_stage),
+                                 &storage.tma_barriers[next_stage],
+                                 n_start,
+                                 k_start);
         } else {
           _load_dense_B_tile_cpasync(ptr_B, sB(_, _, next_stage), n_start, k_start, N, K_dim);
           cute::cp_async_fence();
@@ -215,8 +220,8 @@ struct CuteGemmKernelSm90 {
         warpgroup_arrive();
         CUTLASS_PRAGMA_UNROLL
         for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-          cute::gemm(tiled_mma, tCrA(_, _, k_block, curr_stage), tCrB(_, _, k_block, curr_stage),
-                     accum);
+          cute::gemm(
+              tiled_mma, tCrA(_, _, k_block, curr_stage), tCrB(_, _, k_block, curr_stage), accum);
           tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
         }
         warpgroup_commit_batch();
@@ -241,8 +246,8 @@ struct CuteGemmKernelSm90 {
         warpgroup_arrive();
         CUTLASS_PRAGMA_UNROLL
         for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-          cute::gemm(tiled_mma, tCrA(_, _, k_block, last_stage), tCrB(_, _, k_block, last_stage),
-                     accum);
+          cute::gemm(
+              tiled_mma, tCrA(_, _, k_block, last_stage), tCrB(_, _, k_block, last_stage), accum);
         }
         warpgroup_commit_batch();
         warpgroup_wait<0>();
@@ -390,6 +395,15 @@ private:
     constexpr int n_vecs = tN / kVec;
     constexpr int total_vecs = tK * n_vecs;
 
+    // 128-bit cp.async needs a 16B-aligned gmem source. ptr_B (the conv weight)
+    // can be a non-16B-aligned view into a flat parameter buffer (DeepSpeed/ZeRO),
+    // and the row stride N*sizeof must also be a 16B multiple. Guard on
+    // (base | row_stride_bytes); when misaligned, fall back to a synchronous
+    // per-element ld.global + STS.128. Mirrors the SM80 / mask_gemm B loaders.
+    const bool b_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)(N * (int)sizeof(ElementInput))) & 15u) ==
+        0;
+
     CUTLASS_PRAGMA_UNROLL
     for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
       int k_local = idx / n_vecs;
@@ -403,18 +417,32 @@ private:
 
       bool pred = (k_global < K_dim) && (n_global + kVec <= N);
 
-      if (pred) {
-        // 128-bit cp.async: gmem -> smem, bypasses registers
-        const void *gmem_src = &ptr_B[k_global * N + n_global];
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
-                     "l"(gmem_src),
-                     "n"(16));
+      if (b_aligned) {
+        if (pred) {
+          // 128-bit cp.async: gmem -> smem, bypasses registers
+          const void *gmem_src = &ptr_B[k_global * N + n_global];
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+                       "l"(gmem_src),
+                       "n"(16));
+        } else {
+          // Zero-fill: src_size=0 writes zeros to smem without reading gmem
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                       "l"(ptr_B),
+                       "n"(16),
+                       "r"(0));
+        }
       } else {
-        // Zero-fill: src_size=0 writes zeros to smem without reading gmem
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
-                     "l"(ptr_B),
-                     "n"(16),
-                     "r"(0));
+        // Misaligned source: per-element 2-byte ld.global into a 128-bit register,
+        // then a single STS.128 to the (aligned) smem slot. Zero-fills OOB lanes.
+        uint4 vec_data = make_uint4(0, 0, 0, 0);
+        if (k_global < K_dim) {
+          auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < kVec; ++v) {
+            if (n_global + v < N) elems[v] = ptr_B[k_global * N + n_global + v];
+          }
+        }
+        *reinterpret_cast<uint4 *>(&smem_tile(n_local, k_local)) = vec_data;
       }
     }
   }
@@ -463,15 +491,17 @@ private:
     if (threadIdx.x == 0) {
       // Set expected transaction bytes
       constexpr uint32_t tma_bytes = tN * tK * sizeof(ElementInput);
-      asm volatile(
-          "mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;\n" ::"r"(barrier_addr),
-          "r"(tma_bytes));
+      asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;\n" ::"r"(barrier_addr),
+                   "r"(tma_bytes));
 
       // Single TMA load for the entire tile (tN == kTmaBoxN guaranteed by UseTmaLoadB)
       asm volatile(
           "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes"
           " [%0], [%1, {%2, %3}], [%4];\n" ::"r"(smem_addr),
-          "l"(&tma_desc_B), "r"(n_start), "r"(k_start), "r"(barrier_addr));
+          "l"(&tma_desc_B),
+          "r"(n_start),
+          "r"(k_start),
+          "r"(barrier_addr));
     }
   }
 
