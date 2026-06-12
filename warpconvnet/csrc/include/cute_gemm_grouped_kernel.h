@@ -312,6 +312,15 @@ private:
     constexpr int n_vecs = tN / kVec;
     constexpr int total_vecs = tK * n_vecs;
 
+    // 128-bit cp.async needs a 16B-aligned gmem source. ptr_B (the per-group conv
+    // weight) can be a non-16B-aligned view into a flat parameter buffer
+    // (DeepSpeed/ZeRO), and the row stride N*sizeof must also be a 16B multiple.
+    // Guard on (base | row_stride_bytes); when misaligned, fall back to a
+    // synchronous per-element ld.global + STS.128. Mirrors the mask_gemm B loader.
+    const bool b_aligned =
+        ((reinterpret_cast<uintptr_t>(ptr_B) | (uintptr_t)(N * (int)sizeof(ElementInput))) & 15u) ==
+        0;
+
     CUTLASS_PRAGMA_UNROLL
     for (int idx = threadIdx.x; idx < total_vecs; idx += MaxThreadsPerBlock) {
       int k_local = idx / n_vecs;
@@ -323,16 +332,30 @@ private:
       uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile(n_local, k_local));
       bool pred = (k_global < K_dim) && (n_global + kVec <= N);
 
-      if (pred) {
-        const void *gmem_src = &ptr_B[k_global * N + n_global];
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
-                     "l"(gmem_src),
-                     "n"(16));
+      if (b_aligned) {
+        if (pred) {
+          const void *gmem_src = &ptr_B[k_global * N + n_global];
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(smem_addr),
+                       "l"(gmem_src),
+                       "n"(16));
+        } else {
+          asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
+                       "l"(ptr_B),
+                       "n"(16),
+                       "r"(0));
+        }
       } else {
-        asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_addr),
-                     "l"(ptr_B),
-                     "n"(16),
-                     "r"(0));
+        // Misaligned source: per-element 2-byte ld.global into a 128-bit register,
+        // then a single STS.128 to the (aligned) smem slot. Zero-fills OOB lanes.
+        uint4 vec_data = make_uint4(0, 0, 0, 0);
+        if (k_global < K_dim) {
+          auto *elems = reinterpret_cast<ElementInput *>(&vec_data);
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < kVec; ++v) {
+            if (n_global + v < N) elems[v] = ptr_B[k_global * N + n_global + v];
+          }
+        }
+        *reinterpret_cast<uint4 *>(&smem_tile(n_local, k_local)) = vec_data;
       }
     }
   }
