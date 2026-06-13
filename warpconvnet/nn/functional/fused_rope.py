@@ -22,16 +22,21 @@ class _FusedRopeQKVFunction(torch.autograd.Function):
         # fresh M*3*4-byte tensor each forward. Future optimization: template
         # the CUDA kernel on coord dtype and skip this conversion.
         coords_f = coords.float().contiguous()
+        # The kernel requires fp32 theta for the cos/sin phase math. The caller's
+        # theta is a registered fp32 frequency table, but under bf16 autocast / a
+        # DeepSpeed-bf16 module it can arrive cast to bf16 — force fp32 here so the
+        # kernel contract holds regardless of the surrounding autocast context.
+        theta_f = theta.float().contiguous()
         _C.fused_rope.qkv(
             qkv.contiguous(),
             coords_f,
-            theta.contiguous(),
+            theta_f,
             out,
             num_heads,
             rope_dim,
             0,
         )
-        ctx.save_for_backward(coords_f, theta)
+        ctx.save_for_backward(coords_f, theta_f)
         ctx.num_heads = num_heads
         ctx.rope_dim = rope_dim
         return out
