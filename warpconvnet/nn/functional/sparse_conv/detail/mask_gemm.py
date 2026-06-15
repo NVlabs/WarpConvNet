@@ -298,3 +298,396 @@ def _get_reverse_mask_data(
             fwd_pair_table, num_in_coords, num_out_coords, K, device
         )
     return kernel_map._reverse_mask_data
+
+
+# ---------------------------------------------------------------------------
+# Tile-id catalogs (per-op capability sets used by tile selection below).
+# These mirror the warpgemm canonical mask_gemm dispatch table. K>32 (mask_words>1)
+# routing must avoid MW=1-only tiles or the kernel device-asserts and kills the
+# CUDA context for the whole process — so guard at the Python level.
+# ---------------------------------------------------------------------------
+
+# Pcoff forward tile IDs (warpgemm canonical catalog). MW=1 instantiations only;
+# K>32 configs must route elsewhere.
+_PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
+
+# Forward tiles with no MW>1 instantiation in mask_gemm_bindings.cu. tile_id=28
+# is the canonical 32x32_F16Accum (ex-wcn 40).
+_MW1_ONLY_FWD_TILES = frozenset({28}) | _PCOFF_FWD_TILES
+
+_STRIDED_FWD_TILES = frozenset(range(300, 308))
+
+# dgrad_wt tile_ids (canonical 900-911) that route through fwd kernels but are
+# MW=1 only. Includes the 32x32 F16Accum alias (903) and the 7 pcoff aliases
+# (905-911). The 64x64 sa (900), 64x128 3s (901), 128x64 (902), and 64x128
+# F16Accum (904) aliases support MW>1 because their underlying fwd kernels do.
+_MW1_ONLY_DGRAD_WT_TILES = frozenset({903, 905, 906, 907, 908, 909, 910, 911})
+
+# Native dgrad pcoff tile_ids — bond #23. MW=1 only.
+_DGRAD_PCOFF_TILES = frozenset({64, 65, 66, 67, 68, 69})
+
+
+def _mask_gemm_forward_logic(
+    in_features: Tensor,
+    weight: Tensor,
+    kernel_map: IntSearchResult,
+    num_out_coords: int,
+    params: dict,
+    groups: int = 1,
+) -> Tensor:
+    """Fused mask-GEMM forward. Selects a tile by channel alignment + output
+    dtype + mask_words, then issues a single ``_C.mask_gemm.fwd`` launch
+    (groups>1 handled via grid.z)."""
+    K = len(kernel_map)
+    mask_words = _dispatched_mask_words(K)
+
+    # Submanifold identity shortcut: center offset maps each voxel to itself
+    # Enable when stride=1 (N_in == N_out) and K is odd
+    N_in_fwd = in_features.shape[0]
+    is_submanifold = (N_in_fwd == num_out_coords) and (K % 2 == 1)
+    identity_offset = K // 2 if is_submanifold else -1
+
+    tile_id = params.get("tile_id", 41)
+    pair_table, pair_mask, mask_argsort = _get_mask_data(
+        kernel_map, num_out_coords, in_features.device
+    )
+
+    # Per-group channel dimensions
+    if groups > 1:
+        # weight: [K, G, C_in_g, C_out_g]
+        C_in_g = weight.shape[2]
+        C_out_g = weight.shape[3]
+    else:
+        # weight: [K, C_in, C_out]
+        C_in_g = weight.shape[1]
+        C_out_g = weight.shape[2]
+
+    # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16)
+    orig_dtype = in_features.dtype
+    use_f32_output = orig_dtype == torch.float32
+    if orig_dtype == torch.float32:
+        _in = in_features.half()
+        _w = weight.half()
+    else:
+        _in = in_features
+        _w = weight
+
+    # Select tile based on per-group channel alignment and output dtype.
+    # mask_words > 1 (K > 32) is only supported by tile 41 (aligned MW) and
+    # tile 70 (scalar SAB_SE MW). Tiles 80/82 (f32out) and 71/72 (partial
+    # scalar) are MW=1 only. Fall back when mask_words > 1 and upcast to fp32
+    # in Python to preserve f32-output semantics.
+    vec_width = 16 // _in.element_size()
+    cin_aligned = C_in_g % vec_width == 0
+    cout_aligned = C_out_g % vec_width == 0
+    use_strided_tile = tile_id in _STRIDED_FWD_TILES
+    use_f32_out_tile = use_f32_output and mask_words == 1 and not use_strided_tile
+    if use_f32_out_tile:
+        tile_id = 80 if (cin_aligned and cout_aligned) else 82
+    elif not use_strided_tile and (not cin_aligned or not cout_aligned):
+        # Scalar path. Only tile 70 supports mask_words > 1; force it.
+        if mask_words > 1:
+            tile_id = 70
+        elif not cin_aligned and not cout_aligned:
+            tile_id = 70
+        elif not cin_aligned:
+            tile_id = 71
+        else:
+            tile_id = 72
+
+    out_dtype = torch.float32 if use_f32_out_tile else _in.dtype
+
+    # Tiles with no MW>1 instantiation (tile 40 _32x32x32_F16Acc, pcoff 54-63)
+    # would silently fall back to MW=1 in the binding, causing the kernel to
+    # device-side assert `K <= MaskWords * 32`. Raise here so autotune catches
+    # it as a Python RuntimeError and skips the candidate.
+    if mask_words > 1 and tile_id in _MW1_ONLY_FWD_TILES:
+        raise RuntimeError(
+            f"Tile {tile_id} only supports mask_words==1 (got {mask_words}). "
+            "Use a tile with MW>1 instantiation for K>32."
+        )
+
+    # Single launch handles groups=1 and groups>1 via grid.z
+    C_out_total = C_out_g * groups
+    output = torch.zeros((num_out_coords, C_out_total), dtype=out_dtype, device=in_features.device)
+    status = _C.mask_gemm.fwd(
+        _in,
+        _w,
+        output,
+        pair_table,
+        pair_mask,
+        mask_argsort,
+        K,
+        tile_id,
+        mask_words,
+        identity_offset,
+        1.0,
+        groups,
+    )
+    if status != 0:
+        raise RuntimeError(f"mask_gemm fwd failed: status={status}, tile={tile_id}")
+
+    return output.to(dtype=orig_dtype)
+
+
+def _mask_gemm_backward_logic(
+    algo: str,
+    grad_output: Tensor,
+    in_features: Tensor,
+    weight: Tensor,
+    kernel_map: IntSearchResult,
+    num_out_coords: int,
+    device: torch.device,
+    needs_input_grad: Tuple[bool, ...],
+    params: dict,
+    weight_T: Optional[Tensor] = None,
+    groups: int = 1,
+    use_fp16_accum: bool = False,
+) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+    """Fused mask-GEMM backward (dgrad and/or wgrad).
+
+    ``algo`` selects the dgrad path: "mask_gemm" uses the native dgrad kernel
+    (W read with an in-shared-memory stride transpose); "mask_gemm_fwd_as_dgrad"
+    reuses the fwd kernel after the caller pre-transposes the weight.
+    """
+    use_fwd_for_dgrad = algo == "mask_gemm_fwd_as_dgrad"
+
+    K = weight.shape[0]
+    mask_words = _dispatched_mask_words(K)
+
+    # Default wgrad tile_id is canonical 0 (= ex-wcn 60, 64x64 f32 direct).
+    tile_id = params.get("tile_id", 0)
+    split_k = params.get("split_k", 64)
+    N_in = in_features.shape[0]
+
+    # Submanifold identity shortcut for dgrad
+    # For submanifold conv, reverse_pair_table[K//2, j] == j (identity)
+    is_submanifold_bwd = (N_in == num_out_coords) and (K % 2 == 1)
+    identity_offset_bwd = K // 2 if is_submanifold_bwd else -1
+
+    # Per-group channel dimensions
+    if groups > 1:
+        C_in_g = weight.shape[2]
+        C_out_g = weight.shape[3]
+        C_in = groups * C_in_g
+        C_out = groups * C_out_g
+    else:
+        C_in = in_features.shape[1]
+        C_out = weight.shape[2]
+        C_in_g = C_in
+        C_out_g = C_out
+
+    # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16)
+    orig_dtype = grad_output.dtype
+    use_f32_output = orig_dtype == torch.float32
+    if orig_dtype == torch.float32:
+        _go = grad_output.half()
+        _in = in_features.half()
+        _w = weight.half()
+    else:
+        _go = grad_output
+        _in = in_features
+        _w = weight
+
+    compute_dtype = _go.dtype
+
+    grad_in = None
+    grad_weight = None
+
+    if needs_input_grad[0]:
+        rev_pt, rev_pm, rev_as = _get_reverse_mask_data(
+            kernel_map, N_in, num_out_coords, grad_output.device
+        )
+
+        # Native mask_gemm.dgrad reads W[K, G, Cin, Cout] with a stride-transpose
+        # in shared memory so MMA reduces over Cout (correct for dX = dY @ W^T).
+        # mask_gemm_fwd_as_dgrad reuses the fwd kernel, whose B-loader reduces
+        # over the first channel axis — so W must be pre-transposed to swap the
+        # axes before the kernel sees it. .contiguous() is mandatory: fwd's
+        # vectorized cp.async needs 16-byte-aligned strides and a .transpose()
+        # view does not satisfy that.
+        #
+        # Reuse caller-provided weight_T when groups==1 (its [K, C_out, C_in]
+        # layout matches what fwd_as_dgrad needs after .transpose(-1,-2)). Saves
+        # one 54MB copy per bwd call at C=1024 K=27 fp16.
+        if use_fwd_for_dgrad:
+            if weight_T is not None and groups == 1 and weight_T.dtype == _w.dtype:
+                _w_dgrad = weight_T
+            else:
+                _w_dgrad = _w.transpose(-1, -2).contiguous()
+        else:
+            _w_dgrad = _w.contiguous()
+
+        # Select dgrad tile based on per-group channel dims.
+        # Note: f32out tiles (80, 81, 82) and partial-scalar tiles (71, 72)
+        # are MW=1 only. For mask_words > 1, fall back to tile 70 (scalar
+        # SAB_SE) or aligned tile with MW support; Python upcasts output.
+        vec_width = 16 // _go.element_size()
+        use_f32_out_tile = use_f32_output and mask_words == 1
+        dgrad_out_dtype = torch.float32 if use_f32_out_tile else compute_dtype
+
+        if use_fwd_for_dgrad:
+            # The autotune pool uses canonical dgrad_wt tile_ids 900-911.
+            # The mask_gemm_bindings.cu dgrad arm has a dedicated branch
+            # for this range that routes to LAUNCH_FWD after caller
+            # pre-transposes weight (no Python-side remap).
+            #
+            # When alignment fallbacks force a scalar/f32out tile, we use
+            # the wcn-only fwd tile_ids (70-72, 80, 82) and route through
+            # backend.fwd directly (the caller has pre-transposed weight).
+            dgrad_tile = params.get("tile_id", 900)
+            fwd_cin_aligned = C_out_g % vec_width == 0
+            fwd_cout_aligned = C_in_g % vec_width == 0
+            use_fwd_fallback = False
+            if use_f32_out_tile:
+                dgrad_tile = 80 if (fwd_cin_aligned and fwd_cout_aligned) else 82
+                use_fwd_fallback = True
+            elif not fwd_cin_aligned or not fwd_cout_aligned:
+                if mask_words > 1:
+                    dgrad_tile = 70
+                elif not fwd_cin_aligned and not fwd_cout_aligned:
+                    dgrad_tile = 70
+                elif not fwd_cin_aligned:
+                    dgrad_tile = 71
+                else:
+                    dgrad_tile = 72
+                use_fwd_fallback = True
+            elif mask_words > 1 and dgrad_tile in _MW1_ONLY_DGRAD_WT_TILES:
+                # MW=1-only dgrad_wt aliases (903 = 32x32 F16Acc, 905-911 = pcoff)
+                # cannot dispatch K>32. Skip candidate so autotune moves on;
+                # routing to a different tile would benchmark the wrong kernel
+                # under this algo name.
+                raise RuntimeError(
+                    f"fwd_as_dgrad tile {dgrad_tile} only supports mask_words==1 "
+                    f"(got {mask_words}). Use an MW-capable tile for K>32."
+                )
+
+            backend = _C.mask_gemm
+            # Fwd-fallback path (wcn-only fwd ids) → backend.fwd.
+            # Primary path (canonical dgrad_wt 900-911) → backend.dgrad
+            # (which has the dedicated dgrad_wt arm).
+            dgrad_fn = backend.fwd if use_fwd_fallback else backend.dgrad
+        else:
+            cin_aligned = C_in_g % vec_width == 0
+            cout_aligned = C_out_g % vec_width == 0
+            if not cin_aligned or not cout_aligned:
+                # wcn-only scalar dgrad tiles 70/71/72.
+                if mask_words > 1:
+                    dgrad_tile = 70
+                elif not cin_aligned and not cout_aligned:
+                    dgrad_tile = 70
+                elif not cout_aligned:
+                    dgrad_tile = 71
+                else:
+                    dgrad_tile = 72
+            elif mask_words > 1:
+                # Native dgrad tiles only have MW=1 instantiations in
+                # warpconvnet bindings. Route MW>1 to scalar tile 70
+                # (SAB_SE MW) which supports up to MW=12. For better
+                # perf at MW>1 aligned shapes, prefer the
+                # mask_gemm_fwd_as_dgrad algo in the pool.
+                dgrad_tile = 70
+            elif use_f32_out_tile:
+                dgrad_tile = 81  # wcn-only dgrad f32-out
+            elif params.get("tile_id") in _DGRAD_PCOFF_TILES:
+                # Native dgrad pcoff (bond #23): autotune-driven tile_id
+                # 64-69 wins for E1 hoist on dgrad. MW=1 only, fp16 only.
+                dgrad_tile = params["tile_id"]
+            else:
+                # Canonical dgrad tile selection by per-group channel size.
+                # Migration map (previous wcn ids -> canonical):
+                #   50→12 (32x32)         53→22 (64x64 F16Accum)
+                #   51→0  (64x64 2s)      54→24 (64x128 F16Accum)
+                #   52→1  (64x128 2s)
+                #
+                # F16Accum tiles (22, 24) accumulate the K*C reduction in
+                # fp16 — at C>=64 this 2-3x worse rel_diff vs explicit_gemm
+                # reference degrades MinkUNet ScanNet AMP training
+                # convergence (per-algo grad sweep 2026-05-21). Gate the
+                # F16Acc choice on use_fp16_accum, NOT compute_dtype
+                # (fp16 inputs are normal under AMP and don't imply user
+                # wants fp16 accumulator).
+                C = max(C_in_g, C_out_g)
+                if C <= 48:
+                    dgrad_tile = 12  # ex-50: 32x32
+                elif C <= 96:
+                    dgrad_tile = 22 if use_fp16_accum else 0  # F16Acc / f32
+                else:
+                    dgrad_tile = 24 if use_fp16_accum else 1  # F16Acc / f32
+
+            backend = _C.mask_gemm
+            dgrad_fn = backend.dgrad
+
+        # Single launch handles groups=1 and groups>1 via grid.z
+        C_in_total = C_in_g * groups
+        grad_in = torch.zeros((N_in, C_in_total), dtype=dgrad_out_dtype, device=grad_output.device)
+        status = dgrad_fn(
+            _go,
+            _w_dgrad,
+            grad_in,
+            rev_pt,
+            rev_pm,
+            rev_as,
+            K,
+            dgrad_tile,
+            mask_words,
+            identity_offset_bwd,
+            1.0,
+            groups,
+        )
+        if status != 0:
+            raise RuntimeError(f"mask_gemm dgrad failed: status={status}")
+
+        grad_in = grad_in.to(dtype=orig_dtype)
+
+    if needs_input_grad[1]:
+        backend = _C.mask_gemm
+
+        # Wgrad via mask_gemm wgrad kernel with reduced_mask
+        pair_table, pair_mask, mask_argsort = _get_mask_data(
+            kernel_map, num_out_coords, grad_output.device
+        )
+
+        # Build reduced_mask (cached on kernel_map)
+        if not hasattr(kernel_map, "_reduced_mask") or kernel_map._reduced_mask is None:
+            kernel_map._reduced_mask = backend.build_reduced_mask(
+                pair_mask, mask_argsort, 32, mask_words
+            )
+
+        # Select wgrad tile based on per-group channel dims
+        vec_width = 16 // _in.element_size()
+        if C_in_g % vec_width != 0 or C_out_g % vec_width != 0:
+            wgrad_tile = 73
+        else:
+            wgrad_tile = tile_id
+
+        # Single launch: [K, G, C_in_g, C_out_g] for groups>1, [K, C_in_g, C_out_g] for groups=1
+        if groups == 1:
+            grad_weight = torch.zeros(
+                (K, C_in_g, C_out_g), dtype=torch.float32, device=grad_output.device
+            )
+        else:
+            grad_weight = torch.zeros(
+                (K, groups, C_in_g, C_out_g),
+                dtype=torch.float32,
+                device=grad_output.device,
+            )
+        status = backend.wgrad(
+            _in,
+            _go,
+            grad_weight,
+            pair_table,
+            pair_mask,
+            mask_argsort,
+            kernel_map._reduced_mask,
+            K,
+            wgrad_tile,
+            split_k,
+            1.0,
+            groups,
+        )
+        if status != 0:
+            raise RuntimeError(f"mask_gemm wgrad failed: status={status}")
+        grad_weight = grad_weight.to(dtype=weight.dtype)
+
+    return grad_in, grad_weight

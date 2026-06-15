@@ -308,10 +308,6 @@ _AB_MASK_GEMM_PCOFF_F32ACC = (
     else []
 )
 
-# Back-compat alias for callers that referenced the unified list. New code
-# should use the precision-split variants above.
-_AB_MASK_GEMM_PCOFF = _AB_MASK_GEMM_PCOFF_F32ACC + _AB_MASK_GEMM_PCOFF_F16ACC
-
 _AB_MASK_GEMM_STRIDED_F32ACC = (
     [
         ("mask_gemm", {"tile_id": 300}),  # 64x64 2s pipelined_strided
@@ -371,11 +367,6 @@ _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC = (
     else []
 )
 
-# Back-compat alias.
-_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF = (
-    _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC
-)
-
 _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC = (
     [
         ("mask_gemm_fwd_as_dgrad", {"tile_id": 900}),  # ex-83: 64x64 sa
@@ -395,10 +386,14 @@ _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC = (
     else []
 )
 
+# Full fwd-as-dgrad pool (all accumulator precisions). Not used by the adaptive
+# pool builders (which pick the precision-split lists directly) but referenced
+# by the tile-coverage test suite.
 _AB_MASK_GEMM_FWD_AS_DGRAD = (
     _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC
     + _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC
-    + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF
+    + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC
+    + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC
 )
 
 # Native dgrad pcoff tiles — bond #23. Canonical warpgemm DgradTile ids 64-69
@@ -426,9 +421,6 @@ _AB_MASK_GEMM_DGRAD_PCOFF_F32ACC = (
     if _HAS_MASK_GEMM
     else []
 )
-
-# Back-compat alias.
-_AB_MASK_GEMM_DGRAD_PCOFF = _AB_MASK_GEMM_DGRAD_PCOFF_F32ACC + _AB_MASK_GEMM_DGRAD_PCOFF_F16ACC
 
 # tile_ids match warpgemm canonical mask_gemm_dispatch_table.inc (wgrad op).
 # Migration map: ex-wcn 60→0, 61→4, 62→7, 63→9, 64→1, 65→2, 66→3.
