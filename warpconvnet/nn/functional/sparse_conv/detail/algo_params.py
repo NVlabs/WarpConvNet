@@ -396,7 +396,7 @@ _AB_MASK_GEMM_FWD_AS_DGRAD = (
     + _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC
 )
 
-# Native dgrad pcoff tiles — bond #23. Canonical warpgemm DgradTile ids 64-69
+# Native dgrad pcoff tiles. Canonical warpgemm DgradTile ids 64-69
 # (E1 offset-precompute on dgrad path, no weight transpose pre-op).
 # fp16 only; MW=1 only (kv <= 32). Mirror fwd pcoff family 54-59/63 in DgradTile
 # namespace for the dgrad kernel template specialization.

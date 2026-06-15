@@ -24,7 +24,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
-// CLAUDE.md / CUDA 12.9 + nvcc 12.9: <cute/tensor.hpp> MUST be included before
+// CUDA 12.9 + nvcc 12.9: <cute/tensor.hpp> MUST be included before
 // <cute/algorithm/copy.hpp> (and prefetch.hpp). Reverse order triggers
 // Copy_Atom-undefined parse errors in cooperative_gemm.hpp / prefetch.hpp.
 // clang-format off

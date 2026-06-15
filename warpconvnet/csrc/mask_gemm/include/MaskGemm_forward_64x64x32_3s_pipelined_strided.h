@@ -43,7 +43,7 @@ namespace cute_gemm {
 
 // Strided sparse_conv forward kernel - neighbor_map driven gather.
 // Sister of MaskGemm_forward_64x64x32_3s_pipelined but for N_in != N_out
-// downsample layers. Bond #24 - FlexGEMM strided port.
+// downsample layers. FlexGEMM strided port.
 template <class TileConfig, typename ElementOutput_ = float, int MaskWords_ = 1>
 struct MaskGemm_forward_64x64x32_3s_pipelined_strided {
   static constexpr int MaskWords = MaskWords_;  // unused; kept for ABI symmetry

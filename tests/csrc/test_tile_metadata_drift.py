@@ -15,9 +15,9 @@ Two layers:
   - STRUCTURAL (always runs, reads the checked-in snapshot): pcoff tiles are
     pcoff, 32x32 tiles are 32x32, MW-capable defaults are excluded, and the
     wcn-only fallback tiles are absent from warpgemm metadata.
-  - AUTHORED FIELD (runs once warpgemm emits per-tile ``dispatch_mask_words``,
-    bond #35): the literals must equal {tile : 2 not in dispatch_mask_words}.
-    Skipped until the field ships; flip on by bumping the schema gate.
+  - AUTHORED FIELD (runs once warpgemm emits per-tile ``dispatch_mask_words``):
+    the literals must equal {tile : 2 not in dispatch_mask_words}. Skipped until
+    the field ships; flip on by bumping the schema gate.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def test_mask_words_tiers_match_snapshot_union():
     for op in ("forward", "dgrad", "wgrad"):
         tiles += build_tile_metadata(active_only=True, ops=(op,))
     if not tiles or not hasattr(tiles[0], "dispatch_mask_words"):
-        pytest.skip("dispatch_mask_words not present yet (bond #35 pending)")
+        pytest.skip("dispatch_mask_words not present yet")
     union = set()
     for t in tiles:
         union.update(t.dispatch_mask_words)
@@ -136,7 +136,7 @@ def test_mw4_max_tiles_authorized_at_mw4_not_mw8():
     byid = _forward_by_id()
     sample = next(iter(byid.values()), None)
     if sample is None or not hasattr(sample, "dispatch_mask_words"):
-        pytest.skip("dispatch_mask_words not present yet (bond #35 pending)")
+        pytest.skip("dispatch_mask_words not present yet")
     for tid in _MW4_MAX_FWD_TILES:
         assert tid in byid, f"MW4-max tile {tid} missing from metadata"
         dmw = byid[tid].dispatch_mask_words
@@ -168,10 +168,10 @@ def test_wcn_only_tiles_absent_from_metadata():
     ],
 )
 def test_mw1_authorized_tiles_are_guarded(id_lo, id_hi, authored):
-    """Correctness invariant once warpgemm emits per-tile ``dispatch_mask_words``
-    (bond #35): every tile AUTHORIZED only at MW1 (2 not in dispatch_mask_words)
-    MUST be in the MW1-only guard, else the selector could dispatch it at MW>1
-    and device-assert.
+    """Correctness invariant once warpgemm emits per-tile ``dispatch_mask_words``:
+    every tile AUTHORIZED only at MW1 (2 not in dispatch_mask_words) MUST be in
+    the MW1-only guard, else the selector could dispatch it at MW>1 and
+    device-assert.
 
     This is a SUBSET check, not equality. ``dispatch_mask_words`` is an
     authorization + correctness signal, NOT an availability guarantee: a tile
@@ -185,8 +185,8 @@ def test_mw1_authorized_tiles_are_guarded(id_lo, id_hi, authored):
     sample = next(iter(byid.values()), None)
     if sample is None or not hasattr(sample, "dispatch_mask_words"):
         pytest.skip(
-            "warpgemm tile_metadata has no dispatch_mask_words yet (bond #35 "
-            "pending); structural tests cover the interim."
+            "warpgemm tile_metadata has no dispatch_mask_words yet; structural "
+            "tests cover the interim."
         )
     mw1_authorized = frozenset(
         tid for tid, t in byid.items() if id_lo <= tid <= id_hi and 2 not in t.dispatch_mask_words

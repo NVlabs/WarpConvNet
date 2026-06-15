@@ -10,7 +10,7 @@ namespace gemm {
 // Tile tag types — used as template parameters to select CTA tile shapes.
 // The naming convention is Tile{M}x{N}x{K}.
 //
-// AUTO-GENERATED from warpgemm registry tile_tags. Bond #22 Option 1
+// AUTO-GENERATED from warpgemm registry tile_tags. Registry
 // single-source-of-truth: do NOT edit by hand. Run `python -m
 // warpgemm.codegen` or call `write_mask_to(out_dir)` to regenerate.
 // -----------------------------------------------------------------------------
@@ -36,7 +36,7 @@ struct Tile64x64x32_F16Accum {};
 struct Tile128x64x32_F16Accum {};
 struct Tile64x128x32_F16Accum {};
 
-// --- 128x128 with 8-warp Layout<_4,_2,_1> — bond #22 axis A2 ---
+// --- 128x128 with 8-warp Layout<_4,_2,_1> — 8-warp registry variant ---
 struct Tile128x128x32_8warp {};
 struct Tile128x128x32_8warp_F16Accum {};
 

@@ -546,7 +546,7 @@ INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC
 #undef INST_FWD_64x128_F16ACC_MW
 
 // Tile 28: 32x32 F16Accum 1s_flat (half-only). MW2 (K<=64) / MW4 (K<=128) only;
-// validated by the warpgemm bond #35 sweep (corr 1.0, MW2 K=33..64, MW4
+// validated by the warpgemm dispatch-mask-words validation sweep (corr 1.0, MW2 K=33..64, MW4
 // K=65..128). 32x32 smem is ~5KB at MW4 so the >48K opt-in below is a no-op,
 // kept for parity. Tiles 32/33 use the _direpi structs and are NOT instantiated
 // here (still MW1-only on the Python side); only tile 28 is promoted.

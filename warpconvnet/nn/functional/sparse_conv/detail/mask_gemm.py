@@ -314,8 +314,7 @@ def _get_reverse_mask_data(
 # ---------------------------------------------------------------------------
 # Tile-id catalogs used by tile selection below.
 #
-# SOURCE-OF-TRUTH BOUNDARY — read before editing (settled with the warpgemm
-# codegen owner, bond #35):
+# SOURCE-OF-TRUTH BOUNDARY — read before editing:
 #
 # Whether a tile can be dispatched at MaskWords>1 (K>32) is a fact OWNED BY
 # WARPGEMM's registry, not by this file and not regex-derivable from tile names.
@@ -333,7 +332,7 @@ def _get_reverse_mask_data(
 #      MW1-only here (safe: K>32 falls back to a 64x64 tile). -> {28,32,33} fwd
 #      and {903} dgrad-wt.
 #
-# AUTHORIZATION vs AVAILABILITY (bond #35) — the guard is an AVAILABILITY fact:
+# AUTHORIZATION vs AVAILABILITY — the guard is an AVAILABILITY fact:
 # "this build's DISPATCH_MW macro has no MW>1 kernel for this tile, so do not
 # dispatch it there." warpgemm's forthcoming per-tile ``dispatch_mask_words`` is
 # an AUTHORIZATION ceiling ("validated-correct to instantiate at these MW"), NOT
@@ -358,9 +357,9 @@ def _get_reverse_mask_data(
 _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
 
 # 32x32 forward tiles — split by binding AVAILABILITY (per-(struct,config), not
-# per-shape; bond #35). The warpgemm sweep validated all three at MW2/4, so the
-# field authorizes 28/32/33 = (1,2,4) — but availability follows what this
-# binding instantiates:
+# per-shape). The warpgemm sweep validated all three at MW2/4, so the field
+# authorizes 28/32/33 = (1,2,4) — but availability follows what this binding
+# instantiates:
 #   - tile 28 (1s_flat + Tile32x32x32_F16Accum config) IS instantiated at MW2/4
 #     (mask_gemm_kernels_fwd.cu launch_mask_gemm_fwd_32x32_f16acc_mw), so it is
 #     MW<=4-capable (K<=128); the binding has no 32x32 MW8/12, so K>128 rejects.
@@ -385,7 +384,7 @@ _STRIDED_FWD_TILES = frozenset(range(300, 308))
 # 900/901/902/904 are flat/fused and MW-capable, so correctly excluded.
 _MW1_ONLY_DGRAD_WT_TILES = frozenset({903, 905, 906, 907, 908, 909, 910, 911})
 
-# Native dgrad pcoff tile_ids — bond #23. MW=1 only.
+# Native dgrad pcoff tile_ids. MW=1 only.
 _DGRAD_PCOFF_TILES = frozenset({64, 65, 66, 67, 68, 69})
 
 # wcn-only scalar/f32-out fallback tiles (not in warpgemm metadata). Referenced
@@ -515,7 +514,7 @@ def _select_dgrad_tile(
     elif use_f32_out_tile:
         dgrad_tile = 81  # wcn-only dgrad f32-out
     elif params.get("tile_id") in _DGRAD_PCOFF_TILES:
-        # Native dgrad pcoff (bond #23): autotune-driven tile_id 64-69 wins for
+        # Native dgrad pcoff: autotune-driven tile_id 64-69 wins for
         # E1 hoist on dgrad. MW=1 only, fp16 only.
         dgrad_tile = params["tile_id"]
     else:

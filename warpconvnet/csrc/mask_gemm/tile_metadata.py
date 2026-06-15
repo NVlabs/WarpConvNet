@@ -107,7 +107,7 @@ class TileMetadata:
     # skip tiles that the .so has but the current device can't execute.
     compile_archs: Tuple[int, ...] = (80, 86, 89, 90)
 
-    # --- MW dispatch authorization (v6, bond #35) -----------------------
+    # --- MW dispatch authorization (v6) -----------------------
     # `dispatch_mask_words`: the set of MaskWords values this tile is
     # VALIDATED-CORRECT to be instantiated/dispatched at. This is the
     # AUTHORIZATION axis, distinct from `mask_words` (the single canonical
@@ -1910,7 +1910,7 @@ _TILES: List[TileMetadata] = [
         op="dgrad",
         kernel_struct="MaskGemm_dgrad_64x64x32_1s_flat_pcoff",
         tile_tag="Tile64x64x32_F16Accum",
-        comment="64x64 flat F16Accum pcoff (bond #23 dgrad pcoff)",
+        comment="64x64 flat F16Accum pcoff (native dgrad pcoff)",
         tier="experimental",
         tile_m=64,
         tile_n=64,
@@ -1946,7 +1946,7 @@ _TILES: List[TileMetadata] = [
         op="dgrad",
         kernel_struct="MaskGemm_dgrad_64x64x32_1s_flat_pcoff",
         tile_tag="Tile64x64x32_F16K8",
-        comment="64x64 flat F16K8 pcoff (bond #23 dgrad pcoff)",
+        comment="64x64 flat F16K8 pcoff (native dgrad pcoff)",
         tier="experimental",
         tile_m=64,
         tile_n=64,
@@ -1982,7 +1982,7 @@ _TILES: List[TileMetadata] = [
         op="dgrad",
         kernel_struct="MaskGemm_dgrad_64x128x32_1s_flat_pcoff",
         tile_tag="Tile64x128x32_F16K8",
-        comment="64x128 flat F16K8 pcoff (bond #23 dgrad pcoff, large C)",
+        comment="64x128 flat F16K8 pcoff (native dgrad pcoff, large C)",
         tier="experimental",
         tile_m=64,
         tile_n=128,
@@ -2018,7 +2018,7 @@ _TILES: List[TileMetadata] = [
         op="dgrad",
         kernel_struct="MaskGemm_dgrad_64x128x32_1s_flat_pcoff",
         tile_tag="Tile64x128x32_F16Accum",
-        comment="64x128 flat F16Accum pcoff (bond #23 dgrad pcoff, large C)",
+        comment="64x128 flat F16Accum pcoff (native dgrad pcoff, large C)",
         tier="experimental",
         tile_m=64,
         tile_n=128,
@@ -2054,7 +2054,7 @@ _TILES: List[TileMetadata] = [
         op="dgrad",
         kernel_struct="MaskGemm_dgrad_64x64x32_3s_pcoff",
         tile_tag="Tile64x64x32",
-        comment="64x64 3s pcoff (bond #23 dgrad pcoff, deeper pipeline)",
+        comment="64x64 3s pcoff (native dgrad pcoff, deeper pipeline)",
         tier="experimental",
         tile_m=64,
         tile_n=64,
@@ -2090,7 +2090,7 @@ _TILES: List[TileMetadata] = [
         op="dgrad",
         kernel_struct="MaskGemm_dgrad_64x128x32_3s_pcoff",
         tile_tag="Tile64x128x32",
-        comment="64x128 3s pcoff (bond #23 dgrad pcoff, deeper pipeline + large C)",
+        comment="64x128 3s pcoff (native dgrad pcoff, deeper pipeline + large C)",
         tier="experimental",
         tile_m=64,
         tile_n=128,

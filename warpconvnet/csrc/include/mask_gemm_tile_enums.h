@@ -7,7 +7,7 @@ namespace warpconvnet {
 namespace gemm {
 
 // -----------------------------------------------------------------------------
-// Tile selector enum classes — bond #22 Option 1 SoT.
+// Tile selector enum classes.
 //
 // AUTO-GENERATED from warpgemm registries. Run `python -m warpgemm.codegen`
 // or call `write_mask_to(out_dir)` to regenerate. Do NOT edit by hand.
@@ -19,7 +19,7 @@ namespace gemm {
 //
 // Replaces the legacy hand-maintained ProdFwdTile / ProdDgradTile /
 // ProdWgradTile enums in warpconvnet/csrc/include/gemm_mma_tiles.h
-// (dropped during bond #22 PR #2).
+// (dropped during the registry migration).
 // -----------------------------------------------------------------------------
 
 enum class FwdTile : int {
@@ -121,7 +121,7 @@ enum class FwdTile : int {
 };
 
 enum class DgradTile : int {
-  // Dgrad tile selectors. Members marked '_wt' are dgrad-via-fwd aliases (bond #22 T4).
+  // Dgrad tile selectors. Members marked '_wt' are dgrad-via-fwd aliases.
   _64x64x32_2s = 0,
   _64x128x32_2s = 1,
   _128x64x32_3s = 2,

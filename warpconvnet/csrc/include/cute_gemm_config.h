@@ -20,7 +20,7 @@
 // cute/tensor.hpp must precede cute/atom/* — nvcc 12.9 + CUTLASS 12.9
 // cooperative_gemm.hpp pulls Copy_Atom symbols whose definitions live
 // behind the tensor header. Reverse order produced "Copy_Atom undefined"
-// during wcn build (bond #22 PR #2 surfacing, 2026-05-07). Guarded
+// during wcn build (registry migration, 2026-05-07). Guarded
 // against clang-format SortIncludes which would otherwise alphabetize
 // the block back to the broken order.
 // clang-format off
@@ -186,7 +186,7 @@ using SmemLayoutAtomB_FP32 =
 
 // Tile64x64x32_F32K8 spec dropped 2026-05-07 — peer audit + wcn PR #2
 // build confirmed dead code (no kernel instantiation, no canonical
-// gemm_mma_tiles.h decl). Bond #22 Option 1 cleanup.
+// gemm_mma_tiles.h decl). Registry cleanup.
 
 // k=8 MMA with FULL-WIDTH LDSM — for dgrad where both A and B use K-contiguous
 // smem layout (SmemLayoutAtomA). The standard SmemLayoutAtomA + SM75_U32x4_LDSM_N
@@ -241,7 +241,7 @@ DEFINE_CUTE_TILE_CONFIG_FP16(Tile128x64x32, 128, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16(Tile64x128x32, 64, 128, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16(Tile128x128x32, 128, 128, 32)
 
-// 8-warp Layout<_4,_2,_1> variant — bond #22 axis A2.
+// 8-warp Layout<_4,_2,_1> registry variant.
 template <>
 struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32_8warp> {
   using ElementInput = cutlass::half_t;
@@ -266,7 +266,7 @@ DEFINE_CUTE_TILE_CONFIG_BF16(Tile128x64x32, 128, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_BF16(Tile64x128x32, 64, 128, 32)
 DEFINE_CUTE_TILE_CONFIG_BF16(Tile128x128x32, 128, 128, 32)
 
-// 8-warp BF16 variant — bond #22 axis A2.
+// 8-warp BF16 registry variant.
 template <>
 struct CuteTileConfig<cutlass::bfloat16_t, gemm::Tile128x128x32_8warp> {
   using ElementInput = cutlass::bfloat16_t;
@@ -341,7 +341,7 @@ DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x64x32, 64, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile128x64x32, 128, 64, 32)
 DEFINE_CUTE_TILE_CONFIG_FP16_ACCUM(Tile64x128x32, 64, 128, 32)
 
-// 8-warp F16Acc variant — bond #22 axis A2.
+// 8-warp F16Acc registry variant.
 template <>
 struct CuteTileConfig<cutlass::half_t, gemm::Tile128x128x32_8warp_F16Accum> {
   using ElementInput = cutlass::half_t;

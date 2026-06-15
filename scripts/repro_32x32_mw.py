@@ -3,10 +3,10 @@
 
 """Validate tile 28 (32x32 F16Accum) at K>32 (MW2/MW4) vs explicit_gemm.
 
-Covers the K in [65,96] tier-vs-ceil band (K=80 -> ceil 3, dispatched MW4) that
-bond #35 flagged as a reference-stride trap. Our explicit reference uses the
-kernel_map directly (no pair_mask), so the stride mismatch does not apply, but we
-test K=80 explicitly to be sure.
+Covers the K in [65,96] tier-vs-ceil band (K=80 -> ceil 3, dispatched MW4).
+That band is a reference-stride trap: our explicit reference uses the kernel_map
+directly (no pair_mask), so the stride mismatch does not apply, but we test K=80
+explicitly to be sure.
 """
 
 import torch

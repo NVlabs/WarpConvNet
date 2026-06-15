@@ -19,7 +19,7 @@
 #include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sa.h"
 #include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sab_se.h"
 #include "mask_gemm/include/MaskGemm_dgrad_64x64x32_1s_flat_sb_se.h"
-// Dgrad pcoff (E1 offset-precompute) variants — bond #23 native dgrad pcoff.
+// Dgrad pcoff (E1 offset-precompute) variants — native dgrad pcoff.
 #include "include/wcn_pcoff_tiles.h"
 #include "mask_gemm/include/MaskGemm_dgrad_64x128x32_1s_flat_pcoff.h"
 #include "mask_gemm/include/MaskGemm_dgrad_64x128x32_3s_pcoff.h"
@@ -69,7 +69,7 @@ WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x128x32_1s_flat_direpi,
                            Tile64x128x32,
                            cutlass::bfloat16_t)
 
-// Dgrad pcoff (E1 offset-precompute) variants — bond #23 native dgrad pcoff.
+// Dgrad pcoff (E1 offset-precompute) variants — native dgrad pcoff.
 // fp16 only; bf16 not registered in warpgemm DGRAD_TILES 64-69.
 WCN_PROD_INSTANTIATE_DGRAD(MaskGemm_dgrad_64x64x32_1s_flat_pcoff,  // tile 64 F16Accum
                            cutlass::half_t,
