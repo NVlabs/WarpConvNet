@@ -756,9 +756,3 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ctx.config_params_for_bwd = None
 
         return _pad_tuple(grad_in_features, grad_weight, 14)
-
-
-# Algorithm execution dispatch moved to dispatch.py
-# _execute_forward and _execute_backward are imported from there.
-# This comment replaces ~300 lines of dispatch code that was extracted.
-_DISPATCH_MOVED = True  # sentinel to confirm extraction

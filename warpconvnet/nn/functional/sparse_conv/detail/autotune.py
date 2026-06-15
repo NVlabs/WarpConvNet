@@ -21,56 +21,16 @@ from warpconvnet.utils.benchmark_cache import (
 from warpconvnet.utils.timer import CUDATimer
 from warpconvnet.utils.logger import get_logger
 
-from .explicit import (
-    _explicit_gemm_forward_logic,
-    _explicit_gemm_backward_logic,
-    _explicit_gemm_forward_grouped,
-    _explicit_gemm_backward_grouped,
-)
-from .implicit_direct import (
-    _implicit_gemm_forward_logic,
-    _implicit_gemm_backward_logic,
-    _implicit_gemm_forward_grouped,
-    _implicit_gemm_backward_grouped,
-)
-from .cutlass import (
-    _cutlass_implicit_gemm_forward_logic,
-    _cutlass_implicit_gemm_backward_logic,
-    _cutlass_implicit_gemm_forward_grouped,
-    _cutlass_implicit_gemm_backward_grouped,
-)
 from .algo_params import (
-    _HAS_CUTE_BACKEND,
-    _HAS_CUTE_GROUPED,
-    _HAS_CUTE_SM90,
-    _HAS_CUTE_GROUPED_SM90,
     _get_filtered_AB_params,
     _get_filtered_AtB_params,
 )
-
-if _HAS_CUTE_BACKEND:
-    from .cute import (
-        _cute_implicit_gemm_forward_logic,
-        _cute_implicit_gemm_backward_logic,
-    )
-
-if _HAS_CUTE_GROUPED:
-    from .cute_grouped import (
-        _cute_grouped_forward_logic,
-        _cute_grouped_backward_logic,
-    )
-
-if _HAS_CUTE_SM90:
-    from .cute_sm90 import (
-        _cute_implicit_gemm_sm90_forward_logic,
-        _cute_implicit_gemm_sm90_backward_logic,
-    )
-
-if _HAS_CUTE_GROUPED_SM90:
-    from .cute_grouped_sm90 import (
-        _cute_grouped_sm90_forward_logic,
-        _cute_grouped_sm90_backward_logic,
-    )
+from .backends import (
+    BwdCtx,
+    FwdCtx,
+    benchmark_backward,
+    benchmark_forward,
+)
 
 logger = get_logger(__name__)
 
@@ -314,139 +274,27 @@ def _run_forward_benchmarks(
     timer = CUDATimer()
 
     def _execute_single_fwd_pass(algo_mode: str, params_config: Dict[str, Any]) -> Optional[int]:
-        if algo_mode == "explicit_gemm":
-            _ = _explicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-            )
-        elif algo_mode == "implicit_gemm":
-            _ = _implicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                **params_config,
-            )
-        elif algo_mode == "cutlass_implicit_gemm":
-            status = _cutlass_implicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                accumulator_type=params_config.get("accumulator_type", torch.float32),
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "explicit_gemm_grouped":
-            _ = _explicit_gemm_forward_grouped(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                saturation_m=params_config.get("saturation_m", 5000),
-            )
-        elif algo_mode == "implicit_gemm_grouped":
-            _ = _implicit_gemm_forward_grouped(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                fwd_block_size=params_config.get("fwd_block_size", 16),
-                saturation_m=params_config.get("saturation_m", 5000),
-            )
-        elif algo_mode == "cute_implicit_gemm":
-            if not _HAS_CUTE_BACKEND:
-                return -1
-            status = _cute_implicit_gemm_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "cutlass_grouped_hybrid":
-            status = _cutlass_implicit_gemm_forward_grouped(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                accumulator_type=params_config.get("accumulator_type", torch.float32),
-                saturation_m=params_config.get("saturation_m", 5000),
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "cute_grouped":
-            if not _HAS_CUTE_GROUPED:
-                return -1
-            status = _cute_grouped_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                mma_tile=params_config.get("mma_tile", 3),
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "cute_implicit_gemm_sm90":
-            if not _HAS_CUTE_SM90:
-                return -1
-            status = _cute_implicit_gemm_sm90_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                backend=params_config["backend"],
-                tile_id=params_config["tile_id"],
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "cute_grouped_sm90":
-            if not _HAS_CUTE_GROUPED_SM90:
-                return -1
-            status = _cute_grouped_sm90_forward_logic(
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                backend=params_config["backend"],
-                tile_id=params_config["tile_id"],
-                use_cp_async=params_config.get("use_cp_async", True),
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "mask_gemm":
-            from .dispatch import _execute_forward
-
-            result = _execute_forward(
-                algo_mode,
-                params_config,
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                None,  # fwd_block_size
-                groups=groups,
-            )
-        else:
-            raise ValueError(f"Unsupported algo_mode in _execute_single_fwd_pass: {algo_mode}")
+        # Route through the shared registry so the benchmarked kernel is exactly
+        # the one dispatch.py executes. Unavailable/unknown backends raise here
+        # and are skipped by the surrounding try/except (same as returning a
+        # non-zero status).
+        ctx = FwdCtx(
+            in_features=in_features,
+            weight=weight,
+            kernel_map=kernel_map,
+            num_out_coords=num_out_coords,
+            compute_dtype=compute_dtype,
+            params=params_config,
+            fwd_block_size=None,
+            groups=groups,
+        )
+        return benchmark_forward(algo_mode, ctx)
 
     params_to_use = custom_params if custom_params is not None else _get_filtered_AB_params()
     # Filter out IMPLICIT_GEMM when dtype is float64 (unsupported by kernels)
     dtype_to_check = compute_dtype if compute_dtype is not None else in_features.dtype
     if dtype_to_check == torch.float64:
         params_to_use = [(algo, cfg) for (algo, cfg) in params_to_use if algo != "implicit_gemm"]
-
-    # kernels auto-pad unaligned channels internally (see cutlass.py, mask_gemm.py).
-    if False:
-        params_to_use = []
 
     global _AUTOTUNE_BANNER_SHOWN
     num_candidates = len(params_to_use)
@@ -579,150 +427,22 @@ def _run_backward_benchmarks(
     timer = CUDATimer()
 
     def _execute_single_bwd_pass(algo_mode: str, params_config: Dict[str, Any]) -> Optional[int]:
-        status = None
-
-        if algo_mode == "explicit_gemm":
-            _, _ = _explicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                compute_dtype,
-                device,
-            )
-        elif algo_mode == "implicit_gemm":
-            _, _ = _implicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                params_config.get("gemm_block_size", 16),
-                params_config.get("split_k_threads_per_block", 128),
-                params_config.get("split_k_factor", 4),
-                compute_dtype,
-            )
-        elif algo_mode == "cutlass_implicit_gemm":
-            status, _ = _cutlass_implicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                accumulator_type=params_config.get("accumulator_type", torch.float32),
-                device=device,
-            )
-            if isinstance(status, int) and status != 0:
-                return status
-        elif algo_mode == "cute_implicit_gemm":
-            if not _HAS_CUTE_BACKEND:
-                return -1
-            result = _cute_implicit_gemm_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                device=device,
-            )
-            if isinstance(result[0], int) and result[0] != 0:
-                return result[0]
-        elif algo_mode == "explicit_gemm_grouped":
-            _, _ = _explicit_gemm_backward_grouped(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                compute_dtype,
-                device,
-                saturation_m=params_config.get("saturation_m", 5000),
-            )
-        elif algo_mode == "implicit_gemm_grouped":
-            _, _ = _implicit_gemm_backward_grouped(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                gemm_block_size=params_config.get("gemm_block_size", 16),
-                split_k_threads_per_block=params_config.get("split_k_threads_per_block", 256),
-                split_k_factor=params_config.get("split_k_factor", 4),
-                compute_dtype=compute_dtype,
-                saturation_m=params_config.get("saturation_m", 5000),
-            )
-        elif algo_mode == "cutlass_grouped_hybrid":
-            result = _cutlass_implicit_gemm_backward_grouped(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                accumulator_type=params_config.get("accumulator_type", torch.float32),
-                device=device,
-                saturation_m=params_config.get("saturation_m", 5000),
-            )
-            if isinstance(result[0], int) and result[0] != 0:
-                return result[0]
-        elif algo_mode == "cute_grouped":
-            if not _HAS_CUTE_GROUPED:
-                return -1
-            result = _cute_grouped_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                requires_grad=needs_input_grad,
-                device=device,
-                mma_tile=params_config.get("mma_tile", 3),
-                splits=params_config.get("splits", 1),
-            )
-            if isinstance(result[0], int) and result[0] != 0:
-                return result[0]
-        elif algo_mode == "cute_implicit_gemm_sm90":
-            if not _HAS_CUTE_SM90:
-                return -1
-            result = _cute_implicit_gemm_sm90_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                device=device,
-                backend=params_config["backend"],
-                tile_id=params_config["tile_id"],
-            )
-            if isinstance(result[0], int) and result[0] != 0:
-                return result[0]
-        elif algo_mode == "cute_grouped_sm90":
-            if not _HAS_CUTE_GROUPED_SM90:
-                return -1
-            result = _cute_grouped_sm90_backward_logic(
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                requires_grad=needs_input_grad,
-                device=device,
-                backend=params_config["backend"],
-                tile_id=params_config["tile_id"],
-                use_cp_async=params_config.get("use_cp_async", True),
-            )
-            if isinstance(result[0], int) and result[0] != 0:
-                return result[0]
-        elif algo_mode in ("mask_gemm", "mask_gemm_fwd_as_dgrad"):
-            from .dispatch import _execute_backward
-
-            _ = _execute_backward(
-                algo_mode,
-                params_config,
-                grad_output,
-                in_features,
-                weight,
-                kernel_map,
-                num_out_coords,
-                compute_dtype,
-                device,
-                needs_input_grad=needs_input_grad,
-                groups=groups,
-            )
-        else:
-            raise ValueError(f"Unsupported algo_mode in _execute_single_bwd_pass: {algo_mode}")
+        # Route through the shared registry so the benchmarked kernel is exactly
+        # the one dispatch.py executes. weight_T is None here (autotune does not
+        # pre-transpose); the mask/cute_grouped backends recompute it as needed.
+        ctx = BwdCtx(
+            grad_output=grad_output,
+            in_features=in_features,
+            weight=weight,
+            kernel_map=kernel_map,
+            num_out_coords=num_out_coords,
+            compute_dtype=compute_dtype,
+            device=device,
+            needs_input_grad=needs_input_grad,
+            params=params_config,
+            groups=groups,
+        )
+        return benchmark_backward(algo_mode, ctx)
 
     params_to_use = custom_params if custom_params is not None else _get_filtered_AtB_params()
     # Filter out IMPLICIT_GEMM when dtype is float64 (unsupported by kernels)
