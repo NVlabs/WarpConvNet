@@ -9,12 +9,14 @@ vector PDF/SVG with embedded fonts.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-# Wire in the figura skill scripts.
-SKILL_SCRIPTS = Path("/home/cchoy/.claude/plugins/cache/figura/figura/0.4.0/skills/figura/scripts")
-sys.path.insert(0, str(SKILL_SCRIPTS))
+# Optionally wire in local figura helper scripts when they are not importable.
+FIGURA_SCRIPTS = os.environ.get("FIGURA_SCRIPTS")
+if FIGURA_SCRIPTS:
+    sys.path.insert(0, FIGURA_SCRIPTS)
 
 import matplotlib  # noqa: E402
 
