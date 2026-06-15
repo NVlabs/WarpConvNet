@@ -40,7 +40,7 @@ OFFSET_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "offset_gemm"
 MASK_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "mask_gemm"
 MASK_GEMM_INCLUDE_DIR = MASK_GEMM_DIR / "include"
 SUPPORTED_OFFSET_GEMM_SCHEMA_MAJOR = 3
-SUPPORTED_TILE_METADATA_SCHEMA = 5
+SUPPORTED_TILE_METADATA_SCHEMA = 6
 
 # warpgemm.codegen.write_mask_to() emits these 4 canonical files alongside the
 # named kernels (intentional, long-standing). setup.py _generate_warpgemm_codegen()
