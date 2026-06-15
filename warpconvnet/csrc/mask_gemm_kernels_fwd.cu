@@ -545,6 +545,65 @@ INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC
     INST_FWD_64x128_F16ACC_MW(12)
 #undef INST_FWD_64x128_F16ACC_MW
 
+// Tile 28: 32x32 F16Accum 1s_flat (half-only). MW2 (K<=64) / MW4 (K<=128) only;
+// validated by the warpgemm bond #35 sweep (corr 1.0, MW2 K=33..64, MW4
+// K=65..128). 32x32 smem is ~5KB at MW4 so the >48K opt-in below is a no-op,
+// kept for parity. Tiles 32/33 use the _direpi structs and are NOT instantiated
+// here (still MW1-only on the Python side); only tile 28 is promoted.
+#define INST_FWD_32x32_F16ACC_MW(MW)                                                          \
+  template <>                                                                                 \
+  int launch_mask_gemm_fwd_32x32_f16acc_mw<MW>(const void *a,                                 \
+                                               const void *b,                                 \
+                                               void *d,                                       \
+                                               const int *pt,                                 \
+                                               const uint32_t *pm,                            \
+                                               const int *ms,                                 \
+                                               int N_in,                                      \
+                                               int N_out,                                     \
+                                               int C_in,                                      \
+                                               int C_out,                                     \
+                                               int K,                                         \
+                                               float alpha,                                   \
+                                               int groups,                                    \
+                                               int identity_offset,                           \
+                                               cudaStream_t stream) {                         \
+    using ElemIn = cutlass::half_t;                                                           \
+    using Config = CuteTileConfig<ElemIn, gemm::Tile32x32x32_F16Accum>;                       \
+    using Kernel = MaskGemm_forward_32x32x32_1s_flat<Config, ElemIn, MW>;                     \
+    constexpr int TileM = cute::size<0>(typename Config::TileShape{});                        \
+    constexpr int TileN = cute::size<1>(typename Config::TileShape{});                        \
+    if (N_out == 0 || C_in == 0 || C_out == 0) return 0;                                      \
+    int m_tiles = (N_out + TileM - 1) / TileM;                                                \
+    int n_tiles = (C_out + TileN - 1) / TileN;                                                \
+    dim3 grid(m_tiles *n_tiles, 1, groups);                                                   \
+    size_t smem = Kernel::SharedStorageSize;                                                  \
+    if (smem > 48 * 1024) {                                                                   \
+      auto err = cudaFuncSetAttribute(                                                        \
+          mask_gemm_kernel_entry<Kernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
+      if (err != cudaSuccess) return -1;                                                      \
+    }                                                                                         \
+    mask_gemm_kernel_entry<Kernel>                                                            \
+        <<<grid, Kernel::MaxThreadsPerBlock, smem, stream>>>((const ElemIn *)a,               \
+                                                             (const ElemIn *)b,               \
+                                                             (ElemIn *)d,                     \
+                                                             pt,                              \
+                                                             pm,                              \
+                                                             ms,                              \
+                                                             N_in,                            \
+                                                             N_out,                           \
+                                                             C_in,                            \
+                                                             C_out,                           \
+                                                             K,                               \
+                                                             alpha,                           \
+                                                             C_in * groups,                   \
+                                                             C_out * groups,                  \
+                                                             identity_offset);                \
+    return 0;                                                                                 \
+  }
+
+        INST_FWD_32x32_F16ACC_MW(2) INST_FWD_32x32_F16ACC_MW(4)
+#undef INST_FWD_32x32_F16ACC_MW
+
 // Tile 43: 64x128 3-stage (half + bfloat16)
 #define INST_FWD_64x128_3S_MW(ElemIn, MW)                                                     \
   template <>                                                                                 \
@@ -596,12 +655,12 @@ INST_FWD_64x128_F16ACC_MW(2) INST_FWD_64x128_F16ACC_MW(4) INST_FWD_64x128_F16ACC
     return 0;                                                                                 \
   }
 
-        INST_FWD_64x128_3S_MW(cutlass::half_t, 2) INST_FWD_64x128_3S_MW(cutlass::half_t, 4)
-            INST_FWD_64x128_3S_MW(cutlass::half_t, 8) INST_FWD_64x128_3S_MW(cutlass::half_t, 12)
-                INST_FWD_64x128_3S_MW(cutlass::bfloat16_t,
-                                      2) INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 4)
-                    INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 8)
-                        INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 12)
+            INST_FWD_64x128_3S_MW(cutlass::half_t, 2) INST_FWD_64x128_3S_MW(cutlass::half_t, 4)
+                INST_FWD_64x128_3S_MW(cutlass::half_t, 8) INST_FWD_64x128_3S_MW(cutlass::half_t, 12)
+                    INST_FWD_64x128_3S_MW(cutlass::bfloat16_t,
+                                          2) INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 4)
+                        INST_FWD_64x128_3S_MW(cutlass::bfloat16_t,
+                                              8) INST_FWD_64x128_3S_MW(cutlass::bfloat16_t, 12)
 #undef INST_FWD_64x128_3S_MW
 
 // Tile 44: 128x64 fused (half + bfloat16)

@@ -33,6 +33,7 @@ from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import (
     _32X32_FWD_TILES,
     _MW1_ONLY_DGRAD_WT_TILES,
     _MW1_ONLY_FWD_TILES,
+    _MW4_MAX_FWD_TILES,
     _PCOFF_FWD_TILES,
     _WCN_ONLY_FWD_TILES,
 )
@@ -96,6 +97,33 @@ def test_dgrad_wt_mw1_only_split():
         assert "pcoff" in t.kernel_struct or (
             t.tile_m == 32 and t.tile_n == 32
         ), f"dgrad_wt alias {tid} is neither pcoff nor 32x32 yet flagged MW1-only"
+
+
+def test_mw4_max_guard_disjoint_from_mw1_only():
+    """A tile is either MW1-only or MW4-capped, never both."""
+    assert not (_MW4_MAX_FWD_TILES & _MW1_ONLY_FWD_TILES), (
+        f"tiles in both MW4-max and MW1-only guards: "
+        f"{sorted(_MW4_MAX_FWD_TILES & _MW1_ONLY_FWD_TILES)}"
+    )
+
+
+def test_mw4_max_tiles_authorized_at_mw4_not_mw8():
+    """The MW4-capped tiles (32x32 tile 28) must be authorized at MW4 but NOT at
+    MW8 in the field — i.e. promoting them to MW2/4 is field-backed, and the MW4
+    cap (reject K>128) matches that there is no MW8 authorization. Skipped until
+    dispatch_mask_words ships."""
+    byid = _forward_by_id()
+    sample = next(iter(byid.values()), None)
+    if sample is None or not hasattr(sample, "dispatch_mask_words"):
+        pytest.skip("dispatch_mask_words not present yet (bond #35 pending)")
+    for tid in _MW4_MAX_FWD_TILES:
+        assert tid in byid, f"MW4-max tile {tid} missing from metadata"
+        dmw = byid[tid].dispatch_mask_words
+        assert 4 in dmw, f"tile {tid} promoted to MW4 but field {dmw} lacks 4"
+        assert 8 not in dmw, (
+            f"tile {tid} field {dmw} authorizes MW8 — the MW4 cap is now too "
+            "conservative; instantiate MW8 and relax _MW4_MAX_FWD_TILES."
+        )
 
 
 def test_wcn_only_tiles_absent_from_metadata():

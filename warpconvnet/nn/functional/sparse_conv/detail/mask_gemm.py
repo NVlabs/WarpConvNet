@@ -84,26 +84,37 @@ def _build_pair_table(
     return pair_table
 
 
+# DISPATCH_MW template boundaries that mask_gemm_bindings.cu instantiates. This
+# mirrors the binding's DISPATCH_MW macro (a warpconvnet-side .cu decision, the
+# SoT for which MW templates this build actually has) and matches warpgemm's
+# MASK_WORDS_TIERS / round_mask_words_to_tier(K) contract. tests/csrc/
+# test_tile_metadata_drift.py asserts it stays the union of the snapshot's
+# dispatch_mask_words so a warpgemm tier extension cannot drift silently.
+_MASK_WORDS_TIERS = (1, 2, 4, 8, 12)
+
+
 def _dispatched_mask_words(K: int) -> int:
     """Round mask_words up to the next DISPATCH_MW template boundary.
 
-    mask_gemm_bindings.cu's DISPATCH_MW macro picks templates at MW=1, 2,
-    4, 8, 12. Kernel templates use their compile-time MW as the stride
-    when indexing ``pair_mask[row * MW + word]``. If the caller allocates
-    pair_mask with a smaller stride than the dispatched MW, the kernel
-    reads past the allocation (or into the wrong row) → illegal address
-    and silent-wrong output.
+    mask_gemm_bindings.cu's DISPATCH_MW macro picks templates at MW=1, 2, 4, 8,
+    12 (``_MASK_WORDS_TIERS``). Kernel templates use their compile-time MW as the
+    stride when indexing ``pair_mask[row * MW + word]``; allocating pair_mask with
+    a smaller stride than the dispatched MW reads past the allocation → illegal
+    address / silent-wrong output.
 
-    The set is intentionally hardcoded here: it mirrors DISPATCH_MW in the
-    binding, which is a warpconvnet-side decision independent of per-tile
-    warpgemm metadata. Warpgemm's TileMetadata.mask_words reports a tile's
-    canonical compiled MW, not the macro-level dispatch ladder.
+    Raises for K > 384 (mask_words > 12): the binding has no MW>12 kernel, so
+    such configs must route to a non-mask backend. Mirrors warpgemm
+    round_mask_words_to_tier, which raises past its top tier; autotune skips the
+    mask candidate and execution falls back to explicit_gemm.
     """
     mw_rt = (K + 31) // 32
-    for mw in (1, 2, 4, 8, 12):
+    for mw in _MASK_WORDS_TIERS:
         if mw_rt <= mw:
             return mw
-    return mw_rt  # K > 384: template doesn't cover this, caller must reject
+    raise ValueError(
+        f"K={K} needs mask_words={mw_rt} > {_MASK_WORDS_TIERS[-1]}; mask_gemm has "
+        "no MW>12 kernel (max kernel_volume 384). Route K>384 to explicit_gemm."
+    )
 
 
 def _build_mask_and_argsort(
@@ -346,13 +357,25 @@ def _get_reverse_mask_data(
 # Pcoff forward tile IDs — structural MW1-only (prescan smem ceiling).
 _PCOFF_FWD_TILES = frozenset({54, 55, 56, 57, 58, 59, 63})
 
-# 32x32 forward tiles — instantiation-gap MW1-only (no 32x32 MW>1 tile exists).
-# 28 is the canonical 32x32 F16Accum (ex-wcn 40); 32/33 are 32x32 flat/direpi
-# in no candidate pool (included for internal consistency + future safety).
-_32X32_FWD_TILES = frozenset({28, 32, 33})
+# 32x32 forward tiles — split by binding AVAILABILITY (per-(struct,config), not
+# per-shape; bond #35). The warpgemm sweep validated all three at MW2/4, so the
+# field authorizes 28/32/33 = (1,2,4) — but availability follows what this
+# binding instantiates:
+#   - tile 28 (1s_flat + Tile32x32x32_F16Accum config) IS instantiated at MW2/4
+#     (mask_gemm_kernels_fwd.cu launch_mask_gemm_fwd_32x32_f16acc_mw), so it is
+#     MW<=4-capable (K<=128); the binding has no 32x32 MW8/12, so K>128 rejects.
+#   - tiles 32/33 (1s_flat_direpi structs) are NOT instantiated at MW>1, so they
+#     stay MW1-only. (They are in no candidate pool, so this is moot in practice,
+#     but the guard must track availability per struct, not tile shape.)
+_32X32_MW4_FWD_TILES = frozenset({28})  # instantiated MW1/2/4 (K<=128)
+_32X32_MW1_FWD_TILES = frozenset({32, 33})  # _direpi structs, MW1 only
+_32X32_FWD_TILES = _32X32_MW4_FWD_TILES | _32X32_MW1_FWD_TILES  # all 32x32 (tests)
 
-# Forward tiles that must not be dispatched at MW>1.
-_MW1_ONLY_FWD_TILES = _32X32_FWD_TILES | _PCOFF_FWD_TILES
+# Forward tiles that must not be dispatched at MW>1 (pcoff + 32x32 _direpi).
+_MW1_ONLY_FWD_TILES = _32X32_MW1_FWD_TILES | _PCOFF_FWD_TILES
+
+# Forward tiles capped at MW4: 32x32 tile 28 (no MW8/12 launcher → reject K>128).
+_MW4_MAX_FWD_TILES = _32X32_MW4_FWD_TILES
 
 # wcn-only strided forward tiles (not in warpgemm metadata).
 _STRIDED_FWD_TILES = frozenset(range(300, 308))
@@ -410,6 +433,11 @@ def _select_fwd_tile(
         raise RuntimeError(
             f"Tile {tile_id} only supports mask_words==1 (got {mask_words}). "
             "Use a tile with MW>1 instantiation for K>32."
+        )
+    if mask_words > 4 and tile_id in _MW4_MAX_FWD_TILES:
+        raise RuntimeError(
+            f"Tile {tile_id} (32x32) only supports mask_words<=4 (K<=128), got "
+            f"{mask_words}. No 32x32 MW8/12 kernel; use a 64x64+ tile for K>128."
         )
     return tile_id, use_f32_out_tile
 
