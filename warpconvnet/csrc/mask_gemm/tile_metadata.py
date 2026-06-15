@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Tuple
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # 128 bits / 16 bits per fp16 element. Translates scalar_a/b/epi
 # flags into concrete channel-alignment requirements.
@@ -107,6 +107,18 @@ class TileMetadata:
     # skip tiles that the .so has but the current device can't execute.
     compile_archs: Tuple[int, ...] = (80, 86, 89, 90)
 
+    # --- MW dispatch authorization (v6, bond #35) -----------------------
+    # `dispatch_mask_words`: the set of MaskWords values this tile is
+    # VALIDATED-CORRECT to be instantiated/dispatched at. This is the
+    # AUTHORIZATION axis, distinct from `mask_words` (the single canonical
+    # compiled MW of this tile_id). A consumer that re-instantiates one
+    # kernel_struct across multiple MW (warpconvnet's DISPATCH_MW) reads this
+    # to know which MW are safe — it does NOT assert a binary exists in any
+    # particular .so. flat/fused → (1,2,4,8,12); pcoff → (1,) (smem ceiling);
+    # wgrad → (1,) (no MaskWords template param). See
+    # `dispatch_mask_words_for` in codegen/registry.py for the rule.
+    dispatch_mask_words: Tuple[int, ...] = (1,)
+
     # --- Query helpers --------------------------------------------------
 
     def supports_arch(self, arch_code: int) -> bool:
@@ -128,8 +140,23 @@ class TileMetadata:
         A kernel with ``MaskWords=1`` dispatched with a pair_mask sized for
         ``mw=4`` will silently drop offsets k>=32 — the MinkUNet regression
         from 2026-04-17.
+
+        NOTE: this checks the canonical compiled MW of *this* tile_id. For
+        consumers that re-instantiate a kernel_struct across MW values, use
+        ``supports_dispatch_mask_words`` (the authorization axis) instead.
         """
         return self.mask_words >= mw
+
+    def supports_dispatch_mask_words(self, mw: int) -> bool:
+        """True if this tile is VALIDATED-correct to be dispatched at ``mw``.
+
+        Authorization, not availability — see the ``dispatch_mask_words``
+        field docstring. A consumer's MW1-only guard derives from this:
+        ``{m.tile_id for m in build_tile_metadata() if not
+        m.supports_dispatch_mask_words(2)}`` is the set of tiles that may
+        only ever be dispatched at MaskWords=1.
+        """
+        return mw in self.dispatch_mask_words
 
     def handles_c_in(self, c_in: int, groups: int = 1) -> bool:
         """True if the binding accepts this (C_in, groups) combination.
@@ -364,6 +391,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=1,
@@ -399,6 +427,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=2,
@@ -434,6 +463,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=3,
@@ -469,6 +499,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=4,
@@ -504,6 +535,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=5,
@@ -539,6 +571,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=6,
@@ -574,6 +607,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=7,
@@ -609,6 +643,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=8,
@@ -644,6 +679,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=9,
@@ -679,6 +715,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=10,
@@ -714,6 +751,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=11,
@@ -749,6 +787,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=12,
@@ -784,6 +823,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=13,
@@ -819,6 +859,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=14,
@@ -854,6 +895,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=15,
@@ -889,6 +931,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=16,
@@ -924,6 +967,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=17,
@@ -959,6 +1003,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=18,
@@ -994,6 +1039,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=19,
@@ -1029,6 +1075,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=20,
@@ -1064,6 +1111,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=21,
@@ -1099,6 +1147,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=22,
@@ -1134,6 +1183,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=23,
@@ -1169,6 +1219,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=24,
@@ -1204,6 +1255,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=25,
@@ -1239,6 +1291,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=26,
@@ -1274,6 +1327,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=27,
@@ -1309,6 +1363,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=28,
@@ -1344,6 +1399,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=2,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=29,
@@ -1379,6 +1435,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=4,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=30,
@@ -1414,6 +1471,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=31,
@@ -1449,6 +1507,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=32,
@@ -1484,6 +1543,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=40,
@@ -1519,6 +1579,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=41,
@@ -1554,6 +1615,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=42,
@@ -1589,6 +1651,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=50,
@@ -1624,6 +1687,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=51,
@@ -1659,6 +1723,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=52,
@@ -1694,6 +1759,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=53,
@@ -1729,6 +1795,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=60,
@@ -1764,6 +1831,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=61,
@@ -1799,6 +1867,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=62,
@@ -1834,6 +1903,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=64,
@@ -1869,6 +1939,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=65,
@@ -1904,6 +1975,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=66,
@@ -1939,6 +2011,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=67,
@@ -1974,6 +2047,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=68,
@@ -2009,6 +2083,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=69,
@@ -2044,6 +2119,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=0,
@@ -2079,6 +2155,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=1,
@@ -2114,6 +2191,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=2,
@@ -2149,6 +2227,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=3,
@@ -2184,6 +2263,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=4,
@@ -2219,6 +2299,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=5,
@@ -2254,6 +2335,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=6,
@@ -2289,6 +2371,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=7,
@@ -2324,6 +2407,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=8,
@@ -2359,6 +2443,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=9,
@@ -2394,6 +2479,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=10,
@@ -2429,6 +2515,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80,),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=11,
@@ -2464,6 +2551,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=12,
@@ -2499,6 +2587,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=13,
@@ -2534,6 +2623,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=14,
@@ -2569,6 +2659,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=15,
@@ -2604,6 +2695,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=16,
@@ -2639,6 +2731,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=17,
@@ -2674,6 +2767,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=18,
@@ -2709,6 +2803,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=19,
@@ -2744,6 +2839,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=20,
@@ -2779,6 +2875,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=21,
@@ -2814,6 +2911,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=22,
@@ -2849,6 +2947,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80,),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=23,
@@ -2884,6 +2983,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=24,
@@ -2919,6 +3019,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80,),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=25,
@@ -2954,6 +3055,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=26,
@@ -2989,6 +3091,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=27,
@@ -3024,6 +3127,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=28,
@@ -3059,6 +3163,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=32,
@@ -3094,6 +3199,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=33,
@@ -3129,6 +3235,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=34,
@@ -3164,6 +3271,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=35,
@@ -3199,6 +3307,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=36,
@@ -3234,6 +3343,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=37,
@@ -3269,6 +3379,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=38,
@@ -3304,6 +3415,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=39,
@@ -3339,6 +3451,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=40,
@@ -3374,6 +3487,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=41,
@@ -3409,6 +3523,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=42,
@@ -3444,6 +3559,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=43,
@@ -3479,6 +3595,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=44,
@@ -3514,6 +3631,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=45,
@@ -3549,6 +3667,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=46,
@@ -3584,6 +3703,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=2,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=47,
@@ -3619,6 +3739,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=2,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=48,
@@ -3654,6 +3775,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80,),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=49,
@@ -3689,6 +3811,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80,),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=50,
@@ -3724,6 +3847,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=51,
@@ -3759,6 +3883,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=52,
@@ -3794,6 +3919,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=53,
@@ -3829,6 +3955,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=54,
@@ -3864,6 +3991,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=55,
@@ -3899,6 +4027,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=56,
@@ -3934,6 +4063,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=57,
@@ -3969,6 +4099,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=58,
@@ -4004,6 +4135,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=59,
@@ -4039,6 +4171,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=60,
@@ -4074,6 +4207,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=61,
@@ -4109,6 +4243,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=62,
@@ -4144,6 +4279,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=63,
@@ -4179,6 +4315,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=70,
@@ -4214,6 +4351,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=71,
@@ -4249,6 +4387,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=72,
@@ -4284,6 +4423,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=73,
@@ -4319,6 +4459,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=88,
@@ -4354,6 +4495,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=89,
@@ -4389,6 +4531,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=2,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=90,
@@ -4424,6 +4567,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=3,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=200,
@@ -4459,6 +4603,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=201,
@@ -4494,6 +4639,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=202,
@@ -4529,6 +4675,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=203,
@@ -4564,6 +4711,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=204,
@@ -4599,6 +4747,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=205,
@@ -4634,6 +4783,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=300,
@@ -4669,6 +4819,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=301,
@@ -4704,6 +4855,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=302,
@@ -4739,6 +4891,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=303,
@@ -4774,6 +4927,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=304,
@@ -4809,6 +4963,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=305,
@@ -4844,6 +4999,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=306,
@@ -4879,6 +5035,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=307,
@@ -4914,6 +5071,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=400,
@@ -4949,6 +5107,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=401,
@@ -4984,6 +5143,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=402,
@@ -5019,6 +5179,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=403,
@@ -5054,6 +5215,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=404,
@@ -5089,6 +5251,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=405,
@@ -5124,6 +5287,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=406,
@@ -5159,6 +5323,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=407,
@@ -5194,6 +5359,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=408,
@@ -5229,6 +5395,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=409,
@@ -5264,6 +5431,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=410,
@@ -5299,6 +5467,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=411,
@@ -5334,6 +5503,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=900,
@@ -5369,6 +5539,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=901,
@@ -5404,6 +5575,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=902,
@@ -5439,6 +5611,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=903,
@@ -5474,6 +5647,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4),
     ),
     TileMetadata(
         tile_id=904,
@@ -5509,6 +5683,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1, 2, 4, 8, 12),
     ),
     TileMetadata(
         tile_id=905,
@@ -5544,6 +5719,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=906,
@@ -5579,6 +5755,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=907,
@@ -5614,6 +5791,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=908,
@@ -5649,6 +5827,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=909,
@@ -5684,6 +5863,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=910,
@@ -5719,6 +5899,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=911,
@@ -5754,6 +5935,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=0,
@@ -5789,6 +5971,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=1,
@@ -5824,6 +6007,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=2,
@@ -5859,6 +6043,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=3,
@@ -5894,6 +6079,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=4,
@@ -5929,6 +6115,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=5,
@@ -5964,6 +6151,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=6,
@@ -5999,6 +6187,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=7,
@@ -6034,6 +6223,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=8,
@@ -6069,6 +6259,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=9,
@@ -6104,6 +6295,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=91,
@@ -6139,6 +6331,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=2,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=92,
@@ -6174,6 +6367,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=3,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=100,
@@ -6209,6 +6403,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=101,
@@ -6244,6 +6439,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=102,
@@ -6279,6 +6475,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=103,
@@ -6314,6 +6511,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=104,
@@ -6349,6 +6547,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=105,
@@ -6384,6 +6583,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=106,
@@ -6419,6 +6619,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=107,
@@ -6454,6 +6655,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=108,
@@ -6489,6 +6691,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=109,
@@ -6524,6 +6727,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=110,
@@ -6559,6 +6763,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
     TileMetadata(
         tile_id=111,
@@ -6594,6 +6799,7 @@ _TILES: List[TileMetadata] = [
         split_offsets=1,
         min_blocks=1,
         compile_archs=(80, 86, 89, 90),
+        dispatch_mask_words=(1,),
     ),
 ]
 
