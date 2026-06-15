@@ -29,10 +29,7 @@ from .algo_params import (
     _HAS_CUTE_SM90,
     _HAS_CUTE_GROUPED_SM90,
     _ATB_PARAMS_AUTO,
-    _get_adaptive_AB_params,
-    _get_adaptive_AtB_params,
-    _get_trimmed_AB_params,
-    _get_trimmed_AtB_params,
+    candidate_pool,
     _filter_benchmark_params_by_env_config,
     _AB_MASK_GEMM_STRIDED_F32ACC,
 )
@@ -215,23 +212,16 @@ class UnifiedSpatiallySparseConvFunction(Function):
         # steady-state training loop pays only a dict lookup per forward instead
         # of rebuilding the N-candidate pool every call.
         def _build_adaptive_fwd_params():
-            if algorithm_filter == "trimmed":
-                params = _get_trimmed_AB_params(
-                    C_in,
-                    C_out,
-                    kv,
-                    num_in_coords=in_features.shape[0],
-                    use_fp16_accum=use_fp16_accum,
-                )
-            else:
-                params = _get_adaptive_AB_params(
-                    C_in,
-                    C_out,
-                    kv,
-                    num_in_coords=in_features.shape[0],
-                    voxel_size=voxel_size,
-                    use_fp16_accum=use_fp16_accum,
-                )
+            params = candidate_pool(
+                "AB",
+                "trimmed" if algorithm_filter == "trimmed" else "auto",
+                C_in,
+                C_out,
+                kv,
+                num_in_coords=in_features.shape[0],
+                use_fp16_accum=use_fp16_accum,
+                voxel_size=voxel_size,
+            )
             if num_out_coords != in_features.shape[0]:
                 params = list(_AB_MASK_GEMM_STRIDED_F32ACC) + list(params)
             return params
@@ -511,22 +501,16 @@ class UnifiedSpatiallySparseConvFunction(Function):
         use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
 
         def _build_filtered_dgrad_params():
-            if dgrad_filter == "trimmed":
-                dgrad_adaptive = _get_trimmed_AB_params(
-                    C_out_bwd,
-                    C_in_bwd,
-                    kv_bwd,
-                    num_in_coords=N_in_bwd,
-                    use_fp16_accum=use_fp16_accum,
-                )
-            else:
-                dgrad_adaptive = _get_adaptive_AB_params(
-                    C_out_bwd,
-                    C_in_bwd,
-                    kv_bwd,
-                    num_in_coords=N_in_bwd,
-                    use_fp16_accum=use_fp16_accum,
-                )
+            # dgrad is AB gather-scatter from the swapped (C_out, C_in) perspective.
+            dgrad_adaptive = candidate_pool(
+                "AB",
+                "trimmed" if dgrad_filter == "trimmed" else "auto",
+                C_out_bwd,
+                C_in_bwd,
+                kv_bwd,
+                num_in_coords=N_in_bwd,
+                use_fp16_accum=use_fp16_accum,
+            )
             # Add dgrad-via-fwd candidates (fwd kernel with explicit weight
             # transpose). F32Acc always included; F16Acc added when
             # use_fp16_accum=True. PCOFF aliases require mask_words==1
@@ -573,22 +557,15 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
 
         def _build_filtered_wgrad_params():
-            if wgrad_filter == "trimmed":
-                wgrad_adaptive = _get_trimmed_AtB_params(
-                    C_in_bwd,
-                    C_out_bwd,
-                    kv_bwd,
-                    num_in_coords=N_in_bwd,
-                    use_fp16_accum=use_fp16_accum,
-                )
-            else:
-                wgrad_adaptive = _get_adaptive_AtB_params(
-                    C_in_bwd,
-                    C_out_bwd,
-                    kv_bwd,
-                    num_in_coords=N_in_bwd,
-                    use_fp16_accum=use_fp16_accum,
-                )
+            wgrad_adaptive = candidate_pool(
+                "AtB",
+                "trimmed" if wgrad_filter == "trimmed" else "auto",
+                C_in_bwd,
+                C_out_bwd,
+                kv_bwd,
+                num_in_coords=N_in_bwd,
+                use_fp16_accum=use_fp16_accum,
+            )
             return _filter_benchmark_params_by_env_config(
                 wgrad_adaptive, wgrad_filter, is_forward=False
             )

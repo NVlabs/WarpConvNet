@@ -474,6 +474,30 @@ _ATB_EXPLICIT_GROUPED = [("explicit_gemm_grouped", {"saturation_m": 2000})]
 import math as _math
 
 
+def _ab_mask_pool(use_fp16_accum: bool, max_ch: int) -> List[Tuple[str, Dict[str, Any]]]:
+    """AB (fwd/dgrad) mask_gemm building block with accumulator-precision gating.
+
+    Single source for the precision ladder shared by the adaptive and trimmed AB
+    pools (was duplicated verbatim in both):
+      - F32-accum tiles (+ F32-accum pcoff) always included.
+      - F16-accum tiles (+ F16-accum pcoff) when ``use_fp16_accum``.
+      - F16-accum pcoff alone when ``max_ch`` is under
+        ``WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL`` (per-row reduction short enough
+        that fp16-accum drift stays under the AMP gradient noise floor).
+    """
+    pool = list(_AB_MASK_GEMM_F32ACC)
+    pool.extend(_AB_MASK_GEMM_PCOFF_F32ACC)
+    if use_fp16_accum:
+        pool.extend(_AB_MASK_GEMM_F16ACC)
+        pool.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
+    elif (
+        WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
+        and max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
+    ):
+        pool.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
+    return pool
+
+
 def _get_adaptive_AB_params(
     in_channels: int,
     out_channels: int,
@@ -500,27 +524,7 @@ def _get_adaptive_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # Small-channel F16-accum pcoff allowance. F16-accum precision loss
-    # scales with the number of K*C accumulations into the half-precision
-    # fragment; at max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL the
-    # per-row reduction is short enough that the rounding drift stays
-    # under the AMP gradient noise floor, while pcoff's per-offset __ldg
-    # hoist still recovers significant kernel-time win on these shapes.
-    # Larger channels would accumulate too much drift and require explicit
-    # opt-in via WARPCONVNET_USE_FP16_ACCUM=true.
-    # Set WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL=0 to disable.
-    _allow_small_ch_pcoff_f16 = (
-        WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
-        and max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
-    )
-
-    _ab_prod = list(_AB_MASK_GEMM_F32ACC)
-    _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F32ACC)
-    if use_fp16_accum:
-        _ab_prod.extend(_AB_MASK_GEMM_F16ACC)
-        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
-    elif _allow_small_ch_pcoff_f16:
-        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
+    _ab_prod = _ab_mask_pool(use_fp16_accum, max_ch)
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
@@ -584,20 +588,7 @@ def _get_trimmed_AB_params(
     max_ch = max(in_channels, out_channels)
     log_n = _math.ceil(_math.log2(num_in_coords)) if num_in_coords > 1 else 0
 
-    # Mirror small-channel F16-accum pcoff allowance from _get_adaptive_AB_params
-    # (see comment there). Same WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL threshold.
-    _allow_small_ch_pcoff_f16 = (
-        WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
-        and max_ch <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
-    )
-
-    _ab_prod = list(_AB_MASK_GEMM_F32ACC)
-    _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F32ACC)
-    if use_fp16_accum:
-        _ab_prod.extend(_AB_MASK_GEMM_F16ACC)
-        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
-    elif _allow_small_ch_pcoff_f16:
-        _ab_prod.extend(_AB_MASK_GEMM_PCOFF_F16ACC)
+    _ab_prod = _ab_mask_pool(use_fp16_accum, max_ch)
     _cutlass = _with_fp16_accum(_AB_CUTLASS_IMPLICIT, use_fp16_accum)
     _cutlass_grp = _with_fp16_accum(_AB_CUTLASS_GROUPED, use_fp16_accum)
 
@@ -896,6 +887,66 @@ def _get_trimmed_AtB_params(
     params.extend(_AB_CUTE_SM90)
     params.extend(_AB_CUTE_GROUPED_SM90)
     return params
+
+
+def candidate_pool(
+    op: str,
+    mode: str,
+    in_channels: int,
+    out_channels: int,
+    kernel_volume: int,
+    num_in_coords: int = 0,
+    use_fp16_accum: bool = False,
+    voxel_size: Union[Tuple[int, ...], None] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Single entry for shape-adaptive autotune candidate pools.
+
+    Replaces the four ``_get_{adaptive,trimmed}_{AB,AtB}_params`` call sites with
+    one dispatcher over the tuned per-(op, mode) ladders.
+
+    Args:
+        op: ``"AB"`` for gather-scatter (forward + dgrad) or ``"AtB"`` for
+            gather-gather (wgrad). For dgrad the caller passes the swapped
+            (C_out, C_in) perspective, same as before.
+        mode: ``"auto"`` (aggressive, dominant-winner-per-region) or
+            ``"trimmed"`` (broader, includes runner-ups). ``"all"`` is handled
+            separately by the env-config filter, not here.
+    """
+    if op == "AB":
+        if mode == "trimmed":
+            return _get_trimmed_AB_params(
+                in_channels,
+                out_channels,
+                kernel_volume,
+                num_in_coords=num_in_coords,
+                use_fp16_accum=use_fp16_accum,
+            )
+        return _get_adaptive_AB_params(
+            in_channels,
+            out_channels,
+            kernel_volume,
+            num_in_coords=num_in_coords,
+            voxel_size=voxel_size,
+            use_fp16_accum=use_fp16_accum,
+        )
+    if op == "AtB":
+        if mode == "trimmed":
+            return _get_trimmed_AtB_params(
+                in_channels,
+                out_channels,
+                kernel_volume,
+                num_in_coords=num_in_coords,
+                use_fp16_accum=use_fp16_accum,
+            )
+        return _get_adaptive_AtB_params(
+            in_channels,
+            out_channels,
+            kernel_volume,
+            num_in_coords=num_in_coords,
+            voxel_size=voxel_size,
+            use_fp16_accum=use_fp16_accum,
+        )
+    raise ValueError(f"Unknown candidate-pool op: {op!r} (expected 'AB' or 'AtB')")
 
 
 # Exhaustive AtB benchmark candidates ("all"): every algorithm and
