@@ -625,6 +625,23 @@ int launch_mask_gemm_fwd_64x128_f16acc_mw(const void *,
                                           int,
                                           int,
                                           cudaStream_t);
+// Tile 28: 32x32 F16Accum (half-only), MW2/4 only.
+template <int MW>
+int launch_mask_gemm_fwd_32x32_f16acc_mw(const void *,
+                                         const void *,
+                                         void *,
+                                         const int *,
+                                         const uint32_t *,
+                                         const int *,
+                                         int,
+                                         int,
+                                         int,
+                                         int,
+                                         int,
+                                         float,
+                                         int,
+                                         int,
+                                         cudaStream_t);
 template <typename ElemIn, int MW>
 int launch_mask_gemm_fwd_64x128_3s_mw(const void *,
                                       const void *,
@@ -997,6 +1014,30 @@ int mask_gemm_fwd(torch::Tensor input,
           [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_64x128_f16acc_mw<12>(a...); }, \
           args))
 
+// Tile 28: 32x32 F16Accum, MW1/2/4 only (K<=128). 32x32 has no MW8/12 launcher,
+// so cap here and return -1 above MW4 (the Python guard rejects mask_words>4 for
+// tile 28, so this arm is defensive). Custom dispatch, not DISPATCH_MW, because
+// the 5-arm macro would route MW8/12 to a nonexistent launcher.
+#define FWD_32x32_F16ACC_MW_DISP()                                                              \
+  do {                                                                                          \
+    if (mask_words <= 1)                                                                        \
+      return std::apply(                                                                        \
+          [](auto &&...a) {                                                                     \
+            return LAUNCH_FWD(cutlass::half_t, Tile32x32x32_F16Accum, cutlass::half_t, a...);   \
+          },                                                                                    \
+          args);                                                                                \
+    else if (mask_words <= 2)                                                                   \
+      return std::apply(                                                                        \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_32x32_f16acc_mw<2>(a...); }, \
+          args);                                                                                \
+    else if (mask_words <= 4)                                                                   \
+      return std::apply(                                                                        \
+          [](auto &&...a) { return cute_gemm::launch_mask_gemm_fwd_32x32_f16acc_mw<4>(a...); }, \
+          args);                                                                                \
+    else                                                                                        \
+      return -1;                                                                                \
+  } while (0)
+
 #define FWD_64x128_3S_MW(ElemIn)                                                              \
   DISPATCH_MW(                                                                                \
       std::apply([](auto &&...a) { return LAUNCH_FWD(ElemIn, Tile64x128x32, ElemIn, a...); }, \
@@ -1053,8 +1094,7 @@ int mask_gemm_fwd(torch::Tensor input,
     using Out = cutlass::half_t;
     switch (static_cast<FwdTile>(tile)) {
       case FwdTile::_32x32x32_1s_flat_F16Accum:
-        return std::apply(
-            [](auto &&...a) { return LAUNCH_FWD(In, Tile32x32x32_F16Accum, Out, a...); }, args);
+        FWD_32x32_F16ACC_MW_DISP();
       case FwdTile::_64x64x32_1s_flat_sa:
         FWD_64x64_MW(In);
       case FwdTile::_64x128x32_2s_fused_F16Accum:

@@ -338,6 +338,23 @@ int launch_mask_gemm_fwd_64x128_f16acc_mw(const void *a,
                                           int groups = 1,
                                           int identity_offset = -1,
                                           cudaStream_t stream = 0);
+// Tile 28: 32x32 F16Accum (half-only), MW2/4 only. See mask_gemm_kernels_fwd.cu.
+template <int MW>
+int launch_mask_gemm_fwd_32x32_f16acc_mw(const void *a,
+                                         const void *b,
+                                         void *d,
+                                         const int *pt,
+                                         const uint32_t *pm,
+                                         const int *ms,
+                                         int N_in,
+                                         int N_out,
+                                         int C_in,
+                                         int C_out,
+                                         int K,
+                                         float alpha,
+                                         int groups = 1,
+                                         int identity_offset = -1,
+                                         cudaStream_t stream = 0);
 template <typename ElemIn, int MW>
 int launch_mask_gemm_fwd_64x128_3s_mw(const void *a,
                                       const void *b,
