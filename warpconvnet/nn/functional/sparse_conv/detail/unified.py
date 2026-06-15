@@ -34,6 +34,7 @@ from .algo_params import (
     _get_trimmed_AB_params,
     _get_trimmed_AtB_params,
     _filter_benchmark_params_by_env_config,
+    _AB_MASK_GEMM_STRIDED_F32ACC,
 )
 from .autotune import (
     _BENCHMARK_AB_RESULTS,
@@ -123,14 +124,6 @@ def _ensure_aligned(t: Optional[Tensor]) -> Optional[Tensor]:
 _STRIDED_FWD_TILE_IDS = frozenset(range(300, 308))
 
 
-def _params_include_tile(
-    params_list: List[Tuple[str, Dict[str, Any]]], tile_ids: frozenset[int]
-) -> bool:
-    return any(
-        algo == "mask_gemm" and params.get("tile_id") in tile_ids for algo, params in params_list
-    )
-
-
 def _results_include_tile(results: Any, tile_ids: frozenset[int]) -> bool:
     if isinstance(results, tuple):
         result_iter = [results]
@@ -203,27 +196,6 @@ class UnifiedSpatiallySparseConvFunction(Function):
         C_in = in_features.shape[1]
         C_out = weight.shape[-1] * groups if groups > 1 else weight.shape[2]
         kv = weight.shape[0]
-        if algorithm_filter == "trimmed":
-            adaptive_fwd_params = _get_trimmed_AB_params(
-                C_in,
-                C_out,
-                kv,
-                num_in_coords=in_features.shape[0],
-                use_fp16_accum=use_fp16_accum,
-            )
-        else:
-            adaptive_fwd_params = _get_adaptive_AB_params(
-                C_in,
-                C_out,
-                kv,
-                num_in_coords=in_features.shape[0],
-                voxel_size=voxel_size,
-                use_fp16_accum=use_fp16_accum,
-            )
-        if num_out_coords != in_features.shape[0]:
-            from .algo_params import _AB_MASK_GEMM_STRIDED_F32ACC
-
-            adaptive_fwd_params = list(_AB_MASK_GEMM_STRIDED_F32ACC) + list(adaptive_fwd_params)
 
         cache_metadata = conv_cache_metadata or {}
         config = SpatiallySparseConvConfig(
@@ -238,11 +210,46 @@ class UnifiedSpatiallySparseConvFunction(Function):
             **cache_metadata,
         )
 
+        # Lazily build the adaptive/trimmed candidate pool. On the warm path
+        # (cache hit in auto/all/trimmed mode) this is never called, so a
+        # steady-state training loop pays only a dict lookup per forward instead
+        # of rebuilding the N-candidate pool every call.
+        def _build_adaptive_fwd_params():
+            if algorithm_filter == "trimmed":
+                params = _get_trimmed_AB_params(
+                    C_in,
+                    C_out,
+                    kv,
+                    num_in_coords=in_features.shape[0],
+                    use_fp16_accum=use_fp16_accum,
+                )
+            else:
+                params = _get_adaptive_AB_params(
+                    C_in,
+                    C_out,
+                    kv,
+                    num_in_coords=in_features.shape[0],
+                    voxel_size=voxel_size,
+                    use_fp16_accum=use_fp16_accum,
+                )
+            if num_out_coords != in_features.shape[0]:
+                params = list(_AB_MASK_GEMM_STRIDED_F32ACC) + list(params)
+            return params
+
         # Step 3: Check cache first
         cached_result = _BENCHMARK_AB_RESULTS.get(config)
+        # Strided-conv staleness: an entry cached before native strided tiles
+        # (300-307) existed lacks those candidates and must be re-tuned. Strided
+        # tiles enter the pool iff this is a strided conv (num_out != N_in) AND
+        # the strided mask_gemm pool is non-empty — test that directly instead of
+        # building the pool just to inspect it (equivalent to the old
+        # _params_include_tile(adaptive_fwd_params, ...) check).
+        _strided_candidates_expected = num_out_coords != in_features.shape[0] and bool(
+            _AB_MASK_GEMM_STRIDED_F32ACC
+        )
         if (
             cached_result is not None
-            and _params_include_tile(adaptive_fwd_params, _STRIDED_FWD_TILE_IDS)
+            and _strided_candidates_expected
             and not _results_include_tile(cached_result, _STRIDED_FWD_TILE_IDS)
         ):
             logger.info(
@@ -251,66 +258,9 @@ class UnifiedSpatiallySparseConvFunction(Function):
             )
             _BENCHMARK_AB_RESULTS.pop(config, None)
             cached_result = None
-        if cached_result is not None:
-            # Support tuple (best) or list-of-tuples (best-first)
-            if isinstance(cached_result, tuple):
-                best_tuple = cached_result
-                best_list = [best_tuple]
-            else:
-                best_list = cached_result
-            if algorithm_filter in ("auto", "all", "trimmed"):
-                chosen_fwd_algo, chosen_fwd_params, _ = best_list[0]
-            else:
-                filtered_cached_results = []
-                for algo, params, time in best_list:
-                    if algo in algorithm_filter:
-                        filtered_cached_results.append((algo, params, time))
 
-                if filtered_cached_results:
-                    chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[0]
-                else:
-                    filtered_params = _filter_benchmark_params_by_env_config(
-                        adaptive_fwd_params, algorithm_filter, is_forward=True
-                    )
-                    if not filtered_params and "explicit_gemm" in algorithm_filter:
-                        chosen_fwd_algo, chosen_fwd_params = (
-                            "explicit_gemm",
-                            {},
-                        )
-                    else:
-                        all_fwd_benchmark_results = _run_forward_benchmarks(
-                            in_features,
-                            weight,
-                            kernel_map,
-                            num_out_coords,
-                            compute_dtype,
-                            custom_params=filtered_params,
-                            groups=groups,
-                        )
-                        _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results
-                        # Save a serialized copy (algo as string) to the generic cache
-                        generic_benchmark_update_entry(
-                            "AB_gather_scatter",
-                            config,
-                            _serialize_benchmark_results(all_fwd_benchmark_results),
-                            force=False,
-                        )
-                        chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
-        else:
-            # Step 4: No cache - always benchmark within filtered space
-            if algorithm_filter in ("auto", "all", "trimmed"):
-                # Benchmark algorithms - "auto" uses adaptive set, "all" uses exhaustive set
-                filtered_params = _filter_benchmark_params_by_env_config(
-                    adaptive_fwd_params, algorithm_filter, is_forward=True
-                )
-            else:
-                # Filter benchmark parameters to only include algorithms in filter set
-                filtered_params = _filter_benchmark_params_by_env_config(
-                    adaptive_fwd_params, algorithm_filter, is_forward=True
-                )
-
-            # Always run benchmarks to find optimal parameters
-            all_fwd_benchmark_results = _run_forward_benchmarks(
+        def _benchmark_and_cache_fwd(filtered_params):
+            results = _run_forward_benchmarks(
                 in_features,
                 weight,
                 kernel_map,
@@ -319,14 +269,51 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 custom_params=filtered_params,
                 groups=groups,
             )
-            _BENCHMARK_AB_RESULTS[config] = all_fwd_benchmark_results
-            # Persist a serialized copy to generic cache
+            _BENCHMARK_AB_RESULTS[config] = results
             generic_benchmark_update_entry(
                 "AB_gather_scatter",
                 config,
-                _serialize_benchmark_results(all_fwd_benchmark_results),
+                _serialize_benchmark_results(results),
                 force=False,
             )
+            return results
+
+        if cached_result is not None:
+            # Support tuple (best) or list-of-tuples (best-first)
+            if isinstance(cached_result, tuple):
+                best_list = [cached_result]
+            else:
+                best_list = cached_result
+            if algorithm_filter in ("auto", "all", "trimmed"):
+                chosen_fwd_algo, chosen_fwd_params, _ = best_list[0]
+            else:
+                filtered_cached_results = [
+                    (algo, params, time)
+                    for algo, params, time in best_list
+                    if algo in algorithm_filter
+                ]
+                if filtered_cached_results:
+                    chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[0]
+                else:
+                    filtered_params = _filter_benchmark_params_by_env_config(
+                        _build_adaptive_fwd_params(), algorithm_filter, is_forward=True
+                    )
+                    if not filtered_params and "explicit_gemm" in algorithm_filter:
+                        chosen_fwd_algo, chosen_fwd_params = (
+                            "explicit_gemm",
+                            {},
+                        )
+                    else:
+                        all_fwd_benchmark_results = _benchmark_and_cache_fwd(filtered_params)
+                        chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
+        else:
+            # Step 4: No cache - benchmark within filtered space. "auto"/"all"/
+            # "trimmed" and an explicit algo list all funnel through the same
+            # filter call.
+            filtered_params = _filter_benchmark_params_by_env_config(
+                _build_adaptive_fwd_params(), algorithm_filter, is_forward=True
+            )
+            all_fwd_benchmark_results = _benchmark_and_cache_fwd(filtered_params)
             chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
 
         # Step 5: Pre-cast weight once (avoids per-algorithm re-casting).
@@ -518,91 +505,97 @@ class UnifiedSpatiallySparseConvFunction(Function):
         ):
             weight = _ensure_aligned(weight)
 
-        # Separate candidate lists for dgrad (AB) vs wgrad (AtB)
+        # Separate candidate lists for dgrad (AB) vs wgrad (AtB). Both pools are
+        # built lazily (only on a cache miss) so a warm steady-state backward
+        # pays a dict lookup per direction instead of rebuilding both pools.
         use_fp16_accum = getattr(ctx, "use_fp16_accum", False)
-        if dgrad_filter == "trimmed":
-            dgrad_adaptive = _get_trimmed_AB_params(
-                C_out_bwd,
-                C_in_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-                use_fp16_accum=use_fp16_accum,
-            )
-        else:
-            dgrad_adaptive = _get_adaptive_AB_params(
-                C_out_bwd,
-                C_in_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-                use_fp16_accum=use_fp16_accum,
-            )
-        # Add dgrad-via-fwd candidates (fwd kernel with explicit weight transpose).
-        # F32Acc always included; F16Acc added when use_fp16_accum=True.
-        # PCOFF aliases require mask_words==1 (kv_bwd <= 32) — dispatch raises
-        # for K>32, so we gate at pool construction. Within the kv<=32 band:
-        #   - F32-accum pcoff (909/910/911 fwd_as_dgrad, 68/69 native) always
-        #     in pool — fp32 accumulator matches baseline precision.
-        #   - F16-accum pcoff (905/906/907/908 fwd_as_dgrad, 64/65/66/67
-        #     native) require WARPCONVNET_USE_FP16_ACCUM=true. Bare default
-        #     selecting fp16-accum dgrad kernels degrades MinkUNet ScanNet
-        #     AMP training (verified via bisect 2026-05-20).
-        from .algo_params import (
-            _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC,
-            _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC,
-            _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC,
-            _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC,
-            _AB_MASK_GEMM_DGRAD_PCOFF_F16ACC,
-            _AB_MASK_GEMM_DGRAD_PCOFF_F32ACC,
-        )
 
-        # Small-channel F16-accum pcoff allowance: at max(C_in_bwd, C_out_bwd)
-        # <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL the per-row K*C accumulation
-        # is short enough that fp16-accum rounding drift stays under AMP
-        # gradient noise floor. Mirrors _get_adaptive_AB_params gate.
-        from warpconvnet.constants import WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
-
-        _max_ch_bwd = max(C_in_bwd, C_out_bwd)
-        _allow_small_ch_pcoff_f16_bwd = (
-            WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
-            and _max_ch_bwd <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
-        )
-
-        dgrad_adaptive = list(dgrad_adaptive) + list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
-        if use_fp16_accum:
-            dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
-        if kv_bwd <= 32:
-            dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC)
-            dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F32ACC)
-            if use_fp16_accum or _allow_small_ch_pcoff_f16_bwd:
-                dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC)
-                dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F16ACC)
-        if wgrad_filter == "trimmed":
-            wgrad_adaptive = _get_trimmed_AtB_params(
-                C_in_bwd,
-                C_out_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-                use_fp16_accum=use_fp16_accum,
+        def _build_filtered_dgrad_params():
+            if dgrad_filter == "trimmed":
+                dgrad_adaptive = _get_trimmed_AB_params(
+                    C_out_bwd,
+                    C_in_bwd,
+                    kv_bwd,
+                    num_in_coords=N_in_bwd,
+                    use_fp16_accum=use_fp16_accum,
+                )
+            else:
+                dgrad_adaptive = _get_adaptive_AB_params(
+                    C_out_bwd,
+                    C_in_bwd,
+                    kv_bwd,
+                    num_in_coords=N_in_bwd,
+                    use_fp16_accum=use_fp16_accum,
+                )
+            # Add dgrad-via-fwd candidates (fwd kernel with explicit weight
+            # transpose). F32Acc always included; F16Acc added when
+            # use_fp16_accum=True. PCOFF aliases require mask_words==1
+            # (kv_bwd <= 32) — dispatch raises for K>32, so we gate at pool
+            # construction. Within the kv<=32 band:
+            #   - F32-accum pcoff (909/910/911 fwd_as_dgrad, 68/69 native) always
+            #     in pool — fp32 accumulator matches baseline precision.
+            #   - F16-accum pcoff (905/906/907/908 fwd_as_dgrad, 64/65/66/67
+            #     native) require WARPCONVNET_USE_FP16_ACCUM=true. Bare default
+            #     selecting fp16-accum dgrad kernels degrades MinkUNet ScanNet
+            #     AMP training (verified via bisect 2026-05-20).
+            from .algo_params import (
+                _AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC,
+                _AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC,
+                _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC,
+                _AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC,
+                _AB_MASK_GEMM_DGRAD_PCOFF_F16ACC,
+                _AB_MASK_GEMM_DGRAD_PCOFF_F32ACC,
             )
-        else:
-            wgrad_adaptive = _get_adaptive_AtB_params(
-                C_in_bwd,
-                C_out_bwd,
-                kv_bwd,
-                num_in_coords=N_in_bwd,
-                use_fp16_accum=use_fp16_accum,
-            )
-        filtered_dgrad_params = _filter_benchmark_params_by_env_config(
-            dgrad_adaptive, dgrad_filter, is_forward=True
-        )
-        filtered_wgrad_params = _filter_benchmark_params_by_env_config(
-            wgrad_adaptive, wgrad_filter, is_forward=False
-        )
 
-        # Helper to auto-tune one direction
-        def _autotune_one_direction(
-            cache_dict, cache_ns, needs_grad_tuple, params_for_direction, cfg
-        ):
+            # Small-channel F16-accum pcoff allowance: at max(C_in_bwd, C_out_bwd)
+            # <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL the per-row K*C
+            # accumulation is short enough that fp16-accum rounding drift stays
+            # under AMP gradient noise floor. Mirrors _get_adaptive_AB_params gate.
+            from warpconvnet.constants import WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
+
+            _max_ch_bwd = max(C_in_bwd, C_out_bwd)
+            _allow_small_ch_pcoff_f16_bwd = (
+                WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL > 0
+                and _max_ch_bwd <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
+            )
+
+            dgrad_adaptive = list(dgrad_adaptive) + list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
+            if use_fp16_accum:
+                dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
+            if kv_bwd <= 32:
+                dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC)
+                dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F32ACC)
+                if use_fp16_accum or _allow_small_ch_pcoff_f16_bwd:
+                    dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F16ACC)
+                    dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F16ACC)
+            return _filter_benchmark_params_by_env_config(
+                dgrad_adaptive, dgrad_filter, is_forward=True
+            )
+
+        def _build_filtered_wgrad_params():
+            if wgrad_filter == "trimmed":
+                wgrad_adaptive = _get_trimmed_AtB_params(
+                    C_in_bwd,
+                    C_out_bwd,
+                    kv_bwd,
+                    num_in_coords=N_in_bwd,
+                    use_fp16_accum=use_fp16_accum,
+                )
+            else:
+                wgrad_adaptive = _get_adaptive_AtB_params(
+                    C_in_bwd,
+                    C_out_bwd,
+                    kv_bwd,
+                    num_in_coords=N_in_bwd,
+                    use_fp16_accum=use_fp16_accum,
+                )
+            return _filter_benchmark_params_by_env_config(
+                wgrad_adaptive, wgrad_filter, is_forward=False
+            )
+
+        # Helper to auto-tune one direction. ``build_params`` is a thunk invoked
+        # only on a cache miss, so the candidate pool is not built on the warm path.
+        def _autotune_one_direction(cache_dict, cache_ns, needs_grad_tuple, build_params, cfg):
             cached = cache_dict.get(cfg)
             if cached is not None:
                 best_list = [cached] if isinstance(cached, tuple) else cached
@@ -615,7 +608,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 num_out_coords,
                 compute_dtype,
                 device,
-                custom_params=params_for_direction,
+                custom_params=build_params(),
                 needs_input_grad=needs_grad_tuple,
                 groups=groups,
             )
@@ -661,7 +654,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 _BENCHMARK_ABT_RESULTS,
                 "ABt_gather_scatter",
                 (True, False),
-                filtered_dgrad_params,
+                _build_filtered_dgrad_params,
                 dgrad_config,
             )
             logger.debug(
@@ -707,7 +700,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 _BENCHMARK_ATB_RESULTS,
                 "AtB_gather_gather",
                 (False, True),
-                filtered_wgrad_params,
+                _build_filtered_wgrad_params,
                 wgrad_config,
             )
             logger.debug(
