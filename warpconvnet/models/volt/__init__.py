@@ -45,17 +45,20 @@ VOLT_VARIANTS = {
     "volt-convblock": dict(tokenizer_type="convblock"),  # 77.01  (ResNet conv-stem tokenizer)
     "volt-blockattn": dict(
         tokenizer_type="convblock", conv_before_attn=True
-    ),  # 78.00  (BEST — beats published 77.3)
+    ),  # 78.00  (best at base width)
+    "volt-b-convblock": dict(
+        embed_dim=768, num_heads=12, tokenizer_type="convblock"
+    ),  # 78.23  (BEST — beats published 77.3 by +0.93)
     "volt-all3": dict(
         embed_dim=768, num_heads=12, tokenizer_type="convblock", conv_before_attn=True
-    ),  # large variant (see README)
+    ),  # 77.93  (all three; no gain over volt-b-convblock)
 }
 
 
 def build_volt(variant: str = "volt-s", **overrides) -> Volt:
     """Construct a Volt variant by name. Extra ``overrides`` win over the preset.
 
-    >>> model = build_volt("volt-blockattn")        # the best ScanNet config
+    >>> model = build_volt("volt-b-convblock")       # the best ScanNet config
     >>> model = build_volt("volt-b", drop_path=0.4)  # a preset with a tweak
     """
     if variant not in VOLT_VARIANTS:
