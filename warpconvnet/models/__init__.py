@@ -33,6 +33,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "PointNet": ("warpconvnet.models.pointnet", "PointNet"),
     "PointTransformerV3": ("warpconvnet.models.point_transformer_v3", "PointTransformerV3"),
     "SpaCeFormer": ("warpconvnet.models.space_former", "SpaCeFormer"),
+    "Volt": ("warpconvnet.models.volt", "Volt"),
+    "build_volt": ("warpconvnet.models.volt", "build_volt"),
 }
 
 
