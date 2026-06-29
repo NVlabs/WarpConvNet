@@ -32,7 +32,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "PointMinkUNetBase": ("warpconvnet.models.mink_unet", "PointMinkUNetBase"),
     "PointNet": ("warpconvnet.models.pointnet", "PointNet"),
     "PointTransformerV3": ("warpconvnet.models.point_transformer_v3", "PointTransformerV3"),
-    "SpaCeFormer": ("warpconvnet.models.space_former", "SpaCeFormer"),
+    # SpaceFormer family (backbone + instance-seg decoder) — see models/spaceformer/.
+    "SpaCeFormer": ("warpconvnet.models.spaceformer", "SpaCeFormer"),
+    "SpaCeFormerInstSeg": ("warpconvnet.models.spaceformer", "SpaCeFormerInstSeg"),
+    "build_spaceformer": ("warpconvnet.models.spaceformer", "build_spaceformer"),
     "Volt": ("warpconvnet.models.volt", "Volt"),
     "build_volt": ("warpconvnet.models.volt", "build_volt"),
 }
