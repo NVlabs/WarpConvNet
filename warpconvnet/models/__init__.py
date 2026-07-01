@@ -18,6 +18,12 @@ from typing import Any
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "DGCNN": ("warpconvnet.models.dgcnn", "DGCNN"),
     "DGCNNEncoder": ("warpconvnet.models.dgcnn", "DGCNNEncoder"),
+    # FCGF descriptor networks (registration / geometric features) — see models/fcgf.py.
+    "ResUNet2": ("warpconvnet.models.fcgf", "ResUNet2"),
+    "ResUNetBN2B": ("warpconvnet.models.fcgf", "ResUNetBN2B"),
+    "ResUNetBN2C": ("warpconvnet.models.fcgf", "ResUNetBN2C"),
+    "ResUNetBN2D": ("warpconvnet.models.fcgf", "ResUNetBN2D"),
+    "ResUNetBN2E": ("warpconvnet.models.fcgf", "ResUNetBN2E"),
     "FIGConvNet": ("warpconvnet.models.figconv", "FIGConvNet"),
     "FIGConvNetDrivAer": ("warpconvnet.models.figconv", "FIGConvNetDrivAer"),
     "MaskFormer": ("warpconvnet.models.maskformer", "MaskFormer"),
