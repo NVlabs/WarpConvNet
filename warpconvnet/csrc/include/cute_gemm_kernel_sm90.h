@@ -228,13 +228,16 @@ struct CuteGemmKernelSm90 {
         warpgroup_wait<1>();  // Allow 1 GMMA batch in flight for compute/load overlap
         warpgroup_fence_operand(accum);
 
-        // Wait for oldest in-flight loads to complete before next iteration
+        // Wait for ALL in-flight loads: the next iteration (or the epilog)
+        // computes the tile just issued above, so its loads must be complete.
+        // wait<NumStages-2> is only valid with an (NumStages-1)-deep prefetch;
+        // this loop prefetches 1 tile ahead, so anything looser races.
         if constexpr (UseTmaLoadB) {
           cute::cp_async_wait<0>();
           _wait_tma_barrier(&storage.tma_barriers[next_stage], tma_phases[next_stage]);
           tma_phases[next_stage] ^= 1;
         } else {
-          cute::cp_async_wait<NumStages - 2>();
+          cute::cp_async_wait<0>();
         }
         __syncthreads();
       }

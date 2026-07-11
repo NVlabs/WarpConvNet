@@ -240,9 +240,11 @@ struct CuteGemmGroupedKernelSm90 {
       warpgroup_wait<1>();  // Allow 1 GMMA batch in flight for compute/load overlap
       warpgroup_fence_operand(accum);
 
-      // Wait for oldest in-flight loads to complete before next iteration
-      // overwrites that stage
-      cute::cp_async_wait<NumStages - 2>();
+      // Wait for ALL in-flight loads: the next iteration (or the epilog)
+      // computes the tile just issued above, so its cp.async must be complete.
+      // wait<NumStages-2> is only valid with an (NumStages-1)-deep prefetch;
+      // this loop prefetches 1 tile ahead, so anything looser races.
+      cute::cp_async_wait<0>();
       __syncthreads();
     }
 

@@ -191,7 +191,11 @@ struct CuteGemmGroupedKernel {
         cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
       }
 
-      cute::cp_async_wait<NumStages - 2>();
+      // Wait for ALL in-flight loads: the next iteration (or the epilog)
+      // computes the tile just issued above, so its cp.async must be complete.
+      // wait<NumStages-2> is only valid with an (NumStages-1)-deep prefetch;
+      // this loop prefetches 1 tile ahead, so anything looser races.
+      cute::cp_async_wait<0>();
       __syncthreads();
     }
 
@@ -554,7 +558,9 @@ struct CuteGemmGroupedTrABKernel {
         cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
       }
 
-      cute::cp_async_wait<NumStages - 2>();
+      // Wait for ALL in-flight loads — same 1-deep-prefetch constraint as the
+      // AD mainloop above; wait<NumStages-2> races the just-issued tile.
+      cute::cp_async_wait<0>();
       __syncthreads();
     }
 
