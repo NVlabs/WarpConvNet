@@ -309,6 +309,11 @@ if _HAS_TORCH:
     if cuda_arch_list:
         for arch in cuda_arch_list.replace(",", " ").replace(";", " ").split():
             arch = arch.strip().rstrip("+")
+            # Strip PyTorch-style suffixes (e.g. "9.0a" arch-specific, "8.0+PTX")
+            # before parsing as a float.
+            if arch.upper().endswith("PTX"):
+                arch = arch[: -len("PTX")].rstrip("+")
+            arch = arch.rstrip("aA")
             try:
                 _arch_values.append(float(arch))
             except ValueError:
