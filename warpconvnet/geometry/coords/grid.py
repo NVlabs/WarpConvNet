@@ -222,13 +222,15 @@ class GridCoords(Coords):
     def to(self, device=None, dtype=None):
         """Handle device transfers while preserving lazy status."""
         if not self.is_initialized:
-            # Create a new lazy GridCoords with updated device
+            # Create a new lazy GridCoords with updated device/dtype. Use a
+            # fresh dummy tensor: reading self.batched_tensor here would
+            # trigger _ensure_initialized() and materialize the coordinates.
             lazy_init = self._lazy_params.replace(
                 device=device if device is not None else self._lazy_params.device,
                 dtype=dtype if dtype is not None else self._lazy_params.dtype,
             )
             return self.__class__(
-                batched_tensor=self.batched_tensor,
+                batched_tensor=torch.zeros((1, 3)),
                 offsets=self.offsets,
                 grid_shape=self.grid_shape,
                 bounds=self.bounds,
@@ -274,38 +276,17 @@ class GridCoords(Coords):
 
     def half(self):
         if not self.is_initialized:
-            lazy_init = self._lazy_params.replace(dtype=torch.float16)
-            return GridCoords.from_tensor(
-                self.batched_tensor.half(),
-                self.offsets,
-                self.grid_shape,
-                self.bounds,
-                lazy_init,
-            )
+            return self.to(dtype=torch.float16)
         return super().half()
 
     def float(self):
         if not self.is_initialized:
-            lazy_init = self._lazy_params.replace(dtype=torch.float32)
-            return GridCoords.from_tensor(
-                self.batched_tensor.float(),
-                self.offsets,
-                self.grid_shape,
-                self.bounds,
-                lazy_init,
-            )
+            return self.to(dtype=torch.float32)
         return super().float()
 
     def double(self):
         if not self.is_initialized:
-            lazy_init = self._lazy_params.replace(dtype=torch.float64)
-            return GridCoords.from_tensor(
-                self.batched_tensor.double(),
-                self.offsets,
-                self.grid_shape,
-                self.bounds,
-                lazy_init,
-            )
+            return self.to(dtype=torch.float64)
         return super().double()
 
     def numel(self):

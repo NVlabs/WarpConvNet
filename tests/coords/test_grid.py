@@ -189,10 +189,13 @@ def test_gridcoords_methods(setup_device):
     assert coords.numel() == 2 * 4 * 6 * 8 * 3
     assert len(coords) == 2 * 4 * 6 * 8
 
-    # Test data type conversion - should trigger initialization
+    # Test data type conversion - lazily updates dtype (like .to()), without
+    # initializing either object; accessing the tensor materializes it
     float_coords = coords.float()
-    assert coords._is_initialized
+    assert not coords._is_initialized
+    assert not float_coords._is_initialized
     assert float_coords.batched_tensor.dtype == torch.float32
+    assert float_coords._is_initialized
 
     # Reset for next test
     coords = GridCoords.from_shape(grid_shape, batch_size=2, device=device)

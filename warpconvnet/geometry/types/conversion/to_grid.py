@@ -33,9 +33,7 @@ def points_to_closest_voxel_mapping(points, grid_shape, bounds, memory_format=No
     Returns:
         Tensor of voxel indices for each point
     """
-    assert (
-        points.device.type == "cuda"
-    ), "points_to_closest_voxel_mapping only supports CUDA"
+    assert points.device.type == "cuda", "points_to_closest_voxel_mapping only supports CUDA"
     # Extract coordinates and offsets
     coords = points.coordinate_tensor
     offsets = points.offsets
@@ -106,9 +104,7 @@ def _point_to_grid_mapping(
 
     # Create search config
     if search_type == "radius":
-        assert (
-            search_radius is not None
-        ), "Search radius must be provided for radius search"
+        assert search_radius is not None, "Search radius must be provided for radius search"
         search_mode = RealSearchMode.RADIUS
         search_config = RealSearchConfig(
             mode=search_mode, radius=search_radius, grid_dim=search_grid_dim
@@ -168,8 +164,8 @@ def _process_radius_search_results(
     ), f"Expected RealSearchResult, got {type(search_results)}"
     reduction_type = REDUCTIONS(reduction)
 
-    for grid_idx, start_idx in enumerate(search_results.row_offsets[:-1]):
-        end_idx = search_results.row_offsets[grid_idx + 1]
+    for grid_idx, start_idx in enumerate(search_results.neighbor_row_splits[:-1]):
+        end_idx = search_results.neighbor_row_splits[grid_idx + 1]
 
         # Skip if no neighbors found
         if start_idx == end_idx:
@@ -321,9 +317,7 @@ def _points_to_grid_features(
     from warpconvnet.geometry.features.grid import GridFeatures
 
     assert isinstance(points, Points), f"Expected Points, got {type(points)}"
-    assert isinstance(
-        grid_coords, GridCoords
-    ), f"Expected GridCoords, got {type(grid_coords)}"
+    assert isinstance(grid_coords, GridCoords), f"Expected GridCoords, got {type(grid_coords)}"
 
     if memory_format is None:
         memory_format = GridMemoryFormat.b_x_y_z_c
@@ -654,9 +648,7 @@ def voxels_to_grid(
         flat_grid_feats_view = grid_feats.view(-1, grid_feats.shape[4])
         # This will randomly select one of the voxel features for each grid cell
         # TODO(cchoy) 2025-04-10: reduction should be applied here
-        flat_grid_feats_view[batched_cell_flat_indices] = (
-            voxels.batched_features.batched_tensor
-        )
+        flat_grid_feats_view[batched_cell_flat_indices] = voxels.batched_features.batched_tensor
 
         # Restore the
         # Replace the grid features with the reduced features
