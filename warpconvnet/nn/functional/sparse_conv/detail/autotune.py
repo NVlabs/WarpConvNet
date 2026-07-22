@@ -245,9 +245,33 @@ def _tie_break_top_k(
                 torch.cuda.synchronize()
             except Exception:
                 pass
+            _raise_if_context_poisoned(algo, params)
             continue
     rebuilt.sort(key=lambda x: x[2])
     return rebuilt
+
+
+def _raise_if_context_poisoned(algo: str, params: Dict[str, Any]) -> None:
+    """After a candidate fails, verify the CUDA context survived.
+
+    Benign candidate failures (Python-level tile guards, unsupported-tile
+    status codes, launch-config errors) are non-sticky: consuming the sync
+    exception clears them and the next candidate runs normally. A device-side
+    assert is STICKY — the context is dead, every subsequent launch fails, and
+    the remaining candidates would all "fail" too, leaving a garbage winner
+    (or none) in the cache. Convert that cascade into an immediate error that
+    names the culprit candidate.
+    """
+    try:
+        (torch.zeros(1, device="cuda") + 1).item()
+    except Exception as probe_err:
+        raise RuntimeError(
+            f"CUDA context poisoned while benchmarking candidate {algo!r} "
+            f"(params={params}): a device-side assert or other sticky error "
+            f"killed the context; every subsequent kernel launch will fail. "
+            f"Exclude this candidate (e.g. WARPCONVNET_*_ALGO_MODE) and "
+            f"report the algo/tile."
+        ) from probe_err
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +354,8 @@ def _run_forward_benchmarks(
             try:
                 torch.cuda.synchronize()
             except Exception:
-                pass  # Clear error state by consuming the sync exception  # Clear again after sync failure
+                pass  # Clear error state by consuming the sync exception
+            _raise_if_context_poisoned(algo_mode, params_config)
             continue
 
         if isinstance(status, int) and status != 0:
@@ -355,6 +380,7 @@ def _run_forward_benchmarks(
                 torch.cuda.synchronize()
             except Exception:
                 pass  # Clear error state by consuming the sync exception
+            _raise_if_context_poisoned(algo_mode, params_config)
             continue
 
         if iter_times:
@@ -481,6 +507,7 @@ def _run_backward_benchmarks(
                 torch.cuda.synchronize()
             except Exception:
                 pass  # Clear error state by consuming the sync exception
+            _raise_if_context_poisoned(algo_mode, params_config)
             continue
 
         if isinstance(status, int) and status != 0:
@@ -508,6 +535,7 @@ def _run_backward_benchmarks(
                     torch.cuda.synchronize()
                 except Exception:
                     pass  # Clear error state by consuming the sync exception
+                _raise_if_context_poisoned(algo_mode, params_config)
                 continue
 
         if iter_times:

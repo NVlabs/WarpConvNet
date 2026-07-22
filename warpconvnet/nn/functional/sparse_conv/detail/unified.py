@@ -543,10 +543,16 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 and _max_ch_bwd <= WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL
             )
 
-            dgrad_adaptive = list(dgrad_adaptive) + list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
-            if use_fp16_accum:
-                dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
+            # ALL dgrad_wt aliases (900-911, pcoff or not) require
+            # mask_words==1 (kv_bwd <= 32): the binding's wt arm routes through
+            # the MW=1 fwd launcher only — no DISPATCH_MW arm — so at K>32
+            # every wt candidate is dead weight the selector must reject.
+            # Gate at pool construction so autotune never proposes them.
+            dgrad_adaptive = list(dgrad_adaptive)
             if kv_bwd <= 32:
+                dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F32ACC)
+                if use_fp16_accum:
+                    dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_F16ACC)
                 dgrad_adaptive += list(_AB_MASK_GEMM_FWD_AS_DGRAD_PCOFF_F32ACC)
                 dgrad_adaptive += list(_AB_MASK_GEMM_DGRAD_PCOFF_F32ACC)
                 if use_fp16_accum or _allow_small_ch_pcoff_f16_bwd:

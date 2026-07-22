@@ -384,6 +384,14 @@ _STRIDED_FWD_TILES = frozenset(range(300, 308))
 # 900/901/902/904 are flat/fused and MW-capable, so correctly excluded.
 _MW1_ONLY_DGRAD_WT_TILES = frozenset({903, 905, 906, 907, 908, 909, 910, 911})
 
+# All canonical dgrad_wt tile ids the binding's dgrad arm accepts. The
+# fwd_as_dgrad selector whitelists against this set: params["tile_id"] is
+# untrusted input (env overrides, stale benchmark caches, mis-assembled pools
+# can carry foreign ids such as the fwd pcoff family 54-59/63), and a foreign
+# MW1-only fwd tile dispatched at K>32 device-asserts `K <= MaskWords*32`,
+# poisoning the CUDA context mid-autotune.
+_DGRAD_WT_TILES = frozenset(range(900, 912))
+
 # Native dgrad pcoff tile_ids. MW=1 only.
 _DGRAD_PCOFF_TILES = frozenset({64, 65, 66, 67, 68, 69})
 
@@ -482,13 +490,31 @@ def _select_dgrad_tile(
             else:
                 dgrad_tile = 72
             use_fwd_fallback = True
-        elif mask_words > 1 and dgrad_tile in _MW1_ONLY_DGRAD_WT_TILES:
-            # MW=1-only dgrad_wt aliases (903 = 32x32, 905-911 = pcoff) cannot
-            # dispatch K>32. Skip candidate so autotune moves on; routing to a
-            # different tile would benchmark the wrong kernel under this algo name.
+        elif dgrad_tile not in _DGRAD_WT_TILES:
+            # Foreign tile id (e.g. fwd pcoff 54-59/63 from a stale benchmark
+            # cache or a mis-assembled pool). Reject at selection so autotune
+            # skips the candidate; a foreign MW1-only fwd tile reaching the
+            # kernel at K>32 device-asserts and poisons the CUDA context.
             raise RuntimeError(
-                f"fwd_as_dgrad tile {dgrad_tile} only supports mask_words==1 "
-                f"(got {mask_words}). Use an MW-capable tile for K>32."
+                f"mask_gemm_fwd_as_dgrad requires a dgrad_wt tile_id in "
+                f"900-911, got {dgrad_tile}. Foreign/stale tile id — "
+                f"candidate skipped."
+            )
+        elif mask_words > 1:
+            # AVAILABILITY guard, wider than the structural
+            # _MW1_ONLY_DGRAD_WT_TILES set: the binding's dgrad_wt arm routes
+            # every alias through the MW=1 launch_mask_gemm_fwd launcher and
+            # has no DISPATCH_MW arm, so NO wt tile can service K>32 in this
+            # build — including 900/901/902/904, which warpgemm metadata
+            # authorizes at MW>1 but this binding does not instantiate
+            # (verified 2026-07-22: all four device-assert `K <= MaskWords*32`
+            # at kv=64, poisoning the CUDA context mid-autotune). Skip the
+            # candidate so autotune moves on; routing to a different tile
+            # would benchmark the wrong kernel under this algo name.
+            raise RuntimeError(
+                f"mask_gemm_fwd_as_dgrad tile {dgrad_tile} cannot service "
+                f"mask_words={mask_words} (K>32): the dgrad_wt binding arm "
+                f"has no MaskWords>1 instantiation. Candidate skipped."
             )
         return dgrad_tile, use_fwd_fallback
 
