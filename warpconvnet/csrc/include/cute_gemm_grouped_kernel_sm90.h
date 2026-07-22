@@ -100,6 +100,13 @@ struct CuteGemmGroupedKernelSm90 {
   static constexpr int MaxThreadsPerBlock = 128 * NumWarpGroups;
   static constexpr int MinBlocksPerMultiprocessor = 1;
   static constexpr int NumStages = TileConfig::NumStages;
+  // Pipeline prefetch depth: number of k-tiles of cp.async loads kept in flight.
+  // Capped at NumStages-2 so a refill never writes the stage a still-in-flight
+  // WGMMA batch (warpgroup_wait<1>) may be reading. With only 2 stages there is
+  // no slack stage: prefetch 1 tile and fully drain WGMMA each iteration.
+  static_assert(TileConfig::NumStages >= 2, "pipeline requires at least 2 smem stages");
+  static constexpr int PrefetchDepth = (NumStages >= 3) ? (NumStages - 2) : 1;
+  static constexpr int WgmmaPipe = (NumStages >= 3) ? 1 : 0;
   static constexpr bool UseCpAsyncGatherA = TileConfig::UseCpAsyncGatherA;
 
   using SmemLayoutA = decltype(cute::tile_to_shape(
@@ -179,12 +186,18 @@ struct CuteGemmGroupedKernelSm90 {
       return;
     }
 
-    // ==================== PROLOG: load k_tile=0 into stage[0] ====================
-    _load_A(ptr_A, in_map_g, sA(_, _, 0), m_start, 0, M_g, K_dim);
-    _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, 0), n_start, 0, N, K_dim);
-    cute::cp_async_fence();
-    cute::cp_async_wait<0>();
-    __syncthreads();
+    // ==================== PROLOG: prefetch the first PrefetchDepth k-tiles ====================
+    // One cp.async commit group per k-tile. Fence even past the end of the k
+    // range so every tile owns exactly one group and the mainloop wait count
+    // stays exact.
+    CUTLASS_PRAGMA_UNROLL
+    for (int s = 0; s < PrefetchDepth; ++s) {
+      if (s < num_k_tiles) {
+        _load_A(ptr_A, in_map_g, sA(_, _, s), m_start, s * tK, M_g, K_dim);
+        _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, s), n_start, s * tK, N, K_dim);
+      }
+      cute::cp_async_fence();
+    }
 
     // ==================== MAINLOOP with WGMMA ====================
     // Use ScaleOut::Zero for first iteration, then One for accumulation
@@ -192,42 +205,28 @@ struct CuteGemmGroupedKernelSm90 {
 
     auto K_BLOCK_MAX = size<2>(tCrA);
 
-    if (num_k_tiles == 1) {
-      // Single k-tile: compute and epilogue
-      warpgroup_fence_operand(accum);
-      warpgroup_arrive();
-      CUTLASS_PRAGMA_UNROLL
-      for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-        cute::gemm(tiled_mma, tCrA(_, _, k_block, 0), tCrB(_, _, k_block, 0), accum);
-        tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
-      }
-      warpgroup_commit_batch();
-      warpgroup_wait<0>();
-      warpgroup_fence_operand(accum);
-
-      if (use_atomic)
-        _epilogue_atomic(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
-      else
-        _epilogue_direct(accum, ptr_D, out_map_g, m_start, n_start, M_g, N, alpha, tiled_mma);
-      return;
-    }
-
-    // Multi k-tile: pipelined loads overlapped with WGMMA compute.
-    // Structure matches cute_gemm_kernel_sm90.h: load(next) then compute(curr),
-    // with cp_async_wait<NumStages-2> to keep older loads in flight and
-    // warpgroup_wait<1> to overlap GMMA compute with next iteration's loads.
     CUTLASS_PRAGMA_NO_UNROLL
-    for (int k_tile = 1; k_tile < num_k_tiles; ++k_tile) {
-      int curr_stage = (k_tile - 1) % NumStages;
-      int next_stage = k_tile % NumStages;
-      int k_start = k_tile * tK;
+    for (int k_tile = 0; k_tile < num_k_tiles; ++k_tile) {
+      // Tile k_tile's commit group is complete once at most PrefetchDepth-1
+      // newer groups remain in flight.
+      cute::cp_async_wait<PrefetchDepth - 1>();
+      __syncthreads();
 
-      // Issue loads for NEXT k_tile into next_stage
-      _load_A(ptr_A, in_map_g, sA(_, _, next_stage), m_start, k_start, M_g, K_dim);
-      _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, next_stage), n_start, k_start, N, K_dim);
+      // Refill: issue loads PrefetchDepth tiles ahead. The target stage was
+      // last read NumStages tiles ago; the barrier above plus the
+      // warpgroup_wait below (≤WgmmaPipe younger batches in flight) guarantee
+      // no thread or WGMMA batch still reads it.
+      int load_k_tile = k_tile + PrefetchDepth;
+      if (load_k_tile < num_k_tiles) {
+        int load_stage = load_k_tile % NumStages;
+        int load_k_start = load_k_tile * tK;
+        _load_A(ptr_A, in_map_g, sA(_, _, load_stage), m_start, load_k_start, M_g, K_dim);
+        _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, load_stage), n_start, load_k_start, N, K_dim);
+      }
       cute::cp_async_fence();
 
-      // Compute CURRENT k_tile from curr_stage via WGMMA
+      // Compute tile k_tile via WGMMA
+      int curr_stage = k_tile % NumStages;
       warpgroup_fence_operand(accum);
       warpgroup_arrive();
       CUTLASS_PRAGMA_UNROLL
@@ -237,29 +236,11 @@ struct CuteGemmGroupedKernelSm90 {
         tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
       }
       warpgroup_commit_batch();
-      warpgroup_wait<1>();  // Allow 1 GMMA batch in flight for compute/load overlap
-      warpgroup_fence_operand(accum);
-
-      // Wait for ALL in-flight loads: the next iteration (or the epilog)
-      // computes the tile just issued above, so its cp.async must be complete.
-      // wait<NumStages-2> is only valid with an (NumStages-1)-deep prefetch;
-      // this loop prefetches 1 tile ahead, so anything looser races.
-      cute::cp_async_wait<0>();
-      __syncthreads();
-    }
-
-    // Epilog: compute last k_tile, drain all pipelines before reading accum
-    {
-      int last_stage = (num_k_tiles - 1) % NumStages;
-      warpgroup_fence_operand(accum);
-      warpgroup_arrive();
-      CUTLASS_PRAGMA_UNROLL
-      for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-        cute::gemm(
-            tiled_mma, tCrA(_, _, k_block, last_stage), tCrB(_, _, k_block, last_stage), accum);
+      if (k_tile + 1 < num_k_tiles) {
+        warpgroup_wait<WgmmaPipe>();  // Allow WgmmaPipe batches in flight for overlap
+      } else {
+        warpgroup_wait<0>();  // Drain all GMMA batches before epilogue reads accum
       }
-      warpgroup_commit_batch();
-      warpgroup_wait<0>();  // Drain all GMMA batches before epilogue reads accum
       warpgroup_fence_operand(accum);
     }
 

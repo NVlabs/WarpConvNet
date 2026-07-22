@@ -91,6 +91,12 @@ struct CuteGemmGroupedKernel {
   static constexpr int tN = cute::size<1>(TileShape{});
   static constexpr int tK = cute::size<2>(TileShape{});
   static constexpr int NumStages = TileConfig::NumStages;
+  // Pipeline prefetch depth: number of k-tiles of loads kept in flight.
+  // NumStages-1 leaves one stage as the compute target; smem reads are
+  // synchronous (LDSM→registers), so the per-iteration __syncthreads() is the
+  // only reader/writer fence needed before a stage is overwritten.
+  static_assert(TileConfig::NumStages >= 2, "pipeline requires at least 2 smem stages");
+  static constexpr int PrefetchDepth = NumStages - 1;
   static constexpr bool UseCpAsyncGatherA = TileConfig::UseCpAsyncGatherA;
 
   using SmemLayoutA = decltype(cute::tile_to_shape(
@@ -166,46 +172,44 @@ struct CuteGemmGroupedKernel {
       return;
     }
 
-    // Prolog: load k_tile=0 into stage[0]
-    _load_A(ptr_A, in_map_g, sA(_, _, 0), m_start, 0, M_g, K_dim);
-    _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, 0), n_start, 0, N, K_dim);
-    cute::cp_async_fence();
-    cute::cp_async_wait<0>();
-    __syncthreads();
+    // Prolog: prefetch the first PrefetchDepth k-tiles, one cp.async commit
+    // group per k-tile. Fence even past the end of the k range so every tile
+    // owns exactly one group and the mainloop wait count stays exact.
+    CUTLASS_PRAGMA_UNROLL
+    for (int s = 0; s < PrefetchDepth; ++s) {
+      if (s < num_k_tiles) {
+        _load_A(ptr_A, in_map_g, sA(_, _, s), m_start, s * tK, M_g, K_dim);
+        _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, s), n_start, s * tK, N, K_dim);
+      }
+      cute::cp_async_fence();
+    }
 
-    // Mainloop: overlap load(next) with compute(curr)
+    // Mainloop
     CUTLASS_PRAGMA_NO_UNROLL
-    for (int k_tile = 1; k_tile < num_k_tiles; ++k_tile) {
-      int curr_stage = (k_tile - 1) % NumStages;
-      int next_stage = k_tile % NumStages;
-      int k_start = k_tile * tK;
+    for (int k_tile = 0; k_tile < num_k_tiles; ++k_tile) {
+      // Tile k_tile's commit group is complete once at most PrefetchDepth-1
+      // newer groups remain in flight.
+      cute::cp_async_wait<PrefetchDepth - 1>();
+      __syncthreads();
 
-      _load_A(ptr_A, in_map_g, sA(_, _, next_stage), m_start, k_start, M_g, K_dim);
-      _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, next_stage), n_start, k_start, N, K_dim);
+      // Refill: issue loads PrefetchDepth tiles ahead. The target stage was
+      // last read in the previous iteration; the barrier above orders those
+      // reads before these writes.
+      int load_k_tile = k_tile + PrefetchDepth;
+      if (load_k_tile < num_k_tiles) {
+        int load_stage = load_k_tile % NumStages;
+        int load_k_start = load_k_tile * tK;
+        _load_A(ptr_A, in_map_g, sA(_, _, load_stage), m_start, load_k_start, M_g, K_dim);
+        _load_dense_B_tile_cpasync(ptr_B_g, sB(_, _, load_stage), n_start, load_k_start, N, K_dim);
+      }
       cute::cp_async_fence();
 
+      // Compute tile k_tile
+      int curr_stage = k_tile % NumStages;
       CUTLASS_PRAGMA_UNROLL
       for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
         copy(smem_tiled_copy_A, tCsA(_, _, k_block, curr_stage), tCrA_copy_view(_, _, k_block));
         copy(smem_tiled_copy_B, tCsB(_, _, k_block, curr_stage), tCrB_copy_view(_, _, k_block));
-        cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
-      }
-
-      // Wait for ALL in-flight loads: the next iteration (or the epilog)
-      // computes the tile just issued above, so its cp.async must be complete.
-      // wait<NumStages-2> is only valid with an (NumStages-1)-deep prefetch;
-      // this loop prefetches 1 tile ahead, so anything looser races.
-      cute::cp_async_wait<0>();
-      __syncthreads();
-    }
-
-    // Epilog: compute last k_tile
-    {
-      int last_stage = (num_k_tiles - 1) % NumStages;
-      CUTLASS_PRAGMA_UNROLL
-      for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-        copy(smem_tiled_copy_A, tCsA(_, _, k_block, last_stage), tCrA_copy_view(_, _, k_block));
-        copy(smem_tiled_copy_B, tCsB(_, _, k_block, last_stage), tCrB_copy_view(_, _, k_block));
         cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
       }
     }
@@ -442,6 +446,9 @@ struct CuteGemmGroupedTrABKernel {
   static constexpr int tN = cute::size<1>(TileShape{});  // tiles N
   static constexpr int tK = cute::size<2>(TileShape{});  // tiles gathered indices
   static constexpr int NumStages = TileConfig::NumStages;
+  // See CuteGemmGroupedKernel::PrefetchDepth.
+  static_assert(TileConfig::NumStages >= 2, "pipeline requires at least 2 smem stages");
+  static constexpr int PrefetchDepth = NumStages - 1;
 
   using SmemLayoutA = decltype(cute::tile_to_shape(
       SmemLayoutAtomA{},
@@ -531,46 +538,46 @@ struct CuteGemmGroupedTrABKernel {
       return;
     }
 
-    // Prolog: load shard's first g_tile into stage[0]
-    int g_start_first = shard_g_tile_start * tK;
-    _load_A_trAB(ptr_A, idx_a_g, sA(_, _, 0), k_start, g_start_first, K_dim, gather_size_g);
-    _load_B_trAB(ptr_B, idx_b_g, sB(_, _, 0), n_start, g_start_first, N, gather_size_g);
-    cute::cp_async_fence();
-    cute::cp_async_wait<0>();
-    __syncthreads();
+    // Prolog: prefetch the shard's first PrefetchDepth g-tiles, one cp.async
+    // commit group per g-tile. Fence even past the end of the range so every
+    // tile owns exactly one group and the mainloop wait count stays exact.
+    CUTLASS_PRAGMA_UNROLL
+    for (int s = 0; s < PrefetchDepth; ++s) {
+      if (s < num_g_tiles) {
+        int g_start = (shard_g_tile_start + s) * tK;
+        _load_A_trAB(ptr_A, idx_a_g, sA(_, _, s), k_start, g_start, K_dim, gather_size_g);
+        _load_B_trAB(ptr_B, idx_b_g, sB(_, _, s), n_start, g_start, N, gather_size_g);
+      }
+      cute::cp_async_fence();
+    }
 
     // Mainloop — iterate shard's g_tile range
     CUTLASS_PRAGMA_NO_UNROLL
-    for (int g_tile_local = 1; g_tile_local < num_g_tiles; ++g_tile_local) {
-      int curr_stage = (g_tile_local - 1) % NumStages;
-      int next_stage = g_tile_local % NumStages;
-      int g_tile_global = shard_g_tile_start + g_tile_local;
-      int g_start = g_tile_global * tK;
+    for (int g_tile_local = 0; g_tile_local < num_g_tiles; ++g_tile_local) {
+      // Tile g_tile_local's commit group is complete once at most
+      // PrefetchDepth-1 newer groups remain in flight.
+      cute::cp_async_wait<PrefetchDepth - 1>();
+      __syncthreads();
 
-      _load_A_trAB(ptr_A, idx_a_g, sA(_, _, next_stage), k_start, g_start, K_dim, gather_size_g);
-      _load_B_trAB(ptr_B, idx_b_g, sB(_, _, next_stage), n_start, g_start, N, gather_size_g);
+      // Refill: issue loads PrefetchDepth tiles ahead. The target stage was
+      // last read in the previous iteration; the barrier above orders those
+      // reads before these writes.
+      int load_g_tile = g_tile_local + PrefetchDepth;
+      if (load_g_tile < num_g_tiles) {
+        int load_stage = load_g_tile % NumStages;
+        int load_g_start = (shard_g_tile_start + load_g_tile) * tK;
+        _load_A_trAB(
+            ptr_A, idx_a_g, sA(_, _, load_stage), k_start, load_g_start, K_dim, gather_size_g);
+        _load_B_trAB(ptr_B, idx_b_g, sB(_, _, load_stage), n_start, load_g_start, N, gather_size_g);
+      }
       cute::cp_async_fence();
 
+      // Compute tile g_tile_local
+      int curr_stage = g_tile_local % NumStages;
       CUTLASS_PRAGMA_UNROLL
       for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
         copy(smem_tiled_copy_A, tCsA(_, _, k_block, curr_stage), tCrA_copy_view(_, _, k_block));
         copy(smem_tiled_copy_B, tCsB(_, _, k_block, curr_stage), tCrB_copy_view(_, _, k_block));
-        cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
-      }
-
-      // Wait for ALL in-flight loads — same 1-deep-prefetch constraint as the
-      // AD mainloop above; wait<NumStages-2> races the just-issued tile.
-      cute::cp_async_wait<0>();
-      __syncthreads();
-    }
-
-    // Epilog: compute last g_tile of shard
-    {
-      int last_stage = (num_g_tiles - 1) % NumStages;
-      CUTLASS_PRAGMA_UNROLL
-      for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-        copy(smem_tiled_copy_A, tCsA(_, _, k_block, last_stage), tCrA_copy_view(_, _, k_block));
-        copy(smem_tiled_copy_B, tCsB(_, _, k_block, last_stage), tCrB_copy_view(_, _, k_block));
         cute::gemm(tiled_mma, tCrA(_, _, k_block), tCrB(_, _, k_block), accum);
       }
     }
