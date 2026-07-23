@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
 from typing import Optional, Union
 
 import torch
@@ -17,6 +18,11 @@ from warpconvnet.nn.functional.point_pool import point_pool
 from warpconvnet.nn.functional.point_unpool import point_unpool
 from warpconvnet.nn.functional.transforms import cat
 from warpconvnet.nn.modules.activations import ReLU
+from warpconvnet.nn.modules.gradient_checkpointing import (
+    GradientCheckpointingMixin,
+    GradientCheckpointingModelMixin,
+    preserve_module_buffers,
+)
 from warpconvnet.nn.modules.point_conv import PointConv
 from warpconvnet.nn.modules.sequential import Sequential
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
@@ -83,7 +89,30 @@ class ConvTrBlock(nn.Module):
         return out
 
 
-class BasicBlock(nn.Module):
+class _BatchNormCheckpointingMixin(GradientCheckpointingMixin):
+    """Preserve BatchNorm running state during activation recomputation."""
+
+    _batch_norm_buffer_names = (
+        "running_mean",
+        "running_var",
+        "num_batches_tracked",
+    )
+
+    def _get_gradient_checkpointing_context_fn(self):
+        return self._batch_norm_checkpoint_contexts
+
+    def _batch_norm_checkpoint_contexts(self):
+        return (
+            nullcontext(),
+            preserve_module_buffers(
+                self,
+                self._batch_norm_buffer_names,
+                module_types=nn.modules.batchnorm._BatchNorm,
+            ),
+        )
+
+
+class BasicBlock(_BatchNormCheckpointingMixin, nn.Module):
     expansion = 1
 
     def __init__(
@@ -93,8 +122,10 @@ class BasicBlock(nn.Module):
         stride: int = 1,
         bias: bool = False,
         compute_dtype: Optional[torch.dtype] = None,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
+        self._init_gradient_checkpointing(use_checkpoint)
         self.conv1 = ConvBlock(
             in_channels,
             out_channels,
@@ -126,7 +157,7 @@ class BasicBlock(nn.Module):
 
         self.relu = ReLU(inplace=True)
 
-    def forward(self, x: Float[Tensor, "N C"]) -> Float[Tensor, "N C"]:
+    def _forward(self, x: Float[Tensor, "N C"]) -> Float[Tensor, "N C"]:
         identity = x
 
         out = self.conv1(x)
@@ -140,8 +171,11 @@ class BasicBlock(nn.Module):
 
         return out
 
+    def forward(self, x: Float[Tensor, "N C"]) -> Float[Tensor, "N C"]:
+        return self._gradient_checkpointed_call(self._forward, x)
 
-class BottleneckBlock(nn.Module):
+
+class BottleneckBlock(_BatchNormCheckpointingMixin, nn.Module):
     expansion = 4
 
     def __init__(
@@ -151,8 +185,10 @@ class BottleneckBlock(nn.Module):
         stride: int = 1,
         bias: bool = False,
         compute_dtype: Optional[torch.dtype] = None,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
+        self._init_gradient_checkpointing(use_checkpoint)
         mid_channels = out_channels // self.expansion
 
         self.conv1 = ConvBlock(
@@ -193,7 +229,7 @@ class BottleneckBlock(nn.Module):
 
         self.relu = ReLU(inplace=True)
 
-    def forward(self, x: Float[Tensor, "N C"]) -> Float[Tensor, "N C"]:
+    def _forward(self, x: Float[Tensor, "N C"]) -> Float[Tensor, "N C"]:
         identity = x
 
         out = self.conv1(x)
@@ -208,8 +244,11 @@ class BottleneckBlock(nn.Module):
 
         return out
 
+    def forward(self, x: Float[Tensor, "N C"]) -> Float[Tensor, "N C"]:
+        return self._gradient_checkpointed_call(self._forward, x)
 
-class MinkUNetBase(nn.Module):
+
+class MinkUNetBase(GradientCheckpointingModelMixin, nn.Module):
     """
     MinkUNetBase is a base class for MinkUNet models.
     It is based on the implementation from MinkowskiEngine, with minor modifications for readability.
@@ -226,6 +265,7 @@ class MinkUNetBase(nn.Module):
         init_dim: int = 32,
         BLOCK: Union[str, nn.Module] = BasicBlock,
         init_kernel_size: int = 1,
+        use_checkpoint: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -291,6 +331,9 @@ class MinkUNetBase(nn.Module):
 
         # Final convolution
         self.final = SparseConv3d(planes[7], out_channels, kernel_size=1, bias=True)
+
+        if use_checkpoint:
+            self.gradient_checkpointing_enable()
 
     def _make_layer(
         self,
