@@ -112,6 +112,7 @@ class SpaCeFormer(BaseSpatialModel):
         enc_rope_bases: Tuple[int, ...] = (250,) * 5,
         dec_rope_bases: Tuple[int, ...] = (250,) * 4,
         out_channels: int | None = None,
+        use_checkpoint: bool = False,
         # ... see source for full signature
     ): ...
     def forward(self, x: Voxels) -> Voxels: ...
@@ -160,6 +161,27 @@ model = SpaCeFormer(
 
 out = model(voxels)                    # Voxels with .feature_tensor of shape (M, 20)
 ```
+
+## Gradient checkpointing
+
+Each SpaCeFormer attention/FFN block is a checkpoint boundary. Enable all
+encoder and decoder blocks either through the constructor or at runtime:
+
+```python
+model = SpaCeFormer(
+    in_channels=C,
+    out_channels=20,
+    use_checkpoint=True,
+).to(device)
+
+# Equivalent runtime control:
+model.gradient_checkpointing_disable()
+model.gradient_checkpointing_enable()
+```
+
+Checkpointing is used only during gradient-enabled training. See
+[Gradient Checkpointing](../user_guide/gradient_checkpointing.md) for Hugging
+Face Trainer integration, recomputation behavior, and validation guidance.
 
 ## Pipeline
 

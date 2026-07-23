@@ -40,6 +40,10 @@
 
 ::: warpconvnet.nn.modules.embeddings
 
+### Gradient checkpointing
+
+::: warpconvnet.nn.modules.gradient_checkpointing
+
 ### Normalizations
 
 ::: warpconvnet.nn.modules.normalizations

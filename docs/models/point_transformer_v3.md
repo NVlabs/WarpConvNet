@@ -36,7 +36,8 @@ class PointTransformerV3(BaseSpatialModel):
         dec_num_head: Tuple[int, ...] = (4, 6, 8, 16),
         dec_patch_size: Tuple[int, ...] = (1024, 1024, 1024, 1024),
         shuffle_orders: bool = True,
-        order: Tuple[POINT_ORDERING, ...] = ("z", "hilbert"),
+        orders: Tuple[POINT_ORDERING, ...] = tuple(POINT_ORDERING),
+        use_checkpoint: bool = False,
     ): ...
 ```
 
@@ -61,6 +62,26 @@ model = PointToVoxel(
 
 out = model(pc)                     # Points with 48-D per-point features
 ```
+
+## Gradient checkpointing
+
+Each `PatchAttentionBlock` is a checkpoint boundary. Enable all encoder and
+decoder blocks through the constructor or the model-level API:
+
+```python
+model = PointTransformerV3(
+    in_channels=7,
+    out_channels=20,
+    use_checkpoint=True,
+).cuda()
+
+# Equivalent runtime control:
+model.gradient_checkpointing_disable()
+model.gradient_checkpointing_enable()
+```
+
+See [Gradient Checkpointing](../user_guide/gradient_checkpointing.md) for
+Hugging Face Trainer integration and checkpointing constraints.
 
 ## Reference
 

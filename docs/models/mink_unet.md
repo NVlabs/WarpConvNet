@@ -35,7 +35,9 @@ class MinkUNetBase(nn.Module):
         planes: Tuple[int, ...] = (32, 64, 128, 256, 256, 128, 96, 96),
         layers: Tuple[int, ...] = (2, 2, 2, 2, 2, 2, 2, 2),
         init_dim: int = 32,
-        block_type: type = BasicBlock,
+        BLOCK: type[nn.Module] = BasicBlock,
+        init_kernel_size: int = 1,
+        use_checkpoint: bool = False,
     ): ...
 ```
 
@@ -71,6 +73,30 @@ model:
   in_channels: 3
   out_channels: 20
 ```
+
+## Gradient checkpointing
+
+Every `BasicBlock` and `BottleneckBlock` is a checkpoint boundary. Enable all
+encoder and decoder residual blocks through the constructor or at runtime:
+
+```python
+model = MinkUNet34(
+    in_channels=3,
+    out_channels=20,
+    use_checkpoint=True,
+).cuda()
+
+# Equivalent runtime control:
+model.gradient_checkpointing_disable()
+model.gradient_checkpointing_enable()
+```
+
+Checkpoint recomputation preserves each block's BatchNorm running mean,
+running variance, and batch counter, so one logical forward produces one
+persistent statistics update. This state-preserving path is not supported
+under `torch.compile`. See
+[Gradient Checkpointing](../user_guide/gradient_checkpointing.md) for the
+implementation constraints and Hugging Face Trainer integration.
 
 ## Reference
 
