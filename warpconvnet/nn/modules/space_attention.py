@@ -18,6 +18,7 @@ from warpconvnet.nn.functional.voxel_encode import (
 from warpconvnet.nn.modules.activations import DropPath
 from warpconvnet.nn.modules.attention import FeedForward, PatchAttention
 from warpconvnet.nn.modules.base_module import BaseSpatialModule
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingMixin
 from warpconvnet.nn.modules.mlp import BatchedLinear, Linear
 from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.rope import VoxelRotaryPositionalEmbeddings
@@ -260,10 +261,10 @@ STR2ATTN = {
 }
 
 
-class SpaCeFormerBlockBase(BaseSpatialModule):
+class SpaCeFormerBlockBase(GradientCheckpointingMixin, BaseSpatialModule):
     """Shared sparse-conv shortcut + attention + FFN parameter holder.
 
-    Subclasses supply the norm-residual layout in their ``forward``. The
+    Subclasses supply the norm-residual layout in their ``_forward``. The
     attention sublayer is selected via ``attn_type`` from `STR2ATTN`:
 
     - ``"curve"`` → `PatchAttention` (1D attention along a space-filling curve).
@@ -289,8 +290,10 @@ class SpaCeFormerBlockBase(BaseSpatialModule):
         order: POINT_ORDERING = POINT_ORDERING.RANDOM,
         use_rope: bool = False,
         rope_base: int = 250,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
+        self._init_gradient_checkpointing(use_checkpoint)
         self.order = order
         assert attn_type in STR2ATTN, f"Invalid attention type: {attn_type}"
         attn_block = STR2ATTN[attn_type]
@@ -346,11 +349,22 @@ class SpaCeFormerBlockBase(BaseSpatialModule):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+    def forward(
+        self,
+        x: Geometry,
+        order: Optional[Union[POINT_ORDERING, str]] = None,
+    ) -> Geometry:
+        return self._gradient_checkpointed_call(self._forward, x, order)
+
 
 class PreNormBlock(SpaCeFormerBlockBase):
     """Standard pre-LN: ``x + sublayer(norm(x))``. Modern transformer default."""
 
-    def forward(self, x: Geometry, order: Optional[Union[POINT_ORDERING, str]] = None) -> Geometry:
+    def _forward(
+        self,
+        x: Geometry,
+        order: Optional[Union[POINT_ORDERING, str]] = None,
+    ) -> Geometry:
         x = self.conv(x) + self.conv_shortcut(x)
         x = self.drop_path(self.attention(self.norm1(x), order)) + x
         x = self.drop_path(self.mlp(self.norm2(x))) + x
@@ -360,7 +374,11 @@ class PreNormBlock(SpaCeFormerBlockBase):
 class PostNormBlock(SpaCeFormerBlockBase):
     """Post-LN variant: norm applied after each sublayer's residual sum."""
 
-    def forward(self, x: Geometry, order: Optional[Union[POINT_ORDERING, str]] = None) -> Geometry:
+    def _forward(
+        self,
+        x: Geometry,
+        order: Optional[Union[POINT_ORDERING, str]] = None,
+    ) -> Geometry:
         x = self.conv(x) + self.conv_shortcut(x)
         x = self.drop_path(self.attention(x, order)) + x
         x = self.norm1(x)
@@ -376,7 +394,11 @@ class StreamNormBlock(SpaCeFormerBlockBase):
     post-norm value, so gradients flow through the norm on the skip path.
     """
 
-    def forward(self, x: Geometry, order: Optional[Union[POINT_ORDERING, str]] = None) -> Geometry:
+    def _forward(
+        self,
+        x: Geometry,
+        order: Optional[Union[POINT_ORDERING, str]] = None,
+    ) -> Geometry:
         x = self.conv(x) + self.conv_shortcut(x)
         x = self.norm1(x)
         x = self.drop_path(self.attention(x, order)) + x

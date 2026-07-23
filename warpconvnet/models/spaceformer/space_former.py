@@ -24,6 +24,9 @@ from warpconvnet.geometry.base.geometry import Geometry
 from warpconvnet.geometry.coords.ops.serialization import POINT_ORDERING
 from warpconvnet.nn.functional.voxel_encode import WINDOW_OFFSET_TYPE
 from warpconvnet.nn.modules.base_module import BaseSpatialModel
+from warpconvnet.nn.modules.gradient_checkpointing import (
+    GradientCheckpointingModelMixin,
+)
 from warpconvnet.nn.modules.mlp import Linear
 from warpconvnet.nn.modules.sequential import Sequential, TupleSequential
 from warpconvnet.nn.modules.space_attention import block_factory
@@ -74,7 +77,7 @@ def _parse_attn_type(
     raise ValueError(f"Invalid attn_type: {attn_type!r}")
 
 
-class SpaCeFormer(BaseSpatialModel):
+class SpaCeFormer(GradientCheckpointingModelMixin, BaseSpatialModel):
     """Mixed spatial attention U-Net for sparse voxels.
 
     Paper: https://arxiv.org/abs/2604.20395
@@ -108,6 +111,7 @@ class SpaCeFormer(BaseSpatialModel):
         patch_orders: list of space-filling-curve orderings used by ``curve`` levels.
         conv_norm_layer: norm applied after stem and pool/unpool conv layers.
         out_channels: optional final linear projection.
+        use_checkpoint: enable activation checkpointing for every attention block.
     """
 
     def __init__(
@@ -140,6 +144,7 @@ class SpaCeFormer(BaseSpatialModel):
         patch_orders: Tuple[POINT_ORDERING, ...] = tuple(POINT_ORDERING),
         conv_norm_layer: Optional[type] = nn.BatchNorm1d,
         out_channels: Optional[int] = None,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
 
@@ -222,6 +227,7 @@ class SpaCeFormer(BaseSpatialModel):
                         attn_type=enc_attn_types[i],
                         use_rope=use_rope,
                         rope_base=enc_rope_bases[i],
+                        use_checkpoint=use_checkpoint,
                     )
                     for _ in range(enc_depths[i])
                 ]
@@ -275,6 +281,7 @@ class SpaCeFormer(BaseSpatialModel):
                         attn_type=dec_attn_types[i],
                         use_rope=use_rope,
                         rope_base=dec_rope_bases[i],
+                        use_checkpoint=use_checkpoint,
                     )
                     for _ in range(dec_depths[i])
                 ]

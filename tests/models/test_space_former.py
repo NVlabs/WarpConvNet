@@ -7,7 +7,7 @@ import torch
 from warpconvnet.geometry.types.conversion.to_voxels import points_to_voxels
 from warpconvnet.geometry.types.points import Points
 from warpconvnet.geometry.types.voxels import Voxels
-from warpconvnet.models.space_former import SpaCeFormer
+from warpconvnet.models import SpaCeFormer
 
 
 @pytest.fixture

@@ -18,6 +18,10 @@ from warpconvnet.geometry.types.points import Points
 from warpconvnet.nn.modules.activations import GELU, DropPath
 from warpconvnet.nn.modules.attention import PatchAttention
 from warpconvnet.nn.modules.base_module import BaseSpatialModel, BaseSpatialModule
+from warpconvnet.nn.modules.gradient_checkpointing import (
+    GradientCheckpointingMixin,
+    GradientCheckpointingModelMixin,
+)
 from warpconvnet.nn.modules.mlp import Linear
 from warpconvnet.nn.modules.normalizations import LayerNorm
 from warpconvnet.nn.modules.sequential import Sequential
@@ -54,7 +58,7 @@ class MLP(nn.Module):
         return x
 
 
-class PatchAttentionBlock(BaseSpatialModule):
+class PatchAttentionBlock(GradientCheckpointingMixin, BaseSpatialModule):
     def __init__(
         self,
         in_channels: int,
@@ -72,8 +76,10 @@ class PatchAttentionBlock(BaseSpatialModule):
         act_layer: type = GELU,
         attn_type: Literal["patch"] = "patch",
         order: POINT_ORDERING = POINT_ORDERING.MORTON_XYZ,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
+        self._init_gradient_checkpointing(use_checkpoint)
         self.order = order
         self.conv = Sequential(
             SparseConv3d(
@@ -112,7 +118,11 @@ class PatchAttentionBlock(BaseSpatialModule):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(self, x: Geometry, order: Optional[POINT_ORDERING | str] = None) -> Geometry:
+    def _forward(
+        self,
+        x: Geometry,
+        order: Optional[POINT_ORDERING | str] = None,
+    ) -> Geometry:
         x = self.conv(x) + self.conv_shortcut(x)
 
         # Attention block
@@ -121,6 +131,13 @@ class PatchAttentionBlock(BaseSpatialModule):
         # MLP block
         x = self.drop_path(self.mlp(self.norm2(x))) + x
         return x
+
+    def forward(
+        self,
+        x: Geometry,
+        order: Optional[POINT_ORDERING | str] = None,
+    ) -> Geometry:
+        return self._gradient_checkpointed_call(self._forward, x, order)
 
 
 class SerializedUnpooling(BaseSpatialModule):
@@ -168,7 +185,7 @@ class SerializedUnpooling(BaseSpatialModule):
         return out
 
 
-class PointTransformerV3(BaseSpatialModel):
+class PointTransformerV3(GradientCheckpointingModelMixin, BaseSpatialModel):
     def __init__(
         self,
         in_channels: int = 6,
@@ -189,6 +206,7 @@ class PointTransformerV3(BaseSpatialModel):
         orders: Tuple[POINT_ORDERING, ...] = tuple(POINT_ORDERING),
         shuffle_orders: bool = True,
         attn_type: Literal["patch"] = "patch",
+        use_checkpoint: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -235,6 +253,7 @@ class PointTransformerV3(BaseSpatialModel):
                         drop_path=drop_path,
                         order=self.orders[i % len(self.orders)],
                         attn_type=attn_type,
+                        use_checkpoint=use_checkpoint,
                     )
                     for _ in range(enc_depths[i])
                 ]
@@ -284,6 +303,7 @@ class PointTransformerV3(BaseSpatialModel):
                         drop_path=drop_path,
                         order=self.orders[i % len(self.orders)],
                         attn_type=attn_type,
+                        use_checkpoint=use_checkpoint,
                     )
                     for _ in range(dec_depths[i])
                 ]
