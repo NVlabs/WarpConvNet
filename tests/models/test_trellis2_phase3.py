@@ -83,6 +83,17 @@ def test_ss_flow_state_dict_roundtrip(flow_model):
     torch.testing.assert_close(flow_model(x, t, cond), other(x, t, cond))
 
 
+def test_ss_flow_gradient_checkpointing_toggle(flow_model):
+    assert not flow_model.is_gradient_checkpointing
+    flow_model.gradient_checkpointing_enable()
+    assert flow_model.is_gradient_checkpointing
+    assert flow_model.use_checkpoint
+    assert all(block.gradient_checkpointing for block in flow_model.blocks)
+    flow_model.gradient_checkpointing_disable()
+    assert not flow_model.is_gradient_checkpointing
+    assert not flow_model.use_checkpoint
+
+
 @pytest.mark.skipif(not _HAS_REF, reason="upstream trellis2 ref not on PYTHONPATH")
 def test_ss_flow_matches_reference():
     # CPU + fp32 ⇒ both sides must use torch SDPA.

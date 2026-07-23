@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 from warpconvnet.geometry.types.voxels import Voxels
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingMixin
 from warpconvnet.nn.modules.normalizations import LayerNorm32
 from warpconvnet.nn.modules.sparse_dit_attention import SparseMultiHeadAttention
 
@@ -61,7 +62,7 @@ class SparseFeedForwardNet(nn.Module):
 # -----------------------------------------------------------------------------
 # Modulated self-only block
 # -----------------------------------------------------------------------------
-class ModulatedSparseTransformerBlock(nn.Module):
+class ModulatedSparseTransformerBlock(GradientCheckpointingMixin, nn.Module):
     """Sparse DiT block: ``norm1 → adaLN(MSA) → norm2 → adaLN(FFN)``."""
 
     def __init__(
@@ -78,7 +79,7 @@ class ModulatedSparseTransformerBlock(nn.Module):
         share_mod: bool = False,
     ):
         super().__init__()
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
         self.share_mod = share_mod
         self.norm1 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
         self.norm2 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
@@ -122,15 +123,13 @@ class ModulatedSparseTransformerBlock(nn.Module):
         return x + h
 
     def forward(self, x: Voxels, mod: torch.Tensor) -> Voxels:
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, mod, use_reentrant=False)
-        return self._forward(x, mod)
+        return self._gradient_checkpointed_call(self._forward, x, mod)
 
 
 # -----------------------------------------------------------------------------
 # Modulated cross block (self + cross + FFN)
 # -----------------------------------------------------------------------------
-class ModulatedSparseTransformerCrossBlock(nn.Module):
+class ModulatedSparseTransformerCrossBlock(GradientCheckpointingMixin, nn.Module):
     """Sparse DiT cross block: ``MSA → MCA → FFN`` with adaLN modulation.
 
     The cross-attn norm (``norm2``) is the only norm with affine params,
@@ -153,7 +152,7 @@ class ModulatedSparseTransformerCrossBlock(nn.Module):
         share_mod: bool = False,
     ):
         super().__init__()
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
         self.share_mod = share_mod
         self.norm1 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
         self.norm2 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
@@ -222,8 +221,4 @@ class ModulatedSparseTransformerCrossBlock(nn.Module):
         mod: torch.Tensor,
         context: torch.Tensor | Voxels,
     ) -> Voxels:
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(
-                self._forward, x, mod, context, use_reentrant=False
-            )
-        return self._forward(x, mod, context)
+        return self._gradient_checkpointed_call(self._forward, x, mod, context)

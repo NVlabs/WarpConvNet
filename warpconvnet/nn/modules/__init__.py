@@ -24,6 +24,12 @@ from warpconvnet.nn.modules.embeddings import (
     SinusoidalPositionEmbedder,
     TimestepEmbedder,
 )
+from warpconvnet.nn.modules.gradient_checkpointing import (
+    GradientCheckpointingMixin,
+    GradientCheckpointingModelMixin,
+    configure_gradient_checkpointing,
+    preserve_module_buffers,
+)
 from warpconvnet.nn.modules.sparse_convnext import SparseConvNeXtBlock3d
 from warpconvnet.nn.modules.sparse_dit import (
     ModulatedSparseTransformerBlock,
@@ -48,6 +54,8 @@ from warpconvnet.nn.modules.sparse_unet import SparseUNetDecoderStages
 __all__ = [
     "DownsampleBlock3d",
     "FeedForwardNet",
+    "GradientCheckpointingMixin",
+    "GradientCheckpointingModelMixin",
     "ModulatedSparseTransformerBlock",
     "ModulatedSparseTransformerCrossBlock",
     "ModulatedTransformerBlock",
@@ -69,6 +77,8 @@ __all__ = [
     "SparseUpsample",
     "TimestepEmbedder",
     "UpsampleBlock3d",
+    "configure_gradient_checkpointing",
     "norm_layer_3d",
+    "preserve_module_buffers",
     "sparse_scaled_dot_product_attention",
 ]

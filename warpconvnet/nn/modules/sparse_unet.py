@@ -8,11 +8,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from warpconvnet.geometry.types.voxels import Voxels
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingMixin
 from warpconvnet.nn.modules.normalizations import LayerNorm32
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
 from warpconvnet.nn.modules.sparse_resample import SparseChannel2Spatial, SparseSpatial2Channel
@@ -114,7 +114,7 @@ class SparseUNetDecoderStages(nn.ModuleList):
         return (x, subs) if return_subs else x
 
 
-class SparseChannelToSpatialResBlock3d(nn.Module):
+class SparseChannelToSpatialResBlock3d(GradientCheckpointingMixin, nn.Module):
     """Residual block that upsamples sparse voxels via channel-to-spatial unpacking.
 
     The block projects ``channels`` to ``out_channels * factor**3`` channels,
@@ -138,7 +138,7 @@ class SparseChannelToSpatialResBlock3d(nn.Module):
         self.channels = channels
         self.out_channels = out_channels or channels
         self.factor = factor
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
         self.pred_subdiv = pred_subdiv
         self.num_children = factor**3
 
@@ -190,12 +190,10 @@ class SparseChannelToSpatialResBlock3d(nn.Module):
         x: Voxels,
         subdiv: Voxels | None = None,
     ):
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, subdiv, use_reentrant=False)
-        return self._forward(x, subdiv)
+        return self._gradient_checkpointed_call(self._forward, x, subdiv)
 
 
-class SparseSpatialToChannelResBlock3d(nn.Module):
+class SparseSpatialToChannelResBlock3d(GradientCheckpointingMixin, nn.Module):
     """Residual block that downsamples sparse voxels via spatial-to-channel packing.
 
     Mirror of ``SparseChannelToSpatialResBlock3d`` for the encoder direction.
@@ -228,7 +226,7 @@ class SparseSpatialToChannelResBlock3d(nn.Module):
         self.channels = channels
         self.out_channels = out_channels or channels
         self.factor = factor
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
         self.num_children = factor**3
 
         # ``conv1`` produces ``out_channels // num_children`` features per child
@@ -278,9 +276,7 @@ class SparseSpatialToChannelResBlock3d(nn.Module):
         return h
 
     def forward(self, x: Voxels) -> Voxels:
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, use_reentrant=False)
-        return self._forward(x)
+        return self._gradient_checkpointed_call(self._forward, x)
 
 
 class SparseUNetEncoderStages(nn.ModuleList):

@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from warpconvnet.geometry.types.voxels import Voxels
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingModelMixin
 from warpconvnet.nn.modules.sparse_unet import (
     SparseChannelToSpatialResBlock3d,
     SparseSpatialToChannelResBlock3d,
@@ -138,7 +139,7 @@ _BLOCK_REGISTRY = {
 }
 
 
-class SparseUnetVaeDecoder(nn.Module):
+class SparseUnetVaeDecoder(GradientCheckpointingModelMixin, nn.Module):
     """Sparse U-Net decoder used by the TRELLIS.2 shape VAE.
 
     Channels go from ``model_channels[0]`` (latent-side) up to
@@ -351,7 +352,7 @@ _ENCODER_BLOCK_REGISTRY = {
 }
 
 
-class SparseUnetVaeEncoder(nn.Module):
+class SparseUnetVaeEncoder(GradientCheckpointingModelMixin, nn.Module):
     """Sparse U-Net encoder used by the TRELLIS.2 shape VAE.
 
     Mirrors ``trellis2.models.sc_vaes.sparse_unet_vae.SparseUnetVaeEncoder``.

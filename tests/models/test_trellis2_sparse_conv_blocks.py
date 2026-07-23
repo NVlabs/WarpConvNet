@@ -72,6 +72,18 @@ def test_convnext_block_state_dict_keys():
     assert {"mlp.0.weight", "mlp.2.weight"} <= keys
 
 
+def test_convnext_checkpoint_flag_alias():
+    blk = SparseConvNeXtBlock3d(channels=32, use_checkpoint=True)
+    assert blk.gradient_checkpointing
+    assert blk.use_checkpoint
+
+    blk.use_checkpoint = False
+    assert not blk.gradient_checkpointing
+
+    blk.gradient_checkpointing = True
+    assert blk.use_checkpoint
+
+
 def test_sparse_conv3d_is_native_warpconvnet_module():
     down = SparseConv3d(8, 16, 3, stride=2)
     assert down.stride == (2, 2, 2)
@@ -97,6 +109,55 @@ def test_convnext_block_forward_shape():
     v = _make_voxels(B=2, N_per=32, C=32, R=8).to("cuda")
     out = blk(v)
     assert out.feats.shape == v.feats.shape
+
+
+@_skip_no_cuda
+def test_convnext_checkpoint_backward_matches_uncheckpointed():
+    """Checkpointing must recompute once and preserve all gradients."""
+    torch.manual_seed(123)
+    reference = SparseConvNeXtBlock3d(channels=32, use_checkpoint=False).cuda()
+    checkpointed = SparseConvNeXtBlock3d(channels=32, use_checkpoint=True).cuda()
+
+    # The published block zero-initializes the final MLP projection. Make it
+    # nonzero so this test exercises gradients through the sparse convolution.
+    with torch.no_grad():
+        reference.mlp[2].weight.normal_(0, 0.02)
+        reference.mlp[2].bias.normal_(0, 0.02)
+    checkpointed.load_state_dict(reference.state_dict())
+
+    template = _make_voxels(B=1, N_per=64, C=32, R=4).to("cuda")
+
+    def run(block):
+        features = template.feats.detach().clone().requires_grad_(True)
+        voxels = template.replace_features(features)
+        calls = 0
+        original_forward = block._forward
+
+        def counted_forward(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original_forward(*args, **kwargs)
+
+        block._forward = counted_forward
+        output = block(voxels).feats
+        output.float().square().mean().backward()
+        parameter_grads = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in block.named_parameters()
+            if parameter.grad is not None
+        }
+        return output.detach(), features.grad.detach(), parameter_grads, calls
+
+    ref_out, ref_input_grad, ref_parameter_grads, ref_calls = run(reference)
+    out, input_grad, parameter_grads, calls = run(checkpointed)
+
+    assert ref_calls == 1
+    assert calls == 2
+    torch.testing.assert_close(out, ref_out)
+    torch.testing.assert_close(input_grad, ref_input_grad)
+    assert parameter_grads.keys() == ref_parameter_grads.keys()
+    for name in parameter_grads:
+        torch.testing.assert_close(parameter_grads[name], ref_parameter_grads[name])
 
 
 # -----------------------------------------------------------------------------

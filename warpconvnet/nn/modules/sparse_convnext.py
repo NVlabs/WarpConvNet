@@ -17,10 +17,10 @@ their own block with a layout-compatible conv wrapper.
 """
 from __future__ import annotations
 
-import torch
 import torch.nn as nn
 
 from warpconvnet.geometry.types.voxels import Voxels
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingMixin
 from warpconvnet.nn.modules.normalizations import LayerNorm32
 from warpconvnet.nn.modules.sparse_conv import SparseConv3d
 from warpconvnet.nn.utils import zero_module
@@ -29,7 +29,7 @@ from warpconvnet.nn.utils import zero_module
 __all__ = ["SparseConvNeXtBlock3d"]
 
 
-class SparseConvNeXtBlock3d(nn.Module):
+class SparseConvNeXtBlock3d(GradientCheckpointingMixin, nn.Module):
     def __init__(
         self,
         channels: int,
@@ -40,7 +40,7 @@ class SparseConvNeXtBlock3d(nn.Module):
     ):
         super().__init__()
         self.channels = channels
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
 
         self.norm = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.conv = conv_cls(channels, channels, kernel_size=kernel_size)
@@ -57,6 +57,4 @@ class SparseConvNeXtBlock3d(nn.Module):
         return h + x
 
     def forward(self, x: Voxels) -> Voxels:
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, use_reentrant=False)
-        return self._forward(x)
+        return self._gradient_checkpointed_call(self._forward, x)

@@ -95,6 +95,15 @@ def test_slat_flow_state_dict_keys():
     assert "adaLN_modulation.1.weight" in sd  # share_mod=True
     assert "blocks.0.modulation" in sd  # block-local modulation per share_mod
 
+    assert not m.is_gradient_checkpointing
+    m.gradient_checkpointing_enable()
+    assert m.is_gradient_checkpointing
+    assert m.use_checkpoint
+    assert all(block.gradient_checkpointing for block in m.blocks)
+    m.gradient_checkpointing_disable()
+    assert not m.is_gradient_checkpointing
+    assert not m.use_checkpoint
+
 
 def test_slat_flow_param_count_for_4b_config():
     """Real config from configs/gen/slat_flow_img2shape_dit_1_3B_512_bf16.json.

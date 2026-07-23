@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingModelMixin
 from warpconvnet.nn.utils import convert_module_parameters_to
 
 from .blocks_dense import (
@@ -36,7 +37,7 @@ def _convert_module_to(m: nn.Module, dtype: torch.dtype) -> None:
     convert_module_parameters_to(m, dtype)
 
 
-class SparseStructureFlowModel(nn.Module):
+class SparseStructureFlowModel(GradientCheckpointingModelMixin, nn.Module):
     def __init__(
         self,
         resolution: int,

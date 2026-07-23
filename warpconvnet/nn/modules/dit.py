@@ -23,6 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from warpconvnet.nn.modules.embeddings import RotaryPositionEmbedder
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingMixin
 from warpconvnet.nn.modules.normalizations import LayerNorm32, MultiHeadRMSNorm
 
 
@@ -163,7 +164,7 @@ class FeedForwardNet(nn.Module):
         return self.mlp(x)
 
 
-class ModulatedTransformerBlock(nn.Module):
+class ModulatedTransformerBlock(GradientCheckpointingMixin, nn.Module):
     """DiT block: norm → adaLN-modulated self-attn → norm → adaLN-modulated FFN."""
 
     def __init__(
@@ -180,7 +181,7 @@ class ModulatedTransformerBlock(nn.Module):
         share_mod: bool = False,
     ):
         super().__init__()
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
         self.share_mod = share_mod
         self.norm1 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
         self.norm2 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
@@ -232,14 +233,10 @@ class ModulatedTransformerBlock(nn.Module):
         mod: torch.Tensor,
         phases: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(
-                self._forward, x, mod, phases, use_reentrant=False
-            )
-        return self._forward(x, mod, phases)
+        return self._gradient_checkpointed_call(self._forward, x, mod, phases)
 
 
-class ModulatedTransformerCrossBlock(nn.Module):
+class ModulatedTransformerCrossBlock(GradientCheckpointingMixin, nn.Module):
     """DiT cross block: self-attn → cross-attn → FFN with adaLN modulation."""
 
     def __init__(
@@ -258,7 +255,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
         share_mod: bool = False,
     ):
         super().__init__()
-        self.use_checkpoint = use_checkpoint
+        self._init_gradient_checkpointing(use_checkpoint)
         self.share_mod = share_mod
         self.norm1 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
         self.norm2 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
@@ -326,8 +323,4 @@ class ModulatedTransformerCrossBlock(nn.Module):
         context: torch.Tensor,
         phases: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(
-                self._forward, x, mod, context, phases, use_reentrant=False
-            )
-        return self._forward(x, mod, context, phases)
+        return self._gradient_checkpointed_call(self._forward, x, mod, context, phases)

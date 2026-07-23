@@ -61,6 +61,14 @@ def test_construct_from_published_config() -> None:
     n_params = sum(p.numel() for p in enc.parameters())
     # Upstream reports ~177M params for the 4B shape encoder. Sanity: > 100M.
     assert n_params > 100_000_000, f"unexpectedly small encoder ({n_params:,} params)"
+    checkpointable = [m for m in enc.modules() if hasattr(m, "gradient_checkpointing")]
+    assert len(checkpointable) == 36
+    assert sum(m.gradient_checkpointing for m in checkpointable) == 6
+
+    enc.gradient_checkpointing_enable()
+    assert all(m.gradient_checkpointing for m in checkpointable)
+    enc.gradient_checkpointing_disable()
+    assert not any(m.gradient_checkpointing for m in checkpointable)
     print(f"[ok] encoder constructed: {n_params/1e6:.1f}M params")
 
 
@@ -73,9 +81,9 @@ def test_synthetic_roundtrip() -> None:
     enc = _build_encoder()
     sd = OrderedDict((k, torch.zeros_like(v)) for k, v in enc.state_dict().items())
     missing, unexpected = enc.load_state_dict(sd, strict=True)
-    assert not missing and not unexpected, (
-        f"round-trip missing={len(missing)} unexpected={len(unexpected)}"
-    )
+    assert (
+        not missing and not unexpected
+    ), f"round-trip missing={len(missing)} unexpected={len(unexpected)}"
     print(f"[ok] state-dict round-trip clean ({len(sd)} tensors)")
 
 
@@ -96,9 +104,9 @@ def test_load_published_safetensors(path: str) -> None:
         print(f"[load] first 10 unexpected: {unexpected[:10]}")
     if missing:
         print(f"[load] first 10 missing: {missing[:10]}")
-    assert not unexpected, (
-        f"published encoder has {len(unexpected)} keys our port doesn't recognize"
-    )
+    assert (
+        not unexpected
+    ), f"published encoder has {len(unexpected)} keys our port doesn't recognize"
     print("[ok] published safetensors load with no unexpected keys")
 
 

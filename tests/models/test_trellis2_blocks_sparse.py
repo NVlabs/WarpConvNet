@@ -148,6 +148,70 @@ def test_modulated_cross_block_forward(share_mod):
     assert out.feats.shape == v.feats.shape
 
 
+@_skip_no_cuda
+@_skip_no_flash
+def test_modulated_self_block_checkpoint_backward_matches_uncheckpointed():
+    torch.manual_seed(31)
+    reference = ModulatedSparseTransformerBlock(
+        channels=32,
+        num_heads=4,
+        mlp_ratio=2.0,
+        use_checkpoint=False,
+    ).cuda()
+    checkpointed = ModulatedSparseTransformerBlock(
+        channels=32,
+        num_heads=4,
+        mlp_ratio=2.0,
+        use_checkpoint=True,
+    ).cuda()
+    _half_linears(reference)
+    _half_linears(checkpointed)
+    checkpointed.load_state_dict(reference.state_dict())
+
+    template = _make_voxels(B=2, N_per=16, C=32, seed=31).to("cuda").half()
+    base_mod = torch.randn(2, 32, device="cuda", dtype=torch.float16)
+
+    def run(block):
+        features = template.feats.detach().clone().requires_grad_(True)
+        voxels = template.replace_features(features)
+        mod = base_mod.detach().clone().requires_grad_(True)
+        calls = 0
+        original_forward = block._forward
+
+        def counted_forward(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original_forward(*args, **kwargs)
+
+        block._forward = counted_forward
+        output = block(voxels, mod).feats
+        output.float().square().mean().backward()
+        parameter_grads = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in block.named_parameters()
+            if parameter.grad is not None
+        }
+        return (
+            output.detach(),
+            features.grad.detach(),
+            mod.grad.detach(),
+            parameter_grads,
+            calls,
+        )
+
+    ref_out, ref_x_grad, ref_mod_grad, ref_parameter_grads, ref_calls = run(reference)
+    out, x_grad, mod_grad, parameter_grads, calls = run(checkpointed)
+
+    assert ref_calls == 1
+    assert calls == 2
+    torch.testing.assert_close(out, ref_out)
+    torch.testing.assert_close(x_grad, ref_x_grad)
+    torch.testing.assert_close(mod_grad, ref_mod_grad)
+    assert parameter_grads.keys() == ref_parameter_grads.keys()
+    for name in parameter_grads:
+        torch.testing.assert_close(parameter_grads[name], ref_parameter_grads[name])
+
+
 # -----------------------------------------------------------------------------
 # Reference parity (upstream trellis2)
 # -----------------------------------------------------------------------------

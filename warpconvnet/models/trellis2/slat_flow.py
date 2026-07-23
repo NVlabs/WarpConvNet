@@ -25,6 +25,7 @@ from warpconvnet.nn.modules.embeddings import (
     SinusoidalPositionEmbedder,
     TimestepEmbedder,
 )
+from warpconvnet.nn.modules.gradient_checkpointing import GradientCheckpointingModelMixin
 from warpconvnet.nn.utils import convert_module_parameters_to
 
 from .blocks_dense import manual_cast, str_to_dtype
@@ -38,7 +39,7 @@ def _convert_module_to(m: nn.Module, dtype: torch.dtype) -> None:
     convert_module_parameters_to(m, dtype)
 
 
-class SLatFlowModel(nn.Module):
+class SLatFlowModel(GradientCheckpointingModelMixin, nn.Module):
     """Image- (or shape-) conditioned sparse DiT for SLAT diffusion.
 
     Architecture:
