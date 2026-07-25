@@ -201,6 +201,14 @@ WARPCONVNET_AUTOTUNE_LOG = _get_env_bool("WARPCONVNET_AUTOTUNE_LOG", True)
 #   export WARPCONVNET_USE_FP16_ACCUM=false  # global fp32 accumulator (default)
 WARPCONVNET_USE_FP16_ACCUM = _get_env_bool("WARPCONVNET_USE_FP16_ACCUM", False)
 
+# Numeric self-check during BACKWARD auto-tuning.
+# When True (default), each backward candidate's grad_in/grad_weight is compared
+# against an explicit_gemm reference computed once per config; candidates that
+# silently return a zero gradient (the reported cin64 dgrad zero-grad failure
+# mode) or that diverge from the reference beyond tolerance are disqualified
+# exactly like a candidate that raised. Set to false to disable if it misfires.
+WARPCONVNET_AUTOTUNE_NUMERIC_CHECK = _get_env_bool("WARPCONVNET_AUTOTUNE_NUMERIC_CHECK", True)
+
 
 # Channel-count ceiling under which F16-accumulator pcoff (E1 offset-precompute)
 # mask_gemm tiles 54/55/56/57 (and dgrad aliases 64-67 / 905-908) are allowed

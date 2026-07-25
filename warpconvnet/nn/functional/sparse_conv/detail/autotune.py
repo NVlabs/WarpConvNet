@@ -30,9 +30,24 @@ from .backends import (
     FwdCtx,
     benchmark_backward,
     benchmark_forward,
+    run_backward,
 )
+from warpconvnet.constants import WARPCONVNET_AUTOTUNE_NUMERIC_CHECK
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Backward numeric self-check thresholds
+# ---------------------------------------------------------------------------
+#
+# A candidate whose grad abs-sum falls below this fraction of the reference's
+# abs-sum (while the reference is materially nonzero) is treated as a silent
+# zero gradient — the reported cin64 dgrad failure mode.
+_NUMERIC_ZERO_RATIO = 1e-3
+# A candidate whose mean-relative difference from the reference exceeds this is
+# treated as garbage. Generous enough that legitimate F16-accumulator tiles
+# (2-3x worse rel-diff than f32, absolute ~1e-2) always pass.
+_NUMERIC_RDIFF_MAX = 0.25
 
 # Benchmark iterations for auto-tuning. More iterations = more reliable
 # winner selection but slower first-iteration auto-tune.
@@ -275,6 +290,116 @@ def _raise_if_context_poisoned(algo: str, params: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Backward numeric self-check
+# ---------------------------------------------------------------------------
+
+
+def _reference_has_signal(ref: Optional[Tensor]) -> bool:
+    """A reference grad tensor is usable for validation only if it is finite
+    and carries nonzero signal.
+
+    A non-finite reference is the crux of the wgrad false-positive: under fp16
+    compute a wgrad that accumulates hundreds of thousands of coherent-sign
+    terms legitimately overflows to ``inf`` (normal AMP behaviour — the
+    GradScaler rescales/skips). The reference algo (explicit_gemm) overflows
+    identically to every candidate, so validating candidates against that
+    ``inf`` reference is meaningless. Treat it as no-signal and fail open.
+    """
+    if ref is None:
+        return False
+    ref_f = ref.float()
+    if not torch.isfinite(ref_f).all().item():
+        return False
+    return ref_f.abs().sum().item() > 0
+
+
+def _grad_pair_disqualified(
+    ref: Optional[Tensor],
+    cand: Optional[Tensor],
+) -> Tuple[Optional[str], float, float]:
+    """Compare one candidate grad tensor against its reference.
+
+    Returns ``(reason, rdiff, zero_ratio)``. ``reason`` is ``None`` when the
+    candidate is acceptable (or when there is no usable reference signal to
+    check against). A non-``None`` reason means the candidate must be
+    disqualified.
+
+    Disqualification criteria (only applied when the reference carries signal,
+    i.e. it is finite and ``ref.abs().sum() > 0`` -- see
+    ``_reference_has_signal``):
+      - candidate essentially zero: ``cand.abs().sum() / ref.abs().sum()`` is
+        below ``_NUMERIC_ZERO_RATIO`` (silent zero-grad failure mode);
+      - candidate non-finite while the reference is finite (NaN/Inf garbage);
+      - mean-relative difference
+        ``(cand - ref).abs().mean() / ref.abs().mean()`` exceeds
+        ``_NUMERIC_RDIFF_MAX``.
+
+    Comparisons run on-device; only a handful of ``.item()`` scalars are pulled
+    back per pair (O(1) host syncs per candidate).
+    """
+    # Only validate against a finite, nonzero reference. A non-finite reference
+    # (fp16 wgrad overflow) or a zero reference carries nothing to compare.
+    if not _reference_has_signal(ref):
+        return None, 0.0, 0.0
+    ref_f = ref.float()
+    ref_abs_sum = ref_f.abs().sum().item()
+
+    if cand is None:
+        return (
+            "candidate produced no gradient (None) while reference is nonzero",
+            float("inf"),
+            0.0,
+        )
+    cand_f = cand.float()
+    if cand_f.shape != ref_f.shape:
+        return (
+            f"shape mismatch cand{tuple(cand_f.shape)} vs ref{tuple(ref_f.shape)}",
+            float("inf"),
+            0.0,
+        )
+
+    cand_abs_sum = cand_f.abs().sum().item()
+    zero_ratio = cand_abs_sum / ref_abs_sum
+    if zero_ratio < _NUMERIC_ZERO_RATIO:
+        return "silent zero gradient", float("nan"), zero_ratio
+
+    # NaN/Inf garbage: reference is finite (has a real abs-sum) but the
+    # candidate is not. rdiff below would be NaN and slip past the > check.
+    if not torch.isfinite(cand_f).all().item():
+        return "candidate contains non-finite values", float("inf"), zero_ratio
+
+    ref_abs_mean = ref_f.abs().mean().item()
+    rdiff = (cand_f - ref_f).abs().mean().item() / ref_abs_mean if ref_abs_mean > 0 else 0.0
+    if rdiff > _NUMERIC_RDIFF_MAX:
+        return "gradient differs from reference beyond tolerance", rdiff, zero_ratio
+    return None, rdiff, zero_ratio
+
+
+def _backward_numeric_disqualifies(
+    ref_grads: Tuple[Optional[Tensor], Optional[Tensor]],
+    cand_grads: Tuple[Optional[Tensor], Optional[Tensor]],
+    needs_input_grad: Tuple[bool, ...],
+) -> Optional[str]:
+    """Return a disqualification reason for a backward candidate, else ``None``.
+
+    Only the grad directions the sweep requested (``needs_input_grad``) are
+    checked: grad_in for a dgrad sweep, grad_weight for a wgrad sweep.
+    """
+    ref_in, ref_w = ref_grads
+    cand_in, cand_w = cand_grads
+    checks: List[Tuple[str, Optional[Tensor], Optional[Tensor]]] = []
+    if needs_input_grad[0]:
+        checks.append(("grad_in", ref_in, cand_in))
+    if len(needs_input_grad) > 1 and needs_input_grad[1]:
+        checks.append(("grad_weight", ref_w, cand_w))
+    for name, ref, cand in checks:
+        reason, rdiff, zero_ratio = _grad_pair_disqualified(ref, cand)
+        if reason is not None:
+            return f"{name}: {reason} (rdiff={rdiff:.3g}, zero_ratio={zero_ratio:.3g})"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Forward benchmark runner
 # ---------------------------------------------------------------------------
 
@@ -470,6 +595,148 @@ def _run_backward_benchmarks(
         )
         return benchmark_backward(algo_mode, ctx)
 
+    def _execute_single_bwd_capture(
+        algo_mode: str, params_config: Dict[str, Any]
+    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+        # Same ctx as the benchmarked pass, but return the raw (grad_in,
+        # grad_weight) tuple so the numeric self-check can inspect the actual
+        # gradients (benchmark_backward discards them, keeping only status).
+        ctx = BwdCtx(
+            grad_output=grad_output,
+            in_features=in_features,
+            weight=weight,
+            kernel_map=kernel_map,
+            num_out_coords=num_out_coords,
+            compute_dtype=compute_dtype,
+            device=device,
+            needs_input_grad=needs_input_grad,
+            params=params_config,
+            groups=groups,
+        )
+        return run_backward(algo_mode, ctx)
+
+    # Numeric self-check state. The explicit_gemm reference is computed once per
+    # sweep on the same probe tensors, reused for every candidate, and never
+    # persisted. Several fail-open guards ensure the check can NEVER force a
+    # worse winner than plain timing:
+    #   - reference can't be computed                              -> disabled;
+    #   - reference has no usable (finite, nonzero) signal in any
+    #     requested direction (e.g. fp16 wgrad overflow -> inf)    -> disabled;
+    #   - reference fails its own check (self-inconsistent)        -> disabled;
+    #   - every runnable candidate disqualifies (check is
+    #     self-evidently invalid for this sweep)                   -> disabled,
+    #     and the disqualified candidates are re-timed normally.
+    _numeric_check_active = WARPCONVNET_AUTOTUNE_NUMERIC_CHECK
+    _ref_grads: Optional[Tuple[Optional[Tensor], Optional[Tensor]]] = None
+    _ref_attempted = False
+    _numeric_disabled_logged = False
+    # Candidates rejected by the numeric check: (idx, algo, params). Kept so the
+    # sweep can fall open and re-time them if the check rejected everything.
+    _disqualified: List[Tuple[int, str, Dict[str, Any]]] = []
+
+    def _disable_numeric_check(reason: str) -> None:
+        nonlocal _numeric_check_active, _numeric_disabled_logged
+        _numeric_check_active = False
+        if not _numeric_disabled_logged:
+            logger.warning(
+                f"Auto-tune backward numeric self-check disabled for this sweep: "
+                f"{reason}. Proceeding with normal timing-based selection."
+            )
+            _numeric_disabled_logged = True
+
+    def _get_reference_grads() -> Optional[Tuple[Optional[Tensor], Optional[Tensor]]]:
+        nonlocal _ref_grads, _ref_attempted
+        if _ref_attempted:
+            return _ref_grads
+        _ref_attempted = True
+        try:
+            ref = _execute_single_bwd_capture("explicit_gemm", {})
+            torch.cuda.synchronize()
+        except Exception as ref_err:  # pragma: no cover - defensive
+            _disable_numeric_check(f"reference (explicit_gemm) failed to run ({ref_err})")
+            _ref_grads = None
+            return None
+        # The reference must carry usable (finite, nonzero) signal in at least
+        # one requested direction. A non-finite reference — the fp16 wgrad
+        # overflow case, where the reference algo overflows to inf identically
+        # to every candidate — cannot validate anything.
+        ref_in, ref_w = ref
+        usable = (needs_input_grad[0] and _reference_has_signal(ref_in)) or (
+            len(needs_input_grad) > 1 and needs_input_grad[1] and _reference_has_signal(ref_w)
+        )
+        if not usable:
+            _disable_numeric_check(
+                "reference gradient is non-finite or all-zero in every checked "
+                "direction (e.g. fp16 accumulation overflow)"
+            )
+            _ref_grads = None
+            return None
+        # Sanity: the reference must pass its own check. If it doesn't, the
+        # criteria are self-inconsistent here and cannot be trusted.
+        if _backward_numeric_disqualifies(ref, ref, needs_input_grad) is not None:
+            _disable_numeric_check("reference failed its own numeric check")
+            _ref_grads = None
+            return None
+        _ref_grads = ref
+        return _ref_grads
+
+    def _benchmark_candidate_time(
+        idx: Optional[int], algo_mode: str, params_config: Dict[str, Any]
+    ) -> Optional[float]:
+        """Warm up and time one candidate; return its median ms, or ``None`` if
+        it is unsupported or fails. Poison-probes the context on failure."""
+        label = f"[{idx}/{num_candidates}] " if idx is not None else ""
+        status = None
+        try:
+            for _ in range(warmup_iters):
+                status = _execute_single_bwd_pass(algo_mode, params_config)
+                if isinstance(status, int) and status != 0:
+                    break
+            torch.cuda.synchronize()
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  {label}{algo_mode} — skipped (error: {e})")
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass  # Clear error state by consuming the sync exception
+            _raise_if_context_poisoned(algo_mode, params_config)
+            return None
+
+        if isinstance(status, int) and status != 0:
+            logger.debug(f"  {label}{algo_mode} — skipped (unsupported)")
+            return None
+
+        iter_times = []
+        if benchmark_iters == 0:
+            if warmup_iters == 0:
+                return None
+        else:
+            try:
+                for _ in range(benchmark_iters):
+                    with timer:
+                        _execute_single_bwd_pass(algo_mode, params_config)
+                    iter_times.append(timer.elapsed_time)
+                torch.cuda.synchronize()
+            except (RuntimeError, Exception) as e:
+                logger.debug(f"  {label}{algo_mode} — failed during benchmark (error: {e})")
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass  # Clear error state by consuming the sync exception
+                _raise_if_context_poisoned(algo_mode, params_config)
+                return None
+
+        if iter_times:
+            median_time_ms = sorted(iter_times)[len(iter_times) // 2]
+            _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
+            logger.debug(
+                f"  {label}{algo_mode}"
+                + (f" ({_param_str})" if _param_str else "")
+                + f" — {median_time_ms:.2f}ms"
+            )
+            return median_time_ms
+        return None
+
     params_to_use = custom_params if custom_params is not None else _get_filtered_AtB_params()
     # Filter out IMPLICIT_GEMM when dtype is float64 (unsupported by kernels)
     dtype_to_check = compute_dtype if compute_dtype is not None else grad_output.dtype
@@ -494,59 +761,54 @@ def _run_backward_benchmarks(
     )
 
     for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
-        status = None
-        try:
-            for _ in range(warmup_iters):
-                status = _execute_single_bwd_pass(algo_mode, params_config)
-                if isinstance(status, int) and status != 0:
-                    break
-            torch.cuda.synchronize()
-        except (RuntimeError, Exception) as e:
-            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (error: {e})")
-            try:
-                torch.cuda.synchronize()
-            except Exception:
-                pass  # Clear error state by consuming the sync exception
-            _raise_if_context_poisoned(algo_mode, params_config)
-            continue
-
-        if isinstance(status, int) and status != 0:
-            logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
-            continue
-
-        # Benchmark runs — collect all times and take median for robustness
-        iter_times = []
-
-        if benchmark_iters == 0:
-            if warmup_iters == 0:
-                continue
-        else:
-            try:
-                for _ in range(benchmark_iters):
-                    with timer:
-                        _execute_single_bwd_pass(algo_mode, params_config)
-                    iter_times.append(timer.elapsed_time)
-                torch.cuda.synchronize()
-            except (RuntimeError, Exception) as e:
-                logger.debug(
-                    f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
-                )
+        # Numeric self-check: verify the candidate produces a numerically
+        # correct gradient before timing it. A candidate that silently returns
+        # a zero (or garbage) gradient is disqualified exactly like one that
+        # raised — excluded from selection, never cached as a winner. The
+        # capture also serves as a warmup run. See _backward_numeric_disqualifies.
+        if _numeric_check_active:
+            ref_grads = _get_reference_grads()
+            if ref_grads is not None:
                 try:
+                    cand_grads = _execute_single_bwd_capture(algo_mode, params_config)
                     torch.cuda.synchronize()
-                except Exception:
-                    pass  # Clear error state by consuming the sync exception
-                _raise_if_context_poisoned(algo_mode, params_config)
-                continue
+                except (RuntimeError, Exception) as e:
+                    logger.debug(
+                        f"  [{idx}/{num_candidates}] {algo_mode} — "
+                        f"skipped (numeric-check capture error: {e})"
+                    )
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    _raise_if_context_poisoned(algo_mode, params_config)
+                    continue
+                reason = _backward_numeric_disqualifies(ref_grads, cand_grads, needs_input_grad)
+                if reason is not None:
+                    _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
+                    logger.warning(
+                        f"  [{idx}/{num_candidates}] {algo_mode}"
+                        + (f" ({_param_str})" if _param_str else "")
+                        + f" — DISQUALIFIED by numeric self-check: {reason}"
+                    )
+                    _disqualified.append((idx, algo_mode, params_config))
+                    continue
 
-        if iter_times:
-            median_time_ms = sorted(iter_times)[len(iter_times) // 2]
+        median_time_ms = _benchmark_candidate_time(idx, algo_mode, params_config)
+        if median_time_ms is not None:
             all_benchmark_results.append((algo_mode, params_config, median_time_ms))
-            _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode}"
-                + (f" ({_param_str})" if _param_str else "")
-                + f" — {median_time_ms:.2f}ms"
-            )
+
+    # Fail-open: if the numeric check rejected EVERY runnable candidate, it is
+    # self-evidently invalid for this sweep (a healthy sweep always has at least
+    # the correct reference-class winner). Disable it and re-time the rejected
+    # candidates so selection proceeds normally instead of collapsing to the
+    # slow explicit_gemm fallback below.
+    if not all_benchmark_results and _disqualified:
+        _disable_numeric_check(f"all {len(_disqualified)} runnable candidate(s) were disqualified")
+        for idx, algo_mode, params_config in _disqualified:
+            median_time_ms = _benchmark_candidate_time(idx, algo_mode, params_config)
+            if median_time_ms is not None:
+                all_benchmark_results.append((algo_mode, params_config, median_time_ms))
 
     if not all_benchmark_results:
         logger.warning("No backward benchmark succeeded. Falling back to explicit_gemm.")
