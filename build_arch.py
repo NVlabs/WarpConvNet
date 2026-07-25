@@ -29,9 +29,15 @@ class CudaArchError(ValueError):
 
 
 # Certified architecture catalog. A build target's base code (major*10+minor)
-# must appear here or the request is rejected. SM103 and SM121 are left
-# uncertified on purpose: they are not aliased onto SM100/SM120 cubins.
-CERTIFIED_ARCH_CODES = frozenset({70, 75, 80, 86, 87, 89, 90, 100, 120})
+# must appear here or the request is rejected.
+#
+# SM103 (B300 / GB300, Blackwell Ultra) and SM121 (GB10) are certified as
+# *build targets* — nvcc 13.x emits sm_103/sm_103a/sm_121/sm_121a, and the
+# runtime tile gate authorizes them via CUDA minor-version binary compatibility
+# (measured on GB300). Certifying a code here still never aliases it onto another
+# code's cubin: every token continues to map to exactly one gencode target, so
+# asking for 10.0 gets an sm_100 cubin and nothing else.
+CERTIFIED_ARCH_CODES = frozenset({70, 75, 80, 86, 87, 89, 90, 100, 103, 120, 121})
 
 
 @dataclass(frozen=True)

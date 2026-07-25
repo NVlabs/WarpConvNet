@@ -34,11 +34,7 @@ from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import (
     _get_reverse_mask_data,
     _dispatched_mask_words,
 )
-from warpconvnet.csrc.mask_gemm.tile_metadata import (
-    build_tile_metadata,
-    filter_by_device,
-)
-
+from warpconvnet.nn.functional.sparse_conv.detail import tile_metadata as tile_meta
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not hasattr(_C, "mask_gemm"),
@@ -56,12 +52,18 @@ FP16_ATOL = 5e-2
 
 
 def _active_tile_ids(op: str) -> list:
-    """Production-tier tile_ids compiled for the current SM arch."""
+    """Tile_ids this device is authorized to launch for ``op``.
+
+    Goes through the dispatch adapter rather than the generated snapshot's
+    ``filter_by_device``: the adapter applies the same backend + binary-
+    compatibility authorization that dispatch itself uses, so the sweep covers
+    exactly the tiles that can actually run here. The snapshot's exact-membership
+    helper returns an empty list on GB-series minor revisions such as sm_103,
+    which would silently skip this entire suite.
+    """
     if not torch.cuda.is_available():
         return []
-    return sorted(
-        t.tile_id for t in filter_by_device(build_tile_metadata(active_only=True, ops=(op,)))
-    )
+    return sorted(t.tile_id for t in tile_meta._get_tiles(op, filter_arch=True))
 
 
 # Tile lists sourced from the warpgemm-emitted tile_metadata registry. This

@@ -8,6 +8,7 @@ records — must validate ``device_arch in compile_archs`` (exact membership, no
 switch. The sm100_umma backend is a nonlaunchable scaffold and must never be
 selected, on any device.
 """
+
 import pytest
 
 from warpconvnet.nn.functional.sparse_conv.detail import tile_metadata as tm
@@ -68,9 +69,12 @@ def test_sm120_pinned_tiles_rejected_on_non_sm120(force_arch):
             assert reason is not None and "compile_archs" in reason
 
 
-def test_exact_membership_not_ordering(force_arch):
-    # sm_121 / sm_103 must not alias into sm_120 / sm_100 pins: membership is
-    # exact, so a hypothetical newer device code is rejected, not inherited.
+def test_single_arch_pins_are_never_inherited(force_arch):
+    # A single-entry compile_archs is an exact pin. sm_121 / sm_103 must not
+    # inherit the sm_120-pinned experimental tiles even though an sm_120 cubin
+    # is binary-compatible with sm_121 — those tiles were validated on sm_120
+    # only. Binary compatibility applies solely to the
+    # multi-arch certified production set.
     for arch in (103, 121):
         force_arch(arch)
         assert tm.tile_launch_rejection("forward", 2000) is not None
@@ -83,6 +87,75 @@ def test_production_compat_tiles_pass_on_all_certified_archs(force_arch):
         for op in ("forward", "dgrad"):
             for tid in (60, 61, 62, 500, 501, 502, 503, 504):
                 assert tm.tile_launch_rejection(op, tid) is None
+
+
+# ---------------------------------------------------------------------------
+# GB-series enablement
+#
+# Production tiles carry compile_archs=(80, 86, 87, 89, 90, 100, 120). A
+# non-accelerated cubin is forward compatible across minor revisions within one
+# major version, so those tiles genuinely execute on sm_103 (GB300, via 100) and
+# sm_121 (GB10, via 120). Before this rule every mask_gemm tile was stranded on
+# GB300 and selection silently degraded to explicit_gemm.
+# ---------------------------------------------------------------------------
+
+_GB_SERIES_ARCHS = (100, 103, 120, 121)
+
+
+@pytest.mark.parametrize("arch", _GB_SERIES_ARCHS)
+def test_production_tiles_available_on_every_gb_series_arch(arch, force_arch):
+    force_arch(arch)
+    for op in ("forward", "dgrad", "wgrad"):
+        tiles = tm._get_tiles(op, filter_arch=True)
+        assert tiles, f"no {op} tiles authorized on sm_{arch}"
+        # Every op's full launchable set must survive; nothing is arch-stranded.
+        assert len(tiles) == len(
+            [t for t in tm._get_tiles(op, filter_arch=False) if len(t.compile_archs) > 1]
+        )
+
+
+@pytest.mark.parametrize("arch", _GB_SERIES_ARCHS)
+def test_mw_compat_family_launches_on_every_gb_series_arch(arch, force_arch):
+    force_arch(arch)
+    for op in ("forward", "dgrad"):
+        for tid in (60, 61, 62, 500, 501, 502, 503, 504):
+            assert tm.tile_launch_rejection(op, tid) is None
+
+
+@pytest.mark.parametrize(
+    "compiled, device, expected",
+    [
+        # Same major, compiled minor <= device minor: runs.
+        (100, 100, True),
+        (100, 103, True),  # GB200 cubin on GB300
+        (120, 120, True),
+        (120, 121, True),  # consumer Blackwell cubin on GB10
+        (80, 86, True),
+        (80, 89, True),
+        # Compiled minor newer than the device: does not run.
+        (103, 100, False),
+        (89, 80, False),
+        # Major mismatch: never runs, in either direction.
+        (90, 100, False),  # Hopper cubin on Blackwell
+        (100, 90, False),
+        (120, 103, False),  # consumer Blackwell cubin on datacenter Blackwell
+        (103, 120, False),
+    ],
+)
+def test_binary_compatibility_rule(compiled, device, expected):
+    # Mirrors the cubin launch matrix measured on GB300.
+    assert tm._arch_is_binary_compatible(compiled, device) is expected
+
+
+def test_sm100_umma_scaffold_still_blocked_on_gb_series(force_arch):
+    # Backend gating runs before the arch check, so widening arch authorization
+    # must not make the non-launchable tcgen05 scaffold reachable.
+    for arch in _GB_SERIES_ARCHS:
+        force_arch(arch)
+        for op, ids in _SM100_SCAFFOLD.items():
+            for tid in ids:
+                reason = tm.tile_launch_rejection(op, tid)
+                assert reason is not None and "sm100_umma" in reason
 
 
 def test_foreign_id_rejected():

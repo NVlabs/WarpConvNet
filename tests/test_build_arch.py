@@ -83,10 +83,9 @@ def test_accelerated_never_inferred():
         "Blackwell",
         "Ampere",
         "Hopper",
-        "10.3",
-        "12.1",
-        "sm_103",
-        "sm_121",
+        "10.5",
+        "11.0",
+        "sm_105",
         "garbage",
         "",
         "99",
@@ -99,8 +98,53 @@ def test_parse_token_rejected(token):
 
 def test_rejection_names_the_token():
     with pytest.raises(CudaArchError) as exc:
-        parse_cuda_arch_token("10.3")
-    assert "10.3" in str(exc.value)
+        parse_cuda_arch_token("10.5")
+    assert "10.5" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# GB-series build targets
+#
+# sm_103 (B300/GB300) and sm_121 (GB10) are certified build targets: nvcc 13.x
+# emits them, and the runtime tile gate authorizes them via CUDA minor-version
+# binary compatibility. Certifying a code must not make it alias onto another
+# code's cubin — one token still maps to exactly one gencode target.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "token, code",
+    [
+        ("10.3", "103"),
+        ("10.3a", "103a"),
+        ("sm_103", "103"),
+        ("103", "103"),
+        ("12.1", "121"),
+        ("12.1a", "121a"),
+        ("sm_121", "121"),
+        ("121", "121"),
+    ],
+)
+def test_gb_series_tokens_accepted(token, code):
+    assert parse_cuda_arch_token(token).code == code
+
+
+def test_gb_series_targets_emit_exactly_one_cubin_each():
+    targets = parse_cuda_arch_list("10.0;10.3;12.0;12.1")
+    flags = cuda_gencode_flags(targets)
+    assert flags == [
+        "-gencode=arch=compute_100,code=sm_100",
+        "-gencode=arch=compute_103,code=sm_103",
+        "-gencode=arch=compute_120,code=sm_120",
+        "-gencode=arch=compute_121,code=sm_121",
+    ]
+
+
+def test_gb_series_does_not_imply_accelerated_sm100_macro():
+    # A non-accelerated Blackwell target must not turn on the SM100 (tcgen05)
+    # backend — that still requires an explicit 10.0a. The wheel arch list is
+    # non-accelerated on purpose so one cubin spans sm_100 and sm_103.
+    macros = cuda_feature_macros(parse_cuda_arch_list("10.0;10.3"))
+    assert "-DWARPCONVNET_SM80_ENABLED=1" in macros
+    assert not any("SM100_ENABLED" in m for m in macros)
 
 
 # --------------------------------------------------------------------------- #

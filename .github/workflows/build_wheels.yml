@@ -7,8 +7,17 @@ on:
   workflow_dispatch:
 
 # Map matrix.cuda short names to Docker image CUDA versions and PyTorch index URLs
+#
+# Architecture targets are per-matrix-entry (matrix.arch) because Blackwell
+# needs CUDA >= 12.8: cu124/cu126 toolchains cannot emit sm_100 or sm_120.
+#
+# Blackwell targets are deliberately NON-accelerated (10.0, not 10.0a). A plain
+# cubin is forward compatible across minor revisions within a major version, so
+# sm_100 covers B100/B200/GB200 *and* B300/GB300 (sm_103), and sm_120 covers
+# RTX PRO 6000 *and* GB10 (sm_121). An `a`-suffixed cubin is exact-match only
+# and would not load on GB300 at all (measured on device).
 env:
-  TORCH_CUDA_ARCH_LIST: "8.0;8.6;8.9;9.0a"
+  TORCH_CUDA_ARCH_LIST_DEFAULT: "8.0;8.6;8.9;9.0a"
 
 jobs:
   build_wheels:
@@ -22,27 +31,27 @@ jobs:
       matrix:
         include:
           # ---- torch 2.11.0 + cu130 ----
-          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.10" }
-          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.11" }
-          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.12" }
-          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.13" }
-          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.14" }
+          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.10", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.11", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.12", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.13", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.11.0", torch_short: "2.11", cuda: "cu130", cuda_docker: "13.0.1", python: "3.14", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
           # ---- torch 2.10.0 + cu130 ----
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.10" }
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.11" }
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.12" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.10", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.11", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu130", cuda_docker: "13.0.1", python: "3.12", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
           # ---- torch 2.10.0 + cu128 ----
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.10" }
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.11" }
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.12" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.10", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.11", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu128", cuda_docker: "12.8.0", python: "3.12", arch: "8.0;8.6;8.9;9.0a;12.0;10.0" }
           # ---- torch 2.10.0 + cu126 ----
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.10" }
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.11" }
-          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.12" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.10", arch: "8.0;8.6;8.9;9.0a" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.11", arch: "8.0;8.6;8.9;9.0a" }
+          - { torch: "2.10.0", torch_short: "2.10", cuda: "cu126", cuda_docker: "12.6.3", python: "3.12", arch: "8.0;8.6;8.9;9.0a" }
           # ---- torch 2.5.1 + cu124 ----
-          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.10" }
-          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.11" }
-          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.12" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.10", arch: "8.0;8.6;8.9;9.0a" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.11", arch: "8.0;8.6;8.9;9.0a" }
+          - { torch: "2.5.1", torch_short: "2.5", cuda: "cu124", cuda_docker: "12.4.1", python: "3.12", arch: "8.0;8.6;8.9;9.0a" }
 
     steps:
       - name: Free disk space on runner
@@ -79,9 +88,11 @@ jobs:
         env:
           MAX_JOBS: "2"
           NVCC_THREADS: "1"
+          TORCH_CUDA_ARCH_LIST: ${{ matrix.arch || env.TORCH_CUDA_ARCH_LIST_DEFAULT }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . /tmp/buildenv/bin/activate
+          echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
           # Get base version without local segment, then append torch tag
           BASE_VERSION=$(SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version python -c "from setuptools_scm import get_version; print(get_version())")
           export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+torch${{ matrix.torch_short }}${{ matrix.cuda }}"

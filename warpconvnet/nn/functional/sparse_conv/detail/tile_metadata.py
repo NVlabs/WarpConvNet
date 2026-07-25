@@ -55,12 +55,62 @@ def _get_device_arch() -> int | None:
     return _DEVICE_ARCH
 
 
+def _arch_is_binary_compatible(compiled: int, device: int) -> bool:
+    """True if a cubin built for ``compiled`` executes on SM ``device``.
+
+    CUDA's rule for non-accelerated cubins: forward compatible across minor
+    revisions **within one major version**. An ``sm_100`` binary runs on
+    ``sm_103``; an ``sm_90`` binary does not, and neither does ``sm_120``.
+    Verified on a GB300 by launching one exact-target cubin at a time and
+    reading ``cudaGetLastError()``:
+
+        sm_100 -> ok   sm_100f -> ok   sm_103 -> ok   sm_103a -> ok
+        sm_90  -> "no kernel image"    sm_120 -> "no kernel image"
+        sm_100a -> "no kernel image"   (accelerated cubins are exact-match)
+
+    Only ``mma_sync`` tiles ever reach this check (see ``_LAUNCHABLE_BACKENDS``),
+    and those are compiled without an ``a`` suffix, so the non-accelerated rule
+    is the applicable one.
+    """
+    return compiled // 10 == device // 10 and compiled % 10 <= device % 10
+
+
+def _tile_arch_allowed(meta, device_arch: int) -> bool:
+    """True if ``meta`` is authorized to launch on SM ``device_arch``.
+
+    Two questions are kept apart here, because conflating them is what stranded
+    every mask_gemm tile on GB300:
+
+    1. *Can the binary execute?* — ``_arch_is_binary_compatible``, above.
+    2. *Was the tile validated for this device?* — policy, below.
+
+    A ``compile_archs`` of length 1 is an exact pin: the SM120 experimental
+    family ``(120,)``, the SM100 scaffold ``(100,)``, and the SM80-only tiles
+    ``(80,)`` were each certified for one architecture only. Those are never
+    inherited by a family member, so ``sm_121`` still cannot launch an
+    SM120-pinned experimental tile.
+
+    A multi-entry ``compile_archs`` is the broad certified production set
+    (``(80, 86, 87, 89, 90, 100, 120)``) — generic tensor-core kernels validated
+    across seven architectures. Those extend to binary-compatible minor
+    revisions, which is what admits GB300 (``sm_103`` via ``100``) and GB10
+    (``sm_121`` via ``120``).
+    """
+    archs = meta.compile_archs
+    if device_arch in archs:
+        return True
+    if len(archs) < 2:
+        return False
+    return any(_arch_is_binary_compatible(a, device_arch) for a in archs)
+
+
 def _get_tiles(op: str, filter_arch: bool = True):
     """Return active tile records for ``op``.
 
-    ``filter_arch=True`` (default) drops tiles whose ``compile_archs`` excludes
-    the current device SM — prevents arch-gated tiles (e.g. 10/22/24/48/49
-    with compile_archs=(80,)) from appearing in dispatch candidates on Ada.
+    ``filter_arch=True`` (default) drops tiles the current device may not launch
+    — prevents arch-pinned tiles (e.g. 10/22/24/48/49 with compile_archs=(80,))
+    from appearing in dispatch candidates on Ada. See ``_tile_arch_allowed`` for
+    why this is not plain membership.
     """
     if get_schema_version() < _MIN_SCHEMA_VERSION:
         raise RuntimeError(
@@ -77,7 +127,7 @@ def _get_tiles(op: str, filter_arch: bool = True):
     arch = _get_device_arch()
     if arch is None:
         return tiles
-    return [t for t in tiles if t.supports_arch(arch)]
+    return [t for t in tiles if _tile_arch_allowed(t, arch)]
 
 
 # Per-op tile_id -> metadata index over the FULL registry (all tiers, all
@@ -107,10 +157,15 @@ def known_tile_ids(op: str) -> frozenset:
 def tile_launch_rejection(op: str, tile_id: int) -> str | None:
     """Reason a canonical tile id must not launch on this device, or None if OK.
 
-    Exact-membership checks per the Blackwell handoff §3: the device arch must
-    be in the tile's ``compile_archs`` (no ``>=`` inference) and the tile's
-    backend must be launchable in this build. Applies to every candidate path,
-    including pinned tile ids read from the autotune cache.
+    Per the Blackwell handoff §3, every candidate path is authorized here before
+    entering the C++ dispatch switch — including pinned tile ids read from the
+    autotune cache. Two conditions must hold: a launchable backend, and an arch
+    authorization that passes ``_tile_arch_allowed``.
+
+    The arch check is binary compatibility within a major version (never a bare
+    ``>=`` over arch codes, which would wrongly admit an sm_90 tile on sm_100),
+    and single-arch pins remain exact so an experimental tile is never inherited
+    by a newer device code. See ``_tile_arch_allowed``.
 
     Ids absent from warpgemm metadata (warpconvnet-only carve-outs such as the
     scalar/f32-out fallbacks) are the CALLER's responsibility to allowlist —
@@ -123,7 +178,7 @@ def tile_launch_rejection(op: str, tile_id: int) -> str | None:
     if meta.backend not in _LAUNCHABLE_BACKENDS:
         return f"tile {tile_id} backend={meta.backend!r} is not launchable in this build"
     arch = _get_device_arch()
-    if arch is not None and not meta.supports_arch(arch):
+    if arch is not None and not _tile_arch_allowed(meta, arch):
         return (
             f"tile {tile_id} compile_archs={meta.compile_archs} excludes " f"device arch sm_{arch}"
         )

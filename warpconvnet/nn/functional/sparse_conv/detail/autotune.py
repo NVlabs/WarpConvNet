@@ -31,6 +31,7 @@ from .backends import (
     benchmark_backward,
     benchmark_forward,
     run_backward,
+    run_forward,
 )
 from warpconvnet.constants import WARPCONVNET_AUTOTUNE_NUMERIC_CHECK
 
@@ -48,6 +49,14 @@ _NUMERIC_ZERO_RATIO = 1e-3
 # treated as garbage. Generous enough that legitimate F16-accumulator tiles
 # (2-3x worse rel-diff than f32, absolute ~1e-2) always pass.
 _NUMERIC_RDIFF_MAX = 0.25
+# Forward-only: a candidate whose WORST single element deviates from the
+# reference by more than this fraction of the reference's peak magnitude is
+# treated as wrong. The mean-relative bound above cannot see a defect confined
+# to a small minority of rows — the GB300 tile-41 failure mode, where ~500 of
+# 200k rows read up to 11x the reference. Two orders of
+# magnitude looser than the suite's fp16 kernel tolerance (8e-3) so that
+# accumulation-order differences never trip it.
+_NUMERIC_MAX_ELEM_RDIFF = 0.5
 
 # Benchmark iterations for auto-tuning. More iterations = more reliable
 # winner selection but slower first-iteration auto-tune.
@@ -399,6 +408,46 @@ def _backward_numeric_disqualifies(
     return None
 
 
+def _forward_numeric_disqualifies(
+    ref_out: Optional[Tensor],
+    cand_out: Optional[Tensor],
+) -> Optional[str]:
+    """Return a disqualification reason for a forward candidate, else ``None``.
+
+    Starts from the shared backward criteria (``_grad_pair_disqualified`` is a
+    generic reference-vs-candidate comparison: silent zeros, NaN/Inf, gross
+    mean drift), then adds a **max-element** bound.
+
+    The extra bound matters because the shared criteria are mean-relative, and
+    the forward failures actually observed corrupt a small minority of rows: on
+    GB300, ``mask_gemm`` tile 41 at C_in=32 produced up to 11x the reference
+    value on ~500 of 200 000 rows. Averaged over the whole tensor that is
+    invisible, so a mean-relative test passes a badly wrong kernel
+    (measured on GB300).
+
+    ``_NUMERIC_MAX_ELEM_RDIFF`` is deliberately far looser than fp16 kernel
+    tolerance (the test suite uses 8e-3): the cost of disqualifying a good
+    candidate is a slower winner, so the bound only needs to separate "different
+    accumulation order" from "wrong".
+    """
+    reason, rdiff, zero_ratio = _grad_pair_disqualified(ref_out, cand_out)
+    if reason is not None:
+        return f"output: {reason} (rdiff={rdiff:.3g}, zero_ratio={zero_ratio:.3g})"
+    if ref_out is None or cand_out is None:
+        return None
+    ref_f = ref_out.float()
+    ref_scale = ref_f.abs().max().item()
+    if ref_scale <= 0:
+        return None
+    max_rdiff = (cand_out.float() - ref_f).abs().max().item() / ref_scale
+    if max_rdiff > _NUMERIC_MAX_ELEM_RDIFF:
+        return (
+            f"output: max element deviates by {max_rdiff:.3g} of the reference "
+            f"peak (limit {_NUMERIC_MAX_ELEM_RDIFF})"
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Forward benchmark runner
 # ---------------------------------------------------------------------------
@@ -439,6 +488,22 @@ def _run_forward_benchmarks(
         )
         return benchmark_forward(algo_mode, ctx)
 
+    def _execute_single_fwd_capture(algo_mode: str, params_config: Dict[str, Any]) -> Tensor:
+        """Same call as ``_execute_single_fwd_pass`` but returns the output
+        tensor so the numeric self-check can inspect it. Raises on a non-zero
+        GEMM status."""
+        ctx = FwdCtx(
+            in_features=in_features,
+            weight=weight,
+            kernel_map=kernel_map,
+            num_out_coords=num_out_coords,
+            compute_dtype=compute_dtype,
+            params=params_config,
+            fwd_block_size=None,
+            groups=groups,
+        )
+        return run_forward(algo_mode, ctx)
+
     params_to_use = custom_params if custom_params is not None else _get_filtered_AB_params()
     # Filter out IMPLICIT_GEMM when dtype is float64 (unsupported by kernels)
     dtype_to_check = compute_dtype if compute_dtype is not None else in_features.dtype
@@ -461,6 +526,91 @@ def _run_forward_benchmarks(
         f"Auto-tuning forward (N={N_in}, C_in={C_in_val}, C_out={C_out_val}, "
         f"{num_candidates} candidates)..."
     )
+
+    # Forward numeric self-check. A wrong tile is worse than a slow one, and
+    # timing alone cannot tell them apart. Mirrors the backward check, including
+    # its fail-open guards — the check can NEVER force a worse winner than plain
+    # timing:
+    #   - reference can't be computed                          -> disabled;
+    #   - reference has no usable (finite, nonzero) signal      -> disabled;
+    #   - reference fails its own check (self-inconsistent)     -> disabled;
+    #   - every runnable candidate disqualifies                 -> disabled, and
+    #     the disqualified candidates are re-timed normally.
+    _numeric_check_active = WARPCONVNET_AUTOTUNE_NUMERIC_CHECK
+    _ref_out: Optional[Tensor] = None
+    _ref_attempted = False
+    _numeric_disabled_logged = False
+    # Candidates rejected by the numeric check: (idx, algo, params). Kept so the
+    # sweep can fall open and re-time them if the check rejected everything.
+    _disqualified: List[Tuple[int, str, Dict[str, Any]]] = []
+
+    def _disable_numeric_check(reason: str) -> None:
+        nonlocal _numeric_check_active, _numeric_disabled_logged
+        _numeric_check_active = False
+        if not _numeric_disabled_logged:
+            logger.warning(
+                f"Auto-tune forward numeric self-check disabled for this sweep: "
+                f"{reason}. Proceeding with normal timing-based selection."
+            )
+            _numeric_disabled_logged = True
+
+    def _get_reference_output() -> Optional[Tensor]:
+        nonlocal _ref_out, _ref_attempted
+        if _ref_attempted:
+            return _ref_out
+        _ref_attempted = True
+        try:
+            ref = _execute_single_fwd_capture("explicit_gemm", {})
+            torch.cuda.synchronize()
+        except Exception as ref_err:  # pragma: no cover - defensive
+            _disable_numeric_check(f"reference (explicit_gemm) failed to run ({ref_err})")
+            return None
+        if not _reference_has_signal(ref):
+            _disable_numeric_check(
+                "reference output is non-finite or all-zero (e.g. fp16 " "accumulation overflow)"
+            )
+            return None
+        if _forward_numeric_disqualifies(ref, ref) is not None:
+            _disable_numeric_check("reference failed its own numeric check")
+            return None
+        _ref_out = ref
+        return _ref_out
+
+    def _benchmark_candidate_time(
+        idx: Optional[int], algo_mode: str, params_config: Dict[str, Any]
+    ) -> Optional[float]:
+        """Time one already-warmed candidate; return its median ms, or ``None``
+        if it fails. Poison-probes the context on failure."""
+        label = f"[{idx}/{num_candidates}] " if idx is not None else ""
+        iter_times = []
+        try:
+            for _ in range(benchmark_iters):
+                with timer:
+                    _execute_single_fwd_pass(algo_mode, params_config)
+                iter_times.append(timer.elapsed_time)
+            # Sync to catch async errors
+            torch.cuda.synchronize()
+        except (RuntimeError, Exception) as e:
+            logger.debug(f"  {label}{algo_mode} — failed during benchmark (error: {e})")
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass  # Clear error state by consuming the sync exception
+            _raise_if_context_poisoned(algo_mode, params_config)
+            return None
+        if not iter_times:
+            return None
+        return sorted(iter_times)[len(iter_times) // 2]
+
+    def _record(algo_mode: str, params_config: Dict[str, Any], median_time_ms: float, idx) -> None:
+        all_benchmark_results.append((algo_mode, params_config, median_time_ms))
+        _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
+        label = f"[{idx}/{num_candidates}] " if idx is not None else ""
+        logger.debug(
+            f"  {label}{algo_mode}"
+            + (f" ({_param_str})" if _param_str else "")
+            + f" — {median_time_ms:.2f}ms"
+        )
 
     for idx, (algo_mode, params_config) in enumerate(params_to_use, 1):
         # Warmup runs
@@ -487,36 +637,50 @@ def _run_forward_benchmarks(
             logger.debug(f"  [{idx}/{num_candidates}] {algo_mode} — skipped (unsupported)")
             continue
 
-        # Benchmark runs — collect all times and take median for robustness
-        iter_times = []
+        # Numeric self-check, before timing: a disqualified candidate is not
+        # timed at all, so it can never enter the results.
+        if _numeric_check_active and algo_mode != "explicit_gemm":
+            ref_out = _get_reference_output()
+            if ref_out is not None:
+                try:
+                    cand_out = _execute_single_fwd_capture(algo_mode, params_config)
+                    torch.cuda.synchronize()
+                except (RuntimeError, Exception) as e:
+                    logger.debug(
+                        f"  [{idx}/{num_candidates}] {algo_mode} — skipped "
+                        f"(numeric check run failed: {e})"
+                    )
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    _raise_if_context_poisoned(algo_mode, params_config)
+                    continue
+                reason = _forward_numeric_disqualifies(ref_out, cand_out)
+                del cand_out
+                if reason is not None:
+                    _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
+                    logger.warning(
+                        f"Auto-tune forward: disqualifying {algo_mode}"
+                        + (f" ({_param_str})" if _param_str else "")
+                        + f" — {reason}"
+                    )
+                    _disqualified.append((idx, algo_mode, params_config))
+                    continue
 
-        try:
-            for _ in range(benchmark_iters):
-                with timer:
-                    _execute_single_fwd_pass(algo_mode, params_config)
-                iter_times.append(timer.elapsed_time)
-            # Sync to catch async errors
-            torch.cuda.synchronize()
-        except (RuntimeError, Exception) as e:
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode} — failed during benchmark (error: {e})"
-            )
-            try:
-                torch.cuda.synchronize()
-            except Exception:
-                pass  # Clear error state by consuming the sync exception
-            _raise_if_context_poisoned(algo_mode, params_config)
-            continue
+        median_time_ms = _benchmark_candidate_time(idx, algo_mode, params_config)
+        if median_time_ms is not None:
+            _record(algo_mode, params_config, median_time_ms, idx)
 
-        if iter_times:
-            median_time_ms = sorted(iter_times)[len(iter_times) // 2]
-            all_benchmark_results.append((algo_mode, params_config, median_time_ms))
-            _param_str = ", ".join(f"{k}={v}" for k, v in params_config.items())
-            logger.debug(
-                f"  [{idx}/{num_candidates}] {algo_mode}"
-                + (f" ({_param_str})" if _param_str else "")
-                + f" — {median_time_ms:.2f}ms"
-            )
+    # Fall open: if the check rejected every candidate it is self-evidently
+    # wrong for this sweep, so re-time the rejects rather than degrade to the
+    # explicit_gemm fallback.
+    if not all_benchmark_results and _disqualified:
+        _disable_numeric_check("every runnable candidate was disqualified")
+        for idx, algo_mode, params_config in _disqualified:
+            median_time_ms = _benchmark_candidate_time(idx, algo_mode, params_config)
+            if median_time_ms is not None:
+                _record(algo_mode, params_config, median_time_ms, idx)
 
     if not all_benchmark_results:
         logger.warning("No forward benchmark succeeded. Falling back to explicit_gemm.")

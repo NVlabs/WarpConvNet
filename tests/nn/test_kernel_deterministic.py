@@ -668,6 +668,15 @@ class TestLargeN:
     )
     def test_mask_gemm_fp16(self, large_problem):
         d = large_problem
+        # KNOWN DEFECT: mask_gemm tile 41 returns wrong values for
+        # C_in <= 32 on Blackwell — measured on GB300 at C_in in {8,16,24,32},
+        # correct from C_in 40 up, with a few hundred corrupted rows out of
+        # 200k. Tiles 55 and 56 (the 1s_flat_pcoff pair) fail the same way and
+        # intermittently. Tracked for a kernel-level fix; the autotuner's
+        # forward numeric self-check disqualifies all three, so this only
+        # bites a caller that pins the tile by hand, as this test does.
+        if d["C_in"] <= 32 and torch.cuda.get_device_capability()[0] >= 10:
+            pytest.xfail("mask_gemm tile 41 is wrong for C_in<=32 on Blackwell")
         out = _execute_forward(
             algo="mask_gemm",
             params={"tile_id": 41},

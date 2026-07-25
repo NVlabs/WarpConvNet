@@ -23,9 +23,10 @@ import warpconvnet.nn.functional.sparse_conv.detail.backends as backends
 from warpconvnet.nn.functional.sparse_conv.detail.autotune import (
     _grad_pair_disqualified,
     _backward_numeric_disqualifies,
+    _forward_numeric_disqualifies,
     _run_backward_benchmarks,
+    _NUMERIC_MAX_ELEM_RDIFF,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for the comparison / disqualification helper
@@ -110,6 +111,68 @@ def test_combined_only_checks_requested_direction():
         (torch.zeros_like(ref), ref), (ref, bad), needs_input_grad=(False, True)
     )
     assert reason is not None and reason.startswith("grad_weight")
+
+
+# ---------------------------------------------------------------------------
+# Forward numeric self-check
+#
+# A GEMM tile can be wrong rather than merely slow, and timing alone cannot
+# tell the difference. The forward check exists because three mask_gemm
+# production tiles were measured returning wrong forward output on GB300.
+# ---------------------------------------------------------------------------
+
+
+def test_forward_zero_candidate_disqualified():
+    ref = _ref_tensor()
+    assert _forward_numeric_disqualifies(ref, torch.zeros_like(ref)) is not None
+
+
+def test_forward_nan_candidate_disqualified():
+    ref = _ref_tensor()
+    bad = ref.clone()
+    bad[3, 7] = float("nan")
+    assert _forward_numeric_disqualifies(ref, bad) is not None
+
+
+def test_forward_inf_candidate_disqualified():
+    ref = _ref_tensor()
+    bad = ref.clone()
+    bad[5, 1] = float("inf")
+    assert _forward_numeric_disqualifies(ref, bad) is not None
+
+
+def test_forward_small_noise_passes():
+    ref = _ref_tensor()
+    # 1% relative perturbation — a legitimate difference in accumulation order.
+    cand = ref * 1.01
+    assert _forward_numeric_disqualifies(ref, cand) is None
+
+
+def test_forward_sparse_corruption_disqualified():
+    # The GB300 tile-41 failure mode: a handful of rows read many times the
+    # reference while the rest are exact. The mean-relative criterion inherited
+    # from the backward check cannot see this, so the max-element bound must.
+    ref = _ref_tensor()
+    cand = ref.clone()
+    cand[0, 0] = ref.abs().max() * 11.0
+    assert _grad_pair_disqualified(ref, cand)[0] is None, "mean criterion should miss this"
+    reason = _forward_numeric_disqualifies(ref, cand)
+    assert reason is not None and "max element" in reason
+
+
+def test_forward_max_elem_threshold_is_loose_enough_for_fp16():
+    # fp16 kernels differ from the reference by ~1e-2 at worst; the bound must
+    # sit far above that or good candidates get disqualified.
+    assert _NUMERIC_MAX_ELEM_RDIFF >= 0.1
+    ref = _ref_tensor()
+    cand = ref + torch.randn_like(ref) * ref.abs().max() * 0.02
+    assert _forward_numeric_disqualifies(ref, cand) is None
+
+
+def test_forward_zero_reference_skips():
+    ref = torch.zeros(32, 16)
+    # No signal to validate against — must not disqualify anything.
+    assert _forward_numeric_disqualifies(ref, torch.randn(32, 16)) is None
 
 
 # ---------------------------------------------------------------------------

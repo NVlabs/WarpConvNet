@@ -27,7 +27,22 @@ fi
 # Get base version from git tags via setuptools-scm (strip local segment if present)
 BASE_VERSION=$(python -m setuptools_scm 2>/dev/null | cut -d'+' -f1 || echo "0.0.0")
 export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+${LOCAL_VERSION}"
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0a}"
+
+# Default architecture targets. Blackwell (12.0/10.0) needs CUDA >= 12.8, so it
+# is added only when the toolkit supports it.
+#
+# The Blackwell targets are deliberately NON-accelerated (10.0, not 10.0a): a
+# plain cubin is forward compatible across minor revisions within a major
+# version, so sm_100 covers B100/B200/GB200 *and* B300/GB300 (sm_103), and
+# sm_120 covers RTX PRO 6000 *and* GB10 (sm_121). An `a`-suffixed cubin is
+# exact-match only and would not load on GB300 (measured on device).
+DEFAULT_ARCH_LIST="8.0;8.6;8.9;9.0a"
+NVCC_MAJOR_MINOR=$(nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p')
+if [ -n "${NVCC_MAJOR_MINOR}" ] && \
+   [ "$(printf '%s\n12.8\n' "${NVCC_MAJOR_MINOR}" | sort -V | head -1)" = "12.8" ]; then
+    DEFAULT_ARCH_LIST="${DEFAULT_ARCH_LIST};12.0;10.0"
+fi
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-${DEFAULT_ARCH_LIST}}"
 
 echo "Building wheel version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
 echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
