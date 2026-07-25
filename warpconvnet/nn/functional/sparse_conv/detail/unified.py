@@ -402,11 +402,17 @@ class UnifiedSpatiallySparseConvFunction(Function):
     ]:
         kernel_map = getattr(ctx, "kernel_map", None)
         config_params = getattr(ctx, "config_params_for_bwd", None)
-        if kernel_map is None or config_params is None or len(ctx.saved_tensors) == 0:
+        if kernel_map is None or config_params is None:
             # Forward ran without grad (e.g., frozen backbone with torch.no_grad())
             return _pad_tuple(None, None, 14)
 
-        in_features, weight = ctx.saved_tensors
+        # Read ``saved_tensors`` exactly once. Non-reentrant activation
+        # checkpointing reconstructs each saved tensor on demand and rejects a
+        # second unpack from the same autograd context.
+        saved_tensors = ctx.saved_tensors
+        if len(saved_tensors) == 0:
+            return _pad_tuple(None, None, 14)
+        in_features, weight = saved_tensors
         num_out_coords = config_params["num_out_coords"]
         compute_dtype = config_params["compute_dtype"]
         device = config_params["device"]
