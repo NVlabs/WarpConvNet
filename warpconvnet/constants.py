@@ -179,7 +179,12 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
 # 15.0: Blackwell integration — warpgemm metadata schema 7 (backend +
 # dispatch_mask_words), wgrad MW_stride kernel signature, new tile inventory.
 # Winners recorded against the schema-6 kernel set are not comparable.
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 15.0
+# 16.0: per-tile device validation found wrong-result tiles on Blackwell
+# (fwd 2/19/41/55/56/57, dgrad 2/41, wgrad 2 at N~200k). Winners cached
+# before the forward numeric self-check existed may be poisoned (tile 41
+# was the cached C=32 forward winner); force every config back through
+# the guarded sweeps.
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 16.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory
