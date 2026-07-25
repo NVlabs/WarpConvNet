@@ -37,6 +37,9 @@ from .autotune import (
     _BENCHMARK_AB_RESULTS,
     _BENCHMARK_ABT_RESULTS,
     _BENCHMARK_ATB_RESULTS,
+    _BENCHMARK_AB_FALLBACK_RESULTS,
+    _algorithm_filter_key,
+    _record_ab_fallback_resolution,
     _serialize_benchmark_results,
     _run_forward_benchmarks,
     _run_backward_benchmarks,
@@ -249,8 +252,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
             _BENCHMARK_AB_RESULTS.pop(config, None)
             cached_result = None
 
-        def _benchmark_and_cache_fwd(filtered_params):
-            results = _run_forward_benchmarks(
+        def _run_fwd(filtered_params):
+            return _run_forward_benchmarks(
                 in_features,
                 weight,
                 kernel_map,
@@ -259,6 +262,8 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 custom_params=filtered_params,
                 groups=groups,
             )
+
+        def _cache_fwd_config(results):
             _BENCHMARK_AB_RESULTS[config] = results
             generic_benchmark_update_entry(
                 "AB_gather_scatter",
@@ -266,22 +271,53 @@ class UnifiedSpatiallySparseConvFunction(Function):
                 _serialize_benchmark_results(results),
                 force=False,
             )
-            return results
 
-        if cached_result is not None:
-            # Support tuple (best) or list-of-tuples (best-first)
-            if isinstance(cached_result, tuple):
-                best_list = [cached_result]
-            else:
-                best_list = cached_result
-            if algorithm_filter in ("auto", "all", "trimmed"):
+        # None for the adaptive modes ("auto"/"all"/"trimmed"), else a stable
+        # key identifying this exact pinned filter.
+        filter_key = _algorithm_filter_key(algorithm_filter)
+
+        if filter_key is None:
+            # Adaptive mode: the cached best winner is always valid; on a miss,
+            # benchmark the whole adaptive pool and cache it under the config.
+            if cached_result is not None:
+                best_list = [cached_result] if isinstance(cached_result, tuple) else cached_result
                 chosen_fwd_algo, chosen_fwd_params, _ = best_list[0]
             else:
-                filtered_cached_results = [
-                    (algo, params, time)
-                    for algo, params, time in best_list
-                    if algo in algorithm_filter
-                ]
+                results = _run_fwd(
+                    _filter_benchmark_params_by_env_config(
+                        _build_adaptive_fwd_params(), algorithm_filter, is_forward=True
+                    )
+                )
+                _cache_fwd_config(results)
+                chosen_fwd_algo, chosen_fwd_params, _ = results[0]
+        else:
+            # Pinned filter. Resolve in three tiers, cheapest first:
+            #   1. A recorded negative resolution: a prior sweep already proved
+            #      this exact (config, filter) has no viable candidate and pinned
+            #      it to a fallback. Reuse it with NO benchmarking — this is what
+            #      stops the every-call re-sweep (pinned-algo autotune thrash).
+            #   2. A config-cache winner whose algo satisfies the filter.
+            #   3. Benchmark the filtered pool. If the winner is inside the
+            #      filter it is a genuine pinned win (cache it under the config so
+            #      adaptive mode and this pin both reuse it). If the winner falls
+            #      OUTSIDE the filter, every pinned candidate was rejected and the
+            #      benchmark fell back — record a negative marker so future calls
+            #      short-circuit, and do NOT overwrite the shared config winner
+            #      with a non-representative fallback.
+            cached_fallback = _BENCHMARK_AB_FALLBACK_RESULTS.get((config, filter_key))
+            if cached_fallback is not None:
+                chosen_fwd_algo, chosen_fwd_params = cached_fallback
+            else:
+                filtered_cached_results = None
+                if cached_result is not None:
+                    best_list = (
+                        [cached_result] if isinstance(cached_result, tuple) else cached_result
+                    )
+                    filtered_cached_results = [
+                        (algo, params, time)
+                        for algo, params, time in best_list
+                        if algo in algorithm_filter
+                    ]
                 if filtered_cached_results:
                     chosen_fwd_algo, chosen_fwd_params, _ = filtered_cached_results[0]
                 else:
@@ -289,22 +325,20 @@ class UnifiedSpatiallySparseConvFunction(Function):
                         _build_adaptive_fwd_params(), algorithm_filter, is_forward=True
                     )
                     if not filtered_params and "explicit_gemm" in algorithm_filter:
-                        chosen_fwd_algo, chosen_fwd_params = (
-                            "explicit_gemm",
-                            {},
+                        chosen_fwd_algo, chosen_fwd_params = "explicit_gemm", {}
+                        _record_ab_fallback_resolution(
+                            config, filter_key, chosen_fwd_algo, chosen_fwd_params
                         )
                     else:
-                        all_fwd_benchmark_results = _benchmark_and_cache_fwd(filtered_params)
-                        chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
-        else:
-            # Step 4: No cache - benchmark within filtered space. "auto"/"all"/
-            # "trimmed" and an explicit algo list all funnel through the same
-            # filter call.
-            filtered_params = _filter_benchmark_params_by_env_config(
-                _build_adaptive_fwd_params(), algorithm_filter, is_forward=True
-            )
-            all_fwd_benchmark_results = _benchmark_and_cache_fwd(filtered_params)
-            chosen_fwd_algo, chosen_fwd_params, _ = all_fwd_benchmark_results[0]
+                        results = _run_fwd(filtered_params)
+                        best_algo, best_params, _ = results[0]
+                        if best_algo in algorithm_filter:
+                            _cache_fwd_config(results)
+                        else:
+                            _record_ab_fallback_resolution(
+                                config, filter_key, best_algo, best_params
+                            )
+                        chosen_fwd_algo, chosen_fwd_params = best_algo, best_params
 
         # Step 5: Pre-cast weight once (avoids per-algorithm re-casting).
         # weight is already 16B-aligned (guarded at function entry).

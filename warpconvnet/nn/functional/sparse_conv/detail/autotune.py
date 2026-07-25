@@ -100,6 +100,30 @@ _BENCHMARK_ATB_RESULTS: Dict[
     List[Tuple[str, Dict[str, Any], float]],
 ] = {}  # AtB gather-gather (wgrad): dW = A^T @ dY
 
+# Negative-resolution cache for a *pinned* forward algorithm filter.
+#
+# Maps (config, filter_key) -> (resolved_algo, resolved_params). Records that a
+# pinned filter (e.g. fwd_algo="mask_gemm") had NO viable candidate for a config
+# and was therefore resolved to a fallback (explicit_gemm). Without this, the
+# winner cached under the config key is the fallback, which never satisfies the
+# pinned filter's membership test, so every subsequent forward re-runs the full
+# sweep (pinned-algo autotune thrash). The marker lets those calls short-circuit
+# to the fallback with no benchmarking.
+#
+# Scoped to the EXACT (config, filter) identity so a different pin, a different
+# algo-mode, or a different shape re-tunes instead of inheriting a stale
+# fallback. Persisted in its own cache namespace (below) that is purely additive:
+# it never touches the AB_gather_scatter winner records, so older cache files
+# remain fully readable.
+_BENCHMARK_AB_FALLBACK_RESULTS: Dict[
+    Tuple[SpatiallySparseConvConfig, str],
+    Tuple[str, Dict[str, Any]],
+] = {}
+
+# Cache namespace for the forward negative-resolution markers above. New in the
+# v16 schema; absent from older caches (they simply behave as a first run).
+_AB_FALLBACK_NAMESPACE = "AB_gather_scatter_fallback"
+
 # ---------------------------------------------------------------------------
 # Serialization helpers for cache
 # ---------------------------------------------------------------------------
@@ -117,6 +141,61 @@ def _serialize_benchmark_results(
     return [
         (_serialize_algo_value(algo), params, float(metric)) for algo, params, metric in results
     ]
+
+
+def _algorithm_filter_key(algorithm_filter: Any) -> Optional[str]:
+    """Stable string identity for a forward algorithm filter.
+
+    Returns ``None`` for the adaptive modes (``"auto"``/``"all"``/``"trimmed"``),
+    which always take the best cached winner and never consult the
+    negative-resolution cache. For a pinned filter (a list of algo names) returns
+    a comma-joined key so that a different pin maps to a different marker.
+    """
+    if isinstance(algorithm_filter, str):
+        if algorithm_filter in ("auto", "all", "trimmed"):
+            return None
+        return algorithm_filter
+    if isinstance(algorithm_filter, list):
+        return ",".join(str(a) for a in algorithm_filter)
+    return None
+
+
+def _serialize_fallback_resolution(algo: Any, params: Any) -> List[Any]:
+    """Serialize a (algo, params) resolution to a msgpack-friendly ``[str, dict]``."""
+    return [_serialize_algo_value(algo), params if isinstance(params, dict) else {}]
+
+
+def _deserialize_fallback_resolution(value: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Parse a persisted ``[algo_str, params_dict]`` back to a resolution tuple.
+
+    Returns ``None`` for anything that does not match the expected shape so a
+    corrupt or unexpected record is ignored rather than crashing the load.
+    """
+    if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], str):
+        params = value[1] if isinstance(value[1], dict) else {}
+        return (value[0], _normalize_cached_params(value[0], params))
+    return None
+
+
+def _record_ab_fallback_resolution(
+    config: SpatiallySparseConvConfig,
+    filter_key: str,
+    algo: Any,
+    params: Any,
+) -> None:
+    """Record (in memory and on disk) that a pinned forward filter resolved to a
+    fallback for ``config``. Subsequent forwards with the same (config, filter)
+    short-circuit to this resolution instead of re-benchmarking."""
+    algo_str = _serialize_algo_value(algo)
+    params_dict = params if isinstance(params, dict) else {}
+    key = (config, filter_key)
+    _BENCHMARK_AB_FALLBACK_RESULTS[key] = (algo_str, params_dict)
+    generic_benchmark_update_entry(
+        _AB_FALLBACK_NAMESPACE,
+        key,
+        _serialize_fallback_resolution(algo_str, params_dict),
+        force=False,
+    )
 
 
 def _normalize_cached_params(algo: str, params: Any) -> Dict[str, Any]:
@@ -179,6 +258,13 @@ def _initialize_benchmark_cache():
         for k, v in atb_ns.items():
             _BENCHMARK_ATB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
 
+    fb_ns = generic_benchmark_get_namespace(_AB_FALLBACK_NAMESPACE)
+    if isinstance(fb_ns, dict):
+        for k, v in fb_ns.items():
+            parsed = _deserialize_fallback_resolution(v)
+            if parsed is not None and isinstance(k, tuple) and len(k) == 2:
+                _BENCHMARK_AB_FALLBACK_RESULTS[k] = parsed
+
     n_ab = len(ab_ns) if ab_ns else 0
     n_abt = len(abt_ns) if abt_ns else 0
     n_atb = len(atb_ns) if atb_ns else 0
@@ -206,6 +292,12 @@ def _on_cache_merge(namespace: str, merged_dict: dict) -> None:
         for k, v in merged_dict.items():
             if k not in _BENCHMARK_ATB_RESULTS:
                 _BENCHMARK_ATB_RESULTS[k] = _normalize_benchmark_results(v, is_forward=False)
+    elif namespace == _AB_FALLBACK_NAMESPACE:
+        for k, v in merged_dict.items():
+            if k not in _BENCHMARK_AB_FALLBACK_RESULTS:
+                parsed = _deserialize_fallback_resolution(v)
+                if parsed is not None and isinstance(k, tuple) and len(k) == 2:
+                    _BENCHMARK_AB_FALLBACK_RESULTS[k] = parsed
 
 
 # Initialize cache on module load
