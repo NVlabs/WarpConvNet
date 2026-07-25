@@ -2,10 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import glob
+import importlib.util
 import os
 import subprocess
 import sys
 from setuptools import setup
+
+# Load the torch-free exact CUDA arch parser by file path so the build never
+# depends on any package __init__ being importable.
+_build_arch_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build_arch.py")
+_build_arch_spec = importlib.util.spec_from_file_location(
+    "warpconvnet_build_arch", _build_arch_path
+)
+build_arch = importlib.util.module_from_spec(_build_arch_spec)
+sys.modules["warpconvnet_build_arch"] = build_arch
+_build_arch_spec.loader.exec_module(build_arch)
 
 # Allow sdist generation without torch installed.
 # When torch is not available, setup() runs with no ext_modules (source-only).
@@ -297,119 +308,46 @@ if _HAS_TORCH:
     else:
         print("TORCH_CUDA_ARCH_LIST not set; using PyTorch default arch list")
 
-    # Explicitly generate -gencode flags from TORCH_CUDA_ARCH_LIST.
+    # Explicitly generate -gencode flags from an exact, ordered target list.
     # We must do this ourselves because adding any explicit -gencode (e.g. sm_90a)
     # prevents PyTorch's BuildExtension from injecting its own gencode flags.
-    _has_sm100_target = False
-    _has_sm90_target = False
-    _has_sm80_target = False
-    _arch_values = []
-    _MIN_ARCH = 7.0  # Minimum supported architecture (Volta)
-
+    #
+    # Contract (see build_arch.py): every requested token maps to exactly one
+    # cubin. No feature-level expansion, no forward-compat PTX unless a token
+    # carried "+PTX", and no "device >= compile" inference. An unset arch list
+    # falls back to the visible device's exact capability.
     if cuda_arch_list:
-        for arch in cuda_arch_list.replace(",", " ").replace(";", " ").split():
-            arch = arch.strip().rstrip("+")
-            # Strip PyTorch-style suffixes (e.g. "9.0a" arch-specific, "8.0+PTX")
-            # before parsing as a float.
-            if arch.upper().endswith("PTX"):
-                arch = arch[: -len("PTX")].rstrip("+")
-            arch = arch.rstrip("aA")
-            try:
-                _arch_values.append(float(arch))
-            except ValueError:
-                pass
+        _arch_targets = build_arch.parse_cuda_arch_list(cuda_arch_list)
     else:
-        # When no explicit arch list, detect from current GPU
+        _arch_targets = None
         try:
             cap = torch.cuda.get_device_capability()
-            _arch_values.append(float(f"{cap[0]}.{cap[1]}"))
-            if cap[0] >= 10:
-                _has_sm100_target = True
-            if cap[0] >= 9:
-                _has_sm90_target = True
-            if cap[0] >= 8:
-                _has_sm80_target = True
+            _arch_targets = (build_arch.CudaArchTarget(major=int(cap[0]), minor=int(cap[1])),)
+            print(f"No TORCH_CUDA_ARCH_LIST; targeting detected device sm_{cap[0]}{cap[1]}")
         except Exception:
             pass
+        if not _arch_targets:
+            # No visible GPU: build the previous default set as exact targets.
+            _arch_targets = build_arch.parse_cuda_arch_list("7.0 7.5 8.0 8.6")
+            print(
+                "No TORCH_CUDA_ARCH_LIST and no visible GPU; defaulting to exact "
+                "targets sm_70, sm_75, sm_80, sm_86"
+            )
 
-    # Filter out architectures below minimum
-    _skipped = [v for v in _arch_values if v < _MIN_ARCH]
-    _arch_values = [v for v in _arch_values if v >= _MIN_ARCH]
-    if _skipped:
-        print(
-            f"WARNING: Skipping unsupported architectures < sm_{int(_MIN_ARCH * 10)}: "
-            f"{', '.join(f'sm_{int(v * 10)}' for v in _skipped)}"
-        )
-    if not _arch_values and not any(v >= 9.0 for v in _skipped):
-        # No valid arch remaining and no sm_90 — default to sm_70
-        _arch_values = [7.0]
-        print("No supported architecture found; defaulting to sm_70")
+    # One cubin per target (PTX only where a token carried +PTX), in order.
+    _gencode_flags = build_arch.cuda_gencode_flags(_arch_targets)
+    nvcc_args.extend(_gencode_flags)
+    for _flag in _gencode_flags:
+        print(f"Adding gencode flag: {_flag}")
 
-    # Determine SM80+ presence first (needed to decide whether SM7X gencode is safe)
-    for arch_val in _arch_values:
-        if arch_val >= 10.0:
-            _has_sm100_target = True
-            _has_sm90_target = True
-            _has_sm80_target = True
-        elif arch_val >= 9.0:
-            _has_sm90_target = True
-            _has_sm80_target = True
-        elif arch_val >= 8.0:
-            _has_sm80_target = True
-
-    # Generate gencode flags for all requested architectures.
-    # When SM80+ targets are present, skip SM7X gencode: CUTLASS .cu files are compiled
-    # with all gencode flags, and CUTLASS cp.async / tensor-core MMA fail on compute_7X.
-    _skipped_sm7x = []
-    _has_ptx_target = False
-    for arch_val in _arch_values:
-        arch_int = int(arch_val * 10)  # e.g. 7.0 -> 70, 8.0 -> 80, 9.0 -> 90, 10.0 -> 100
-        if arch_val >= 10.0 and arch_val < 10.0 + 0.01:
-            pass  # sm_100a added separately below
-        elif arch_val >= 10.0:
-            # Future arch (e.g. 12.0): emit PTX for forward compatibility
-            nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=compute_{arch_int}")
-            _has_ptx_target = True
-            print(f"Adding PTX gencode for SM{arch_int} (forward compatibility)")
-        elif arch_val >= 9.0:
-            pass  # sm_90a added separately below
-        elif arch_val >= 8.0:
-            nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=sm_{arch_int}")
-            print(f"Adding gencode for SM{arch_int}")
-        elif _has_sm80_target:
-            # Skip SM7X gencode when SM80+ is also targeted (CUTLASS incompatible)
-            _skipped_sm7x.append(arch_val)
-        else:
-            nvcc_args.append(f"-gencode=arch=compute_{arch_int},code=sm_{arch_int}")
-            print(f"Adding gencode for SM{arch_int}")
-
-    if _skipped_sm7x:
-        print(
-            f"WARNING: Skipping SM7X gencode ({', '.join(f'sm_{int(v * 10)}' for v in _skipped_sm7x)}) "
-            f"because SM80+ targets are present (CUTLASS requires sm_80+ for all gencode targets)"
-        )
-
-    # SM80+ CUTLASS support (cp.async, tensor core MMA)
-    if _has_sm80_target:
-        cxx_args.append("-DWARPCONVNET_SM80_ENABLED=1")
-        nvcc_args.append("-DWARPCONVNET_SM80_ENABLED=1")
-        print("Adding WARPCONVNET_SM80_ENABLED (CUTLASS cp.async, tensor core MMA)")
-
-    # For SM90 (Hopper) WGMMA support, use sm_90a (not just sm_90).
-    # sm_90a enables __CUDA_ARCH_FEAT_SM90_ALL needed for WGMMA instructions.
-    if _has_sm90_target:
-        nvcc_args.append("-gencode=arch=compute_90a,code=sm_90a")
-        cxx_args.append("-DWARPCONVNET_SM90_ENABLED=1")
-        nvcc_args.append("-DWARPCONVNET_SM90_ENABLED=1")
-        print("Adding SM90a (Hopper WGMMA) gencode flag and WARPCONVNET_SM90_ENABLED")
-
-    # For SM100 (Blackwell) support, use sm_100a (like sm_90a for Hopper).
-    # sm_100a enables __CUDA_ARCH_FEAT_SM100_ALL needed for Blackwell-specific features.
-    if _has_sm100_target:
-        nvcc_args.append("-gencode=arch=compute_100a,code=sm_100a")
-        cxx_args.append("-DWARPCONVNET_SM100_ENABLED=1")
-        nvcc_args.append("-DWARPCONVNET_SM100_ENABLED=1")
-        print("Adding SM100a (Blackwell) gencode flag and WARPCONVNET_SM100_ENABLED")
+    # Feature macros: SM80 gates generic mma.sync source (any target >= sm_80);
+    # SM90/SM100 gate WGMMA/Blackwell backends and require an explicit
+    # accelerated 9.0a / 10.0a target.
+    _feature_macros = build_arch.cuda_feature_macros(_arch_targets)
+    for _macro in _feature_macros:
+        cxx_args.append(_macro)
+        nvcc_args.append(_macro)
+        print(f"Adding feature macro: {_macro}")
 
     # Check DISABLE_BFLOAT16
     if os.environ.get("DISABLE_BFLOAT16", "0") == "1":
