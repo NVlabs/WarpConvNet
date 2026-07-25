@@ -62,6 +62,68 @@ def _gray_to_binary_uint32(x: Tensor) -> Tensor:
     return y
 
 
+_FP16_ABSMAX = 65504.0  # torch.finfo(torch.float16).max
+# Rescale target leaves one bit of headroom under fp16 max so boundary values
+# cannot round to inf, without scaling small entries toward subnormals more
+# than necessary.
+_FP16_RESCALE_TARGET = 32768.0
+
+
+def _fp16_safe_cast(t: Tensor) -> Tuple[Tensor, Tensor]:
+    """Cast an fp32 tensor to fp16, exactly rescaling when out of fp16 range.
+
+    An unconditional ``.half()`` turns any fp32 value beyond 65504 into inf,
+    which the kernel accumulates into NaN. Under a GradScaler (loss scale up
+    to 2**16) fp32 grad_output beyond fp16 range is the NORMAL case, not an
+    anomaly — observed in the wild at absmax 3.3e5: finite fp32 in, NaN out,
+    while explicit_gemm was exact; under a scaler the NaN never surfaces, it
+    just silently halves the loss scale forever.
+
+    Returns ``(t_fp16, scale)`` with ``t == t_fp16 * scale`` exact in the
+    exponent: ``scale`` is a power of two, so the divide and the caller's
+    multiply-back shift exponents without touching mantissas — full fp16
+    precision at unlimited range (strictly better than a bf16 reroute, which
+    permanently costs 2 mantissa bits). The mask GEMM ops are (bi)linear in
+    each operand, so callers multiply their OUTPUT by the product of the
+    input scales.
+
+    ``scale`` is a 0-dim fp32 CUDA tensor and every step here is device-side:
+    NO host sync — a ``.item()``/``bool()`` in this path would serialize the
+    stream on every sparse conv and break CUDA-graph capture. The clamp makes
+    in-range tensors get exponent 0 (scale 1); an all-zero tensor hits
+    ``log2(0) = -inf`` and also clamps to 0; a non-finite absmax yields a
+    non-finite scale and the NaN/inf propagates, same as an unguarded cast.
+    """
+    if t.numel() == 0:
+        return t.half(), torch.ones((), dtype=torch.float32, device=t.device)
+    m = t.abs().max().float()
+    exp = torch.clamp(torch.ceil(torch.log2(m / _FP16_RESCALE_TARGET)), min=0.0)
+    scale = torch.exp2(exp)
+    t16 = (t * torch.exp2(-exp)).half()
+    return t16, scale
+
+
+def _fp16_safe_cast_memo(t: Tensor, scratch: Optional[dict]) -> Tuple[Tensor, Tensor]:
+    """`_fp16_safe_cast` memoized in a per-autograd-backward scratch dict.
+
+    dgrad and wgrad are dispatched as separate calls within one backward and
+    cast the same grad_output/in_features/weight; sharing the cast + absmax
+    halves that work. Keyed by ``id(t)`` — sound only because the scratch
+    lives for a single backward invocation, during which the saved tensors
+    cannot be mutated. Do NOT replace with a tensor-attribute + ``_version``
+    cache: ``.data``-level writes (EMA updates, DeepSpeed flat-buffer swaps)
+    change values without bumping ``_version``, and a stale absmax silently
+    reintroduces the very inf this cast exists to prevent.
+    """
+    if scratch is None:
+        return _fp16_safe_cast(t)
+    hit = scratch.get(id(t))
+    if hit is None:
+        hit = _fp16_safe_cast(t)
+        scratch[id(t)] = hit
+    return hit
+
+
 def _build_pair_table(
     kernel_map: IntSearchResult,
     N_out: int,
@@ -631,12 +693,16 @@ def _mask_gemm_forward_logic(
         C_in_g = weight.shape[1]
         C_out_g = weight.shape[2]
 
-    # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16)
+    # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16), with exact
+    # power-of-two rescaling for values beyond fp16 range — see _fp16_safe_cast.
+    # The op is bilinear in (in_features, weight): output scales multiply.
     orig_dtype = in_features.dtype
     use_f32_output = orig_dtype == torch.float32
+    fwd_scale = None  # 0-dim device tensor on the fp32 path
     if orig_dtype == torch.float32:
-        _in = in_features.half()
-        _w = weight.half()
+        _in, s_in = _fp16_safe_cast(in_features)
+        _w, s_w = _fp16_safe_cast(weight)
+        fwd_scale = s_in * s_w
     else:
         _in = in_features
         _w = weight
@@ -672,7 +738,11 @@ def _mask_gemm_forward_logic(
     if status != 0:
         raise RuntimeError(f"mask_gemm fwd failed: status={status}, tile={tile_id}")
 
-    return output.to(dtype=orig_dtype)
+    output = output.to(dtype=orig_dtype)
+    if fwd_scale is not None:
+        # Exact pow2 multiply-back (0-dim device tensor, no sync).
+        output = output * fwd_scale
+    return output
 
 
 def _mask_gemm_backward_logic(
@@ -688,6 +758,7 @@ def _mask_gemm_backward_logic(
     weight_T: Optional[Tensor] = None,
     groups: int = 1,
     use_fp16_accum: bool = False,
+    scratch: Optional[dict] = None,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Fused mask-GEMM backward (dgrad and/or wgrad).
 
@@ -722,13 +793,18 @@ def _mask_gemm_backward_logic(
         C_in_g = C_in
         C_out_g = C_out
 
-    # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16)
+    # Cast to fp16 if needed (mask_gemm kernels require fp16/bf16), with exact
+    # power-of-two rescaling for values beyond fp16 range — see _fp16_safe_cast.
+    # dgrad is bilinear in (grad_output, weight) and wgrad in (in_features,
+    # grad_output), so each leg's output is multiplied back by the product of
+    # its operands' scales.
     orig_dtype = grad_output.dtype
     use_f32_output = orig_dtype == torch.float32
+    s_go = s_in = s_w = None  # 0-dim device tensors on the fp32 path
     if orig_dtype == torch.float32:
-        _go = grad_output.half()
-        _in = in_features.half()
-        _w = weight.half()
+        _go, s_go = _fp16_safe_cast_memo(grad_output, scratch)
+        _in, s_in = _fp16_safe_cast_memo(in_features, scratch)
+        _w, s_w = _fp16_safe_cast_memo(weight, scratch)
     else:
         _go = grad_output
         _in = in_features
@@ -755,9 +831,15 @@ def _mask_gemm_backward_logic(
         # Reuse caller-provided weight_T when groups==1 (its [K, C_out, C_in]
         # layout matches what fwd_as_dgrad needs after .transpose(-1,-2)). Saves
         # one 54MB copy per bwd call at C=1024 K=27 fp16.
+        # The cached transpose holds UNSCALED values, so when it is used the
+        # dgrad multiply-back must apply s_go only — track which weight tensor
+        # feeds the kernel instead of comparing s_w to 1 (a host-side scale
+        # check would sync the stream).
+        dgrad_w_is_scaled = True
         if use_fwd_for_dgrad:
             if weight_T is not None and groups == 1 and weight_T.dtype == _w.dtype:
                 _w_dgrad = weight_T
+                dgrad_w_is_scaled = False
             else:
                 _w_dgrad = _w.transpose(-1, -2).contiguous()
         else:
@@ -808,6 +890,12 @@ def _mask_gemm_backward_logic(
             raise RuntimeError(f"mask_gemm dgrad failed: status={status}")
 
         grad_in = grad_in.to(dtype=orig_dtype)
+        if s_go is not None:
+            # Exact power-of-two multiply-back (0-dim device tensors, no
+            # sync; scale is 1.0 for in-range inputs so this is a no-op
+            # numerically). Gated on the host-known fp32 path only.
+            dgrad_scale = s_go * s_w if dgrad_w_is_scaled else s_go
+            grad_in = grad_in * dgrad_scale
 
     if needs_input_grad[1]:
         backend = _C.mask_gemm
@@ -868,6 +956,10 @@ def _mask_gemm_backward_logic(
         )
         if status != 0:
             raise RuntimeError(f"mask_gemm wgrad failed: status={status}")
+        if s_go is not None:
+            # grad_weight buffer is fp32; exact pow2 multiply-back before the
+            # final cast (0-dim device tensors, no sync).
+            grad_weight = grad_weight * (s_go * s_in)
         grad_weight = grad_weight.to(dtype=weight.dtype)
 
     return grad_in, grad_weight

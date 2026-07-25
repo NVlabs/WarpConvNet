@@ -77,12 +77,16 @@ def _execute_backward(
     weight_T: Optional[Tensor] = None,
     groups: int = 1,
     use_fp16_accum: bool = False,
+    scratch: Optional[Dict[int, Any]] = None,
 ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
     """Dispatch backward pass to the selected algorithm.
 
     Args:
         weight_T: Pre-computed weight.transpose(1,2).contiguous() to avoid
             redundant copies when dgrad and wgrad are dispatched separately.
+        scratch: Optional per-autograd-backward dict shared by the dgrad and
+            wgrad dispatches of the same backward, letting backends reuse
+            per-tensor work (e.g. fp16-safe casts) across the two calls.
 
     Returns (grad_in_features, grad_weight). Either can be None if the
     corresponding needs_input_grad flag is False AND the algorithm supports it.
@@ -100,5 +104,6 @@ def _execute_backward(
         weight_T=weight_T,
         groups=groups,
         use_fp16_accum=use_fp16_accum,
+        scratch=scratch,
     )
     return run_backward(algo, ctx)

@@ -114,6 +114,13 @@ class BwdCtx:
     weight_T: Optional[Tensor] = None
     groups: int = 1
     use_fp16_accum: bool = False
+    # Per-autograd-backward scratch shared by the (separately dispatched)
+    # dgrad and wgrad calls, so per-tensor work (fp16-safe casts + absmax)
+    # is computed once per backward, not once per call. Scoped to a single
+    # backward invocation, where saved tensors cannot mutate — deliberately
+    # NOT a tensor-attribute/_version cache, which .data-level writes (EMA,
+    # DeepSpeed flat-buffer swaps) can invalidate silently.
+    scratch: Optional[Dict[int, Any]] = None
 
 
 # Type aliases for the adapter signatures.
@@ -130,14 +137,23 @@ BwdFn = Callable[[BwdCtx], BwdResult]
 
 def _fwd_explicit(ctx: FwdCtx) -> FwdResult:
     return _explicit_gemm_forward_logic(
-        ctx.in_features, ctx.weight, ctx.kernel_map, ctx.num_out_coords, ctx.compute_dtype
+        ctx.in_features,
+        ctx.weight,
+        ctx.kernel_map,
+        ctx.num_out_coords,
+        ctx.compute_dtype,
     )
 
 
 def _fwd_implicit(ctx: FwdCtx) -> FwdResult:
     bs = ctx.params.get("fwd_block_size", ctx.fwd_block_size or 16)
     return _implicit_gemm_forward_logic(
-        ctx.in_features, ctx.weight, ctx.kernel_map, ctx.num_out_coords, ctx.compute_dtype, bs
+        ctx.in_features,
+        ctx.weight,
+        ctx.kernel_map,
+        ctx.num_out_coords,
+        ctx.compute_dtype,
+        bs,
     )
 
 
@@ -404,6 +420,7 @@ def _bwd_mask_impl(algo: str, ctx: BwdCtx) -> BwdResult:
         weight_T=ctx.weight_T,
         groups=ctx.groups,
         use_fp16_accum=ctx.use_fp16_accum,
+        scratch=ctx.scratch,
     )
 
 

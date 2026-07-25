@@ -246,3 +246,119 @@ def test_mask_gemm_amp_fwd(C_in, C_out, stride):
     )
     r = _rdiff(out_prod_v.feature_tensor, out_ref)
     assert r < _RTOL_FP16, f"AMP fwd rdiff={r:.4e} stride={stride}"
+
+
+# ---------------------------------------------------------------------------
+# fp32 inputs beyond fp16 range (GradScaler-scaled gradients). Regression for
+# the 2026-07-24 external NaN report: an unconditional fp32->fp16 downcast
+# turned grad_output absmax ~3.3e5 into inf, and the kernel accumulated NaN.
+# The cast must route to bf16 (fp32 exponent range) for such inputs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("gmag", [3.3e5, 1e6, 1e7], ids=["3e5", "1e6", "1e7"])
+def test_fp32_grad_output_beyond_fp16_range_dgrad_finite(gmag):
+    from warpconvnet.nn.functional.sparse_conv.detail.dispatch import _execute_backward
+    from warpconvnet.nn.functional.sparse_conv import _explicit_gemm_backward_logic
+
+    voxels = _make_voxels(C_in=64, seed=11)
+    kmap, num_out = _kmap_for(voxels, (3, 3, 3), 1)
+    n = voxels.feature_tensor.shape[0]
+    x = voxels.feature_tensor.float() * 0.4
+    w = torch.randn(27, 64, 32, device="cuda") * 0.011
+    torch.manual_seed(12)
+    gy = (torch.randn(num_out, 32, device="cuda") * (gmag / 4.0)).clamp(-gmag, gmag)
+    assert gy.abs().max().item() > 65504  # precondition: beyond fp16 range
+
+    gi_ref, _ = _execute_backward(
+        "explicit_gemm",
+        {},
+        gy,
+        x,
+        w,
+        kmap,
+        num_out,
+        torch.float32,
+        x.device,
+        (True, False, False),
+    )
+    assert torch.isfinite(gi_ref).all()
+    gi, _ = _execute_backward(
+        "mask_gemm",
+        {"tile_id": 59},
+        gy,
+        x,
+        w,
+        kmap,
+        num_out,
+        torch.float32,
+        x.device,
+        (True, False, False),
+    )
+    assert torch.isfinite(gi).all(), "mask_gemm dgrad NaN on fp32 grads beyond fp16 range"
+    r = _rdiff(gi, gi_ref)
+    # power-of-two rescaling keeps full fp16 mantissa: expect normal fp16-path
+    # agreement, not a degraded-precision bound.
+    assert r < 2e-3, f"rescaled dgrad rdiff={r:.4e} at gmag={gmag:g}"
+
+
+def test_fp32_features_beyond_fp16_range_fwd_finite():
+    from warpconvnet.nn.functional.sparse_conv.detail.dispatch import _execute_forward
+    from warpconvnet.nn.functional.sparse_conv import _explicit_gemm_forward_logic
+
+    voxels = _make_voxels(C_in=32, seed=13)
+    kmap, num_out = _kmap_for(voxels, (3, 3, 3), 1)
+    x = voxels.feature_tensor.float() * 1.0e5  # beyond fp16 range
+    w = torch.randn(27, 32, 32, device="cuda") * 0.01
+    out_ref = _execute_forward("explicit_gemm", {}, x, w, kmap, num_out, torch.float32, None, 1)
+    out = _execute_forward(
+        "mask_gemm", {"tile_id": 41}, x, w, kmap, num_out, torch.float32, None, 1
+    )
+    assert torch.isfinite(out).all(), "mask_gemm fwd NaN on fp32 features beyond fp16 range"
+    r = _rdiff(out, out_ref)
+    assert r < 2e-3, f"rescaled fwd rdiff={r:.4e}"
+
+
+def test_fp32_safe_cast_path_never_syncs():
+    """The fp16-safe rescaling must stay device-side: a host sync per sparse
+    conv would serialize the stream and break CUDA-graph capture."""
+    from warpconvnet.nn.functional.sparse_conv.detail.dispatch import _execute_backward
+
+    voxels = _make_voxels(C_in=64, seed=17)
+    kmap, num_out = _kmap_for(voxels, (3, 3, 3), 1)
+    x = voxels.feature_tensor.float() * 0.4
+    w = torch.randn(27, 64, 32, device="cuda") * 0.011
+    gy = torch.randn(num_out, 32, device="cuda") * 8.0e4
+    # Warm up lazily-initialized state (autotune-independent direct dispatch,
+    # cached pair tables, cuBLAS handles) outside the guarded region.
+    _execute_backward(
+        "mask_gemm",
+        {"tile_id": 59},
+        gy,
+        x,
+        w,
+        kmap,
+        num_out,
+        torch.float32,
+        x.device,
+        (True, True, False),
+    )
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        gi, gw = _execute_backward(
+            "mask_gemm",
+            {"tile_id": 59},
+            gy,
+            x,
+            w,
+            kmap,
+            num_out,
+            torch.float32,
+            x.device,
+            (True, True, False),
+        )
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize()
+    assert torch.isfinite(gi).all() and torch.isfinite(gw).all()

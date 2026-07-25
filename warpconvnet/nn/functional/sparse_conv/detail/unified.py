@@ -632,6 +632,11 @@ class UnifiedSpatiallySparseConvFunction(Function):
         grad_in_features = None
         grad_weight = None
 
+        # Shared per-backward scratch: lets the separately-dispatched dgrad and
+        # wgrad calls reuse per-tensor work (fp16-safe casts + absmax) once
+        # per backward. Dies with this invocation; see BwdCtx.scratch.
+        bwd_scratch: dict = {}
+
         if ctx.needs_input_grad[0]:
             dgrad_algo, dgrad_params = _autotune_one_direction(
                 _BENCHMARK_ABT_RESULTS,
@@ -659,6 +664,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     needs_input_grad=(True, False),
                     weight_T=_weight_T,
                     groups=groups,
+                    scratch=bwd_scratch,
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"DGRAD '{dgrad_algo}' failed: {e}. Falling back.")
@@ -676,6 +682,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     needs_input_grad=(True, False),
                     weight_T=_weight_T,
                     groups=groups,
+                    scratch=bwd_scratch,
                 )
 
         if ctx.needs_input_grad[1]:
@@ -704,6 +711,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     device,
                     needs_input_grad=(False, True),
                     groups=groups,
+                    scratch=bwd_scratch,
                 )
             except (RuntimeError, Exception) as e:
                 logger.warning(f"WGRAD '{wgrad_algo}' failed: {e}. Falling back.")
@@ -720,6 +728,7 @@ class UnifiedSpatiallySparseConvFunction(Function):
                     device,
                     needs_input_grad=(False, True),
                     groups=groups,
+                    scratch=bwd_scratch,
                 )
 
         # Free pre-cast tensors eagerly
