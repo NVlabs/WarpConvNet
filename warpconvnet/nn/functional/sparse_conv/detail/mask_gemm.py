@@ -15,6 +15,10 @@ from torch import Tensor
 
 import warpconvnet._C as _C
 from warpconvnet.geometry.coords.search.search_results import IntSearchResult
+from warpconvnet.nn.functional.sparse_conv.detail.tile_metadata import (
+    known_tile_ids,
+    tile_launch_rejection,
+)
 from warpconvnet.utils.type_cast import _min_dtype
 
 
@@ -397,7 +401,33 @@ _DGRAD_PCOFF_TILES = frozenset({64, 65, 66, 67, 68, 69})
 
 # wcn-only scalar/f32-out fallback tiles (not in warpgemm metadata). Referenced
 # by the selectors and asserted absent-from-metadata by the drift guard.
+# NOTE: the strided 300-307 family DOES appear in schema-7 metadata (op
+# "forward", tier experimental); only the raw-integer fallbacks stay
+# metadata-absent.
 _WCN_ONLY_FWD_TILES = frozenset({70, 71, 72, 80, 81, 82}) | _STRIDED_FWD_TILES
+
+# Launch-time authorization allowlists: raw-integer tile ids the binding
+# dispatches that have no warpgemm metadata record. Everything else must pass
+# tile_launch_rejection() — exact device arch in compile_archs + launchable
+# backend — before entering the C++ switch, INCLUDING pinned/cached tile ids
+# (Blackwell handoff §3). dgrad_wt 900-911 carry op="forward" in metadata
+# (they are fwd kernel aliases), native dgrad ids carry op="dgrad".
+_METADATA_ABSENT_FWD_LAUNCH_IDS = frozenset({70, 71, 72, 80, 82})
+_METADATA_ABSENT_DGRAD_LAUNCH_IDS = frozenset({70, 71, 72, 81})
+_METADATA_ABSENT_WGRAD_LAUNCH_IDS = frozenset({73})
+
+
+def _require_launchable(op: str, tile_id: int, metadata_absent_ok: frozenset) -> None:
+    """Raise (autotune-skippable) if a resolved tile id may not launch here.
+
+    ``op`` is the metadata op space ("forward"/"dgrad"/"wgrad"), which is not
+    always the launch direction: dgrad_wt aliases validate in "forward".
+    """
+    if tile_id in metadata_absent_ok:
+        return
+    reason = tile_launch_rejection(op, tile_id)
+    if reason is not None:
+        raise RuntimeError(f"mask_gemm tile authorization failed: {reason}. Candidate skipped.")
 
 
 def _select_fwd_tile(
@@ -619,6 +649,7 @@ def _mask_gemm_forward_logic(
     tile_id, use_f32_out_tile = _select_fwd_tile(
         tile_id, mask_words, use_f32_output, cin_aligned, cout_aligned
     )
+    _require_launchable("forward", tile_id, _METADATA_ABSENT_FWD_LAUNCH_IDS)
     out_dtype = torch.float32 if use_f32_out_tile else _in.dtype
 
     # Single launch handles groups=1 and groups>1 via grid.z
@@ -749,6 +780,11 @@ def _mask_gemm_backward_logic(
         )
         # Fwd-fallback (wcn-only fwd ids, weight pre-transposed) -> backend.fwd;
         # otherwise backend.dgrad (native, or the dgrad_wt 900-911 arm).
+        if use_fwd_fallback or dgrad_tile in _DGRAD_WT_TILES:
+            # wt aliases are fwd kernels; metadata records them under "forward".
+            _require_launchable("forward", dgrad_tile, _METADATA_ABSENT_FWD_LAUNCH_IDS)
+        else:
+            _require_launchable("dgrad", dgrad_tile, _METADATA_ABSENT_DGRAD_LAUNCH_IDS)
         dgrad_fn = _C.mask_gemm.fwd if use_fwd_fallback else _C.mask_gemm.dgrad
 
         # Single launch handles groups=1 and groups>1 via grid.z
@@ -793,6 +829,17 @@ def _mask_gemm_backward_logic(
             wgrad_tile = 73
         else:
             wgrad_tile = tile_id
+            if (
+                wgrad_tile not in _METADATA_ABSENT_WGRAD_LAUNCH_IDS
+                and wgrad_tile not in known_tile_ids("wgrad")
+            ):
+                # Shared pool entries carry fwd/dgrad tile ids in params; the
+                # binding's wgrad switch routes ids with no WgradTile arm to
+                # canonical tile 0. Mirror that mapping BEFORE authorization so
+                # the gate checks the tile that will actually run (a wgrad-
+                # namespace id that fails arch/backend still raises below).
+                wgrad_tile = 0
+        _require_launchable("wgrad", wgrad_tile, _METADATA_ABSENT_WGRAD_LAUNCH_IDS)
 
         # Single launch: [K, G, C_in_g, C_out_g] for groups>1, [K, C_in_g, C_out_g] for groups=1
         if groups == 1:

@@ -176,7 +176,10 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
     "WARPCONVNET_BENCHMARK_CACHE_DIR", "~/.cache/warpconvnet"
 )
 
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 14.0
+# 15.0: Blackwell integration — warpgemm metadata schema 7 (backend +
+# dispatch_mask_words), wgrad MW_stride kernel signature, new tile inventory.
+# Winners recorded against the schema-6 kernel set are not comparable.
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 15.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory

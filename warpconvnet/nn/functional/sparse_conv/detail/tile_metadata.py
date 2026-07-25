@@ -22,7 +22,12 @@ from warpconvnet.csrc.mask_gemm.tile_metadata import (
     get_schema_version,
 )
 
-_MIN_SCHEMA_VERSION = 5
+_MIN_SCHEMA_VERSION = 7
+
+# Backends this build can actually launch. The sm100_umma backend is a
+# compile-parseable scaffold in warpgemm with no launchable pipeline; it must
+# never be selected regardless of device arch (Blackwell handoff §3).
+_LAUNCHABLE_BACKENDS = frozenset({"mma_sync"})
 
 
 def _device_arch_code() -> int | None:
@@ -62,13 +67,67 @@ def _get_tiles(op: str, filter_arch: bool = True):
             f"tile_metadata schema_version "
             f"{get_schema_version()} < required {_MIN_SCHEMA_VERSION}"
         )
-    tiles = build_tile_metadata(active_only=True, ops=(op,))
+    tiles = [
+        t
+        for t in build_tile_metadata(active_only=True, ops=(op,))
+        if t.backend in _LAUNCHABLE_BACKENDS
+    ]
     if not filter_arch:
         return tiles
     arch = _get_device_arch()
     if arch is None:
         return tiles
     return [t for t in tiles if t.supports_arch(arch)]
+
+
+# Per-op tile_id -> metadata index over the FULL registry (all tiers, all
+# backends, all archs). Built lazily once; used to authorize (possibly cached
+# or pinned) tile ids before they reach the C++ dispatch switch.
+_METADATA_INDEX: dict[str, dict[int, object]] = {}
+
+
+def _metadata_index(op: str) -> dict[int, object]:
+    idx = _METADATA_INDEX.get(op)
+    if idx is None:
+        if get_schema_version() < _MIN_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"tile_metadata schema_version "
+                f"{get_schema_version()} < required {_MIN_SCHEMA_VERSION}"
+            )
+        idx = {t.tile_id: t for t in build_tile_metadata(active_only=False, ops=(op,))}
+        _METADATA_INDEX[op] = idx
+    return idx
+
+
+def known_tile_ids(op: str) -> frozenset:
+    """All tile ids present in warpgemm metadata for ``op`` (any tier/arch)."""
+    return frozenset(_metadata_index(op))
+
+
+def tile_launch_rejection(op: str, tile_id: int) -> str | None:
+    """Reason a canonical tile id must not launch on this device, or None if OK.
+
+    Exact-membership checks per the Blackwell handoff §3: the device arch must
+    be in the tile's ``compile_archs`` (no ``>=`` inference) and the tile's
+    backend must be launchable in this build. Applies to every candidate path,
+    including pinned tile ids read from the autotune cache.
+
+    Ids absent from warpgemm metadata (warpconvnet-only carve-outs such as the
+    scalar/f32-out fallbacks) are the CALLER's responsibility to allowlist —
+    this function returns a rejection for unknown ids so foreign/stale cached
+    ids cannot slip through as "not in metadata, assume fine".
+    """
+    meta = _metadata_index(op).get(tile_id)
+    if meta is None:
+        return f"tile {tile_id} not present in warpgemm {op} metadata"
+    if meta.backend not in _LAUNCHABLE_BACKENDS:
+        return f"tile {tile_id} backend={meta.backend!r} is not launchable in this build"
+    arch = _get_device_arch()
+    if arch is not None and not meta.supports_arch(arch):
+        return (
+            f"tile {tile_id} compile_archs={meta.compile_archs} excludes " f"device arch sm_{arch}"
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +143,7 @@ def candidate_tiles(
     groups: int = 1,
     input_dtype: str = "f16",
     output_dtype: str = "f16",
-    tier: str = "stable",
+    tier: str = "production",
     acc_dtype: str | None = None,
 ) -> list:
     """Return tiles that will accept the runtime shape (correctness gate).
@@ -168,7 +227,7 @@ def explain(
 
     survivors = []
     for t in tiles:
-        if t.tier != "stable":
+        if t.tier != "production":
             out.append(f"  reject tile {t.tile_id:>3}: tier={t.tier}")
             continue
         if not t.supports_mask_words(mw_needed):
