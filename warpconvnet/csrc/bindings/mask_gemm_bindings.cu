@@ -8,6 +8,7 @@
 #include <torch/extension.h>
 
 #include <cstring>
+#include <limits>
 
 #include "../include/gemm_error_codes.h"
 #include "../include/gemm_mma_tiles.h"        // canonical tile_tag struct decls
@@ -39,38 +40,44 @@ struct MaskGemmKernelEntry {
   int mask_words;
   bool persistent;
   const char *scalar_flags;
+  const char *backend;
   const char *compile_archs;
+  const char *dispatch_mask_words;
 };
 
 [[maybe_unused]] constexpr MaskGemmKernelEntry kMaskGemmTable[] = {
-#define MASK_GEMM_KERNEL(tile_id,       \
-                         op,            \
-                         kernel_struct, \
-                         tile_tag,      \
-                         config_alias,  \
-                         in_dt,         \
-                         out_dt,        \
-                         acc_dt,        \
-                         mainloop,      \
-                         epilogue,      \
-                         mask_words,    \
-                         persistent,    \
-                         scalar_flags,  \
-                         compile_archs) \
-  {tile_id,                             \
-   op,                                  \
-   kernel_struct,                       \
-   tile_tag,                            \
-   config_alias,                        \
-   in_dt,                               \
-   out_dt,                              \
-   acc_dt,                              \
-   mainloop,                            \
-   epilogue,                            \
-   mask_words,                          \
-   static_cast<bool>(persistent),       \
-   scalar_flags,                        \
-   compile_archs},
+#define MASK_GEMM_KERNEL(tile_id,             \
+                         op,                  \
+                         kernel_struct,       \
+                         tile_tag,            \
+                         config_alias,        \
+                         in_dt,               \
+                         out_dt,              \
+                         acc_dt,              \
+                         mainloop,            \
+                         epilogue,            \
+                         mask_words,          \
+                         persistent,          \
+                         scalar_flags,        \
+                         backend,             \
+                         compile_archs,       \
+                         dispatch_mask_words) \
+  {tile_id,                                   \
+   op,                                        \
+   kernel_struct,                             \
+   tile_tag,                                  \
+   config_alias,                              \
+   in_dt,                                     \
+   out_dt,                                    \
+   acc_dt,                                    \
+   mainloop,                                  \
+   epilogue,                                  \
+   mask_words,                                \
+   static_cast<bool>(persistent),             \
+   scalar_flags,                              \
+   backend,                                   \
+   compile_archs,                             \
+   dispatch_mask_words},
 #include "../mask_gemm/mask_gemm_dispatch_table.inc"
 #undef MASK_GEMM_KERNEL
 };
@@ -168,6 +175,7 @@ int launch_mask_gemm_wgrad(const void *a,
                            int C_in,
                            int C_out,
                            int K,
+                           int MW_stride,
                            int split_k,
                            float alpha,
                            int groups,
@@ -184,6 +192,7 @@ int launch_wgrad_workspace_64x64(const void *,
                                  const uint32_t *,
                                  const int *,
                                  const uint32_t *,
+                                 int,
                                  int,
                                  int,
                                  int,
@@ -207,6 +216,7 @@ int launch_wgrad_workspace_64x64_3s(const void *,
                                     int,
                                     int,
                                     int,
+                                    int,
                                     float,
                                     int,
                                     cudaStream_t);
@@ -218,6 +228,7 @@ int launch_wgrad_workspace_64x128(const void *,
                                   const uint32_t *,
                                   const int *,
                                   const uint32_t *,
+                                  int,
                                   int,
                                   int,
                                   int,
@@ -690,6 +701,7 @@ int launch_wgrad_atomic_64x64(const void *,
                               int,
                               int,
                               int,
+                              int,
                               float,
                               int,
                               cudaStream_t);
@@ -701,6 +713,7 @@ int launch_wgrad_atomic_64x128(const void *,
                                const uint32_t *,
                                const int *,
                                const uint32_t *,
+                               int,
                                int,
                                int,
                                int,
@@ -724,6 +737,7 @@ int launch_wgrad_atomic_3s(const void *,
                            int,
                            int,
                            int,
+                           int,
                            float,
                            int,
                            cudaStream_t);
@@ -737,6 +751,7 @@ int launch_scalar_wgrad_sab(const void *,
                             const uint32_t *,
                             const int *,
                             const uint32_t *,
+                            int,
                             int,
                             int,
                             int,
@@ -1561,10 +1576,65 @@ int mask_gemm_wgrad(torch::Tensor input,
   input = input.contiguous();
   grad_output = grad_output.contiguous();
 
+  TORCH_CHECK(K >= 1 && K <= 384, "mask_gemm_wgrad: K must be in [1, 384], got ", K);
+
   int N_in = input.size(0), N_out = grad_output.size(0);
   // For group conv: input is [N, C_in_total], C_in/C_out are per-group
   int C_in_total = input.size(1), C_out_total = grad_output.size(1);
   int C_in = C_in_total / groups, C_out = C_out_total / groups;
+
+  // Physical mask stride. Python pads pair/reduced masks to the canonical
+  // physical tier {1, 2, 4, 8, 12}, which may exceed the logical ceil(K/32).
+  // Derive the stride from the pair_mask tensor itself so kernel indexing
+  // (pair_mask[row * MW_stride + w]) matches the allocation.
+  int64_t MW_logical = ((int64_t)K + 31) / 32;
+  int MW_stride;
+  if (N_out > 0) {
+    TORCH_CHECK(pair_mask.numel() % N_out == 0,
+                "mask_gemm_wgrad: pair_mask.numel() must be divisible by N_out; got ",
+                pair_mask.numel(),
+                " elements for N_out=",
+                N_out);
+    int64_t stride64 = pair_mask.numel() / N_out;
+    TORCH_CHECK(stride64 >= MW_logical,
+                "mask_gemm_wgrad: pair_mask physical MW_stride must be >= ceil(K/32); got ",
+                stride64,
+                " for K=",
+                K,
+                " (MW_logical=",
+                MW_logical,
+                ")");
+    TORCH_CHECK(stride64 <= std::numeric_limits<int>::max(),
+                "mask_gemm_wgrad: pair_mask MW_stride is too large: ",
+                stride64);
+    // Canonical physical tiers only (handoff §4): a stride outside
+    // {1,2,4,8,12} means the caller allocated with logical ceil(K/32)
+    // instead of the DISPATCH_MW tier — catch it here, not as a bad read.
+    TORCH_CHECK(stride64 == 1 || stride64 == 2 || stride64 == 4 || stride64 == 8 || stride64 == 12,
+                "mask_gemm_wgrad: pair_mask MW_stride must be a canonical tier "
+                "{1,2,4,8,12}; got ",
+                stride64);
+    MW_stride = static_cast<int>(stride64);
+    // reduced_mask carries ceil(N_out/32) rows at the same physical stride
+    // (see build_reduced_mask, which OR-reduces 32 rows per block).
+    TORCH_CHECK(reduced_mask.numel() == (int64_t)((N_out + 31) / 32) * MW_stride,
+                "mask_gemm_wgrad: reduced_mask must have ceil(N_out/32) * MW_stride elements; got ",
+                reduced_mask.numel(),
+                " for N_out=",
+                N_out,
+                " and MW_stride=",
+                MW_stride);
+  } else {
+    MW_stride = K <= 32 ? 1 : (K <= 64 ? 2 : (K <= 128 ? 4 : (K <= 256 ? 8 : 12)));
+    TORCH_CHECK(pair_mask.numel() == 0 && reduced_mask.numel() == 0,
+                "mask_gemm_wgrad: N_out=0 requires empty pair_mask and reduced_mask; got ",
+                pair_mask.numel(),
+                " and ",
+                reduced_mask.numel(),
+                " elements");
+    grad_weight.zero_();
+    return 0;
+  }
 
   int elem_sz = input.element_size(), vec = 16 / elem_sz;
   bool is_scalar_tile = (tile_id == 73);
@@ -1599,6 +1669,7 @@ int mask_gemm_wgrad(torch::Tensor input,
                                                                         C_in,
                                                                         C_out,
                                                                         K,
+                                                                        MW_stride,
                                                                         split_k,
                                                                         alpha,
                                                                         groups,
@@ -1617,6 +1688,7 @@ int mask_gemm_wgrad(torch::Tensor input,
                                                                             C_in,
                                                                             C_out,
                                                                             K,
+                                                                            MW_stride,
                                                                             split_k,
                                                                             alpha,
                                                                             groups,
@@ -1638,6 +1710,7 @@ int mask_gemm_wgrad(torch::Tensor input,
                                                                   C_in,                   \
                                                                   C_out,                  \
                                                                   K,                      \
+                                                                  MW_stride,              \
                                                                   split_k,                \
                                                                   alpha,                  \
                                                                   groups,                 \
@@ -1656,6 +1729,7 @@ int mask_gemm_wgrad(torch::Tensor input,
                                                          C_in,                   \
                                                          C_out,                  \
                                                          K,                      \
+                                                         MW_stride,              \
                                                          split_k,                \
                                                          alpha,                  \
                                                          groups,                 \
@@ -1681,6 +1755,7 @@ int mask_gemm_wgrad(torch::Tensor input,
                                                                            C_in,                   \
                                                                            C_out,                  \
                                                                            K,                      \
+                                                                           MW_stride,              \
                                                                            split_k,                \
                                                                            alpha,                  \
                                                                            groups,                 \

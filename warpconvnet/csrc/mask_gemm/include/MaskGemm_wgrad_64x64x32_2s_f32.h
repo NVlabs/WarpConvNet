@@ -94,14 +94,15 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
       const ElementInput *ptr_B_base,  // grad_output [N_out, C_out_total]
       ElementOutput *ptr_D_base,       // grad_weight [K, G, C_in, C_out] or workspace
       const int *pair_table,           // [K * N_out]
-      const uint32_t *pair_mask,       // [N_out]
+      const uint32_t *pair_mask,       // [N_out * MW_stride]
       const int *mask_argsort,         // [N_out]
-      const uint32_t *reduced_mask,    // [ceil(N_out/tK)] OR-reduced pair_masks
+      const uint32_t *reduced_mask,    // [ceil(N_out/tK) * MW_stride]
       int N_in,
       int N_out,
       int C_in,   // per-group C_in
       int C_out,  // per-group C_out
       int K,
+      int MW_stride,  // physical mask words per voxel/tile
       float alpha,
       int stride_A,  // full row stride of input (C_in_total)
       int stride_B,  // full row stride of grad_output (C_out_total)
@@ -175,7 +176,6 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
     // then A and B loaders read from cache instead of doing redundant __ldg.
     // Saves ~480 __ldg per tile (16x redundancy eliminated).
     const int *pt_k = pair_table + k_off * N_out;
-    int mask_words = (K + 31) / 32;
     uint32_t k_mask_bit = 1u << (k_off % 32);
     int k_mask_word = k_off / 32;
     int num_voxel_tiles = (shard_end - shard_start + tK - 1) / tK;
@@ -192,7 +192,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
       int _ps_rr = -1, _ps_ir = -1;                                                    \
       if (_ps_pg < _ps_pair_bound) {                                                   \
         _ps_rr = __ldg(&mask_argsort[_ps_pg]);                                         \
-        uint32_t _ps_rm = __ldg(&pair_mask[_ps_rr * mask_words + k_mask_word]);        \
+        uint32_t _ps_rm = __ldg(&pair_mask[_ps_rr * MW_stride + k_mask_word]);         \
         if (_ps_rm & k_mask_bit) {                                                     \
           _ps_ir = __ldg(&pt_k[_ps_rr]);                                               \
           _ps_any = 1;                                                                 \
@@ -220,7 +220,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
       int rm_offset = shard_start / tK;
       int vt = 0;
       for (; vt < num_voxel_tiles; ++vt) {
-        if (__ldg(&reduced_mask[(rm_offset + vt) * mask_words + k_mask_word]) & k_mask_bit) break;
+        if (__ldg(&reduced_mask[(rm_offset + vt) * MW_stride + k_mask_word]) & k_mask_bit) break;
       }
       if (vt >= num_voxel_tiles) goto wgrad_epilogue;
 
@@ -249,7 +249,7 @@ struct MaskGemm_wgrad_64x64x32_2s_f32 {
       for (; vt < num_voxel_tiles; ++vt) {
         int v_next = shard_start + vt * tK;
         int pb_next = (v_next + tK < N_out) ? (v_next + tK) : N_out;
-        if (!(__ldg(&reduced_mask[(rm_offset + vt) * mask_words + k_mask_word]) & k_mask_bit))
+        if (!(__ldg(&reduced_mask[(rm_offset + vt) * MW_stride + k_mask_word]) & k_mask_bit))
           continue;
 
         bool _dummy;

@@ -120,6 +120,7 @@ __global__ __launch_bounds__(
                                                                           int C_in,
                                                                           int C_out,
                                                                           int K,
+                                                                          int MW_stride,
                                                                           float alpha,
                                                                           int stride_A,
                                                                           int stride_B) {
@@ -136,6 +137,7 @@ __global__ __launch_bounds__(
            C_in,
            C_out,
            K,
+           MW_stride,
            alpha,
            stride_A,
            stride_B,
@@ -233,6 +235,7 @@ int launch_mask_gemm_wgrad(const void *a,
                            int C_in,
                            int C_out,
                            int K,
+                           int MW_stride,
                            int split_k,
                            float alpha,
                            int groups = 1,
@@ -697,6 +700,7 @@ int launch_wgrad_atomic_64x64(const void *,
                               int,
                               int,
                               int,
+                              int,
                               float,
                               int,
                               cudaStream_t);
@@ -708,6 +712,7 @@ int launch_wgrad_atomic_64x128(const void *,
                                const uint32_t *,
                                const int *,
                                const uint32_t *,
+                               int,
                                int,
                                int,
                                int,
@@ -731,6 +736,7 @@ int launch_wgrad_atomic_3s(const void *,
                            int,
                            int,
                            int,
+                           int,
                            float,
                            int,
                            cudaStream_t);
@@ -742,6 +748,7 @@ int launch_wgrad_workspace_64x64(const void *,
                                  const uint32_t *,
                                  const int *,
                                  const uint32_t *,
+                                 int,
                                  int,
                                  int,
                                  int,
@@ -765,6 +772,7 @@ int launch_wgrad_workspace_64x64_3s(const void *,
                                     int,
                                     int,
                                     int,
+                                    int,
                                     float,
                                     int,
                                     cudaStream_t);
@@ -776,6 +784,7 @@ int launch_wgrad_workspace_64x128(const void *,
                                   const uint32_t *,
                                   const int *,
                                   const uint32_t *,
+                                  int,
                                   int,
                                   int,
                                   int,
@@ -798,6 +807,7 @@ int launch_scalar_wgrad_sab(const void *a,
                             int C_in,
                             int C_out,
                             int K,
+                            int MW_stride,
                             int split_k,
                             float alpha,
                             int groups,
@@ -1016,6 +1026,7 @@ int launch_scalar_wgrad_sab(const void *a,
                                                              int C_in,              \
                                                              int C_out,             \
                                                              int K,                 \
+                                                             int MW_stride,         \
                                                              int split_k,           \
                                                              float alpha,           \
                                                              int groups,            \
@@ -1048,6 +1059,7 @@ int launch_scalar_wgrad_sab(const void *a,
                                                              C_in,                  \
                                                              C_out,                 \
                                                              K,                     \
+                                                             MW_stride,             \
                                                              alpha,                 \
                                                              C_in * groups,         \
                                                              C_out * groups);       \

@@ -143,6 +143,7 @@ def _generate_warpgemm_codegen():
         for fname, dst_dir in [
             ("gemm_mma_tiles.h", include_dir),
             ("cute_gemm_config.h", include_dir),
+            ("cute_gemm_config_sm100.h", include_dir),
             ("cute_gemm_kernel.h", include_dir),
             ("cute_gemm_grouped_kernel.h", include_dir),
             ("mask_gemm_tile_enums.h", include_dir),

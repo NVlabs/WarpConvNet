@@ -45,6 +45,7 @@ WCN_PROD_INSTANTIATE_WGRAD(MaskGemm_wgrad_64x64x32_2s_f32, cutlass::bfloat16_t, 
                                                   int C_in,                        \
                                                   int C_out,                       \
                                                   int K,                           \
+                                                  int MW_stride,                   \
                                                   int split_k,                     \
                                                   float alpha,                     \
                                                   int groups,                      \
@@ -77,6 +78,7 @@ WCN_PROD_INSTANTIATE_WGRAD(MaskGemm_wgrad_64x64x32_2s_f32, cutlass::bfloat16_t, 
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
+                                                             MW_stride,            \
                                                              alpha,                \
                                                              C_in * groups,        \
                                                              C_out * groups);      \
@@ -107,6 +109,7 @@ INST_WGRAD_ATOMIC(64x128,
                                             int C_in,                              \
                                             int C_out,                             \
                                             int K,                                 \
+                                            int MW_stride,                         \
                                             int split_k,                           \
                                             float alpha,                           \
                                             int groups,                            \
@@ -139,6 +142,7 @@ INST_WGRAD_ATOMIC(64x128,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
+                                                             MW_stride,            \
                                                              alpha,                \
                                                              C_in * groups,        \
                                                              C_out * groups);      \
@@ -174,6 +178,7 @@ INST_WGRAD_ATOMIC_3S(cutlass::bfloat16_t)
                                                      int C_in,                     \
                                                      int C_out,                    \
                                                      int K,                        \
+                                                     int MW_stride,                \
                                                      int split_k,                  \
                                                      float alpha,                  \
                                                      int groups,                   \
@@ -206,6 +211,7 @@ INST_WGRAD_ATOMIC_3S(cutlass::bfloat16_t)
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
+                                                             MW_stride,            \
                                                              alpha,                \
                                                              C_in * groups,        \
                                                              C_out * groups);      \
@@ -252,6 +258,7 @@ INST_WGRAD_WORKSPACE(64x128,
                                                int C_in,                           \
                                                int C_out,                          \
                                                int K,                              \
+                                               int MW_stride,                      \
                                                int split_k,                        \
                                                float alpha,                        \
                                                int groups,                         \
@@ -284,6 +291,7 @@ INST_WGRAD_WORKSPACE(64x128,
                                                              C_in,                 \
                                                              C_out,                \
                                                              K,                    \
+                                                             MW_stride,            \
                                                              alpha,                \
                                                              C_in * groups,        \
                                                              C_out * groups);      \

@@ -40,15 +40,19 @@ OFFSET_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "offset_gemm"
 MASK_GEMM_DIR = REPO_ROOT / "warpconvnet" / "csrc" / "mask_gemm"
 MASK_GEMM_INCLUDE_DIR = MASK_GEMM_DIR / "include"
 SUPPORTED_OFFSET_GEMM_SCHEMA_MAJOR = 3
-SUPPORTED_TILE_METADATA_SCHEMA = 6
+SUPPORTED_TILE_METADATA_SCHEMA = 7
 
-# warpgemm.codegen.write_mask_to() emits these 4 canonical files alongside the
-# named kernels (intentional, long-standing). setup.py _generate_warpgemm_codegen()
-# routes them to csrc/include/ (the 3 headers) and csrc/mask_gemm/ (the .inc), NOT
-# the names-path dir csrc/mask_gemm/include/. Verify them at their real homes.
+# warpgemm.codegen.write_mask_to() emits these canonical files alongside the
+# named kernels (intentional; the sm100 config + cute body passthroughs joined
+# in the Blackwell drop). setup.py _generate_warpgemm_codegen() routes them to
+# csrc/include/ (headers) and csrc/mask_gemm/ (the .inc), NOT the names-path
+# dir csrc/mask_gemm/include/. Verify them at their real homes.
 CANONICAL_TRACKED_DIRS = {
     "gemm_mma_tiles.h": INCLUDE_DIR,
     "cute_gemm_config.h": INCLUDE_DIR,
+    "cute_gemm_config_sm100.h": INCLUDE_DIR,
+    "cute_gemm_kernel.h": INCLUDE_DIR,
+    "cute_gemm_grouped_kernel.h": INCLUDE_DIR,
     "mask_gemm_tile_enums.h": INCLUDE_DIR,
     "mask_gemm_dispatch_table.inc": MASK_GEMM_DIR,
 }
