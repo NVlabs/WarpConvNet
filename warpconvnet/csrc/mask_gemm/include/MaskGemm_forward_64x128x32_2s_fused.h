@@ -392,6 +392,13 @@ struct MaskGemm_forward_64x128x32_2s_fused {
         } else {
           // Last offset: just MMA, no more loads
           MMA_DOUBLE_BUFFERED(smem_stage)
+          // Barrier before the epilogue: the smem-staging epilogue reuses smem_a
+          // (via the smem_buf union), so all warps must finish reading this stage
+          // in the MMA above before any warp overwrites it. Without this fence a
+          // fast warp's epilogue store races a slow warp's ldmatrix (WAR), which
+          // on Blackwell corrupted output rows. Interior iterations already end
+          // with __syncthreads(); only this last-offset tail lacked one.
+          __syncthreads();
           break;
         }
       }

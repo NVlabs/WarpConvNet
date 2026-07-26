@@ -308,8 +308,14 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb {
                         stride_A);
 
       // ---- Flat mainloop ----
+      // Offset-alternating stages are only sound for NumStages>=2. For
+      // NumStages==1 the alternation is a no-op and, without a post-MMA
+      // __syncthreads(), a faster warp's next-offset load overwrites the tile
+      // while a slower warp is still reading it in the MMA (WAR race,
+      // latency-exposed on Blackwell). Single-buffer stage 0 + sync when
+      // NumStages==1; both branches fold at compile time.
       if (num_k_tiles == 1) {
-        int smem_stage = _offset_idx & 1;
+        int smem_stage = (NumStages > 1) ? (_offset_idx & 1) : 0;
         _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_out, stride_A);
         _load_B_tile(
             ptr_Bk, sB(_, _, smem_stage), gmem_thr_copy_B, n_start, 0, C_in, C_out, n_full_tile);
@@ -317,6 +323,11 @@ struct MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb {
         cute::cp_async_wait<0>();
         __syncthreads();
         MMA_DOUBLE_BUFFERED(smem_stage)
+        if (NumStages == 1) {
+          // Single buffer: next offset reuses this stage; MMA must be globally
+          // complete before that write may begin.
+          __syncthreads();
+        }
       } else {
         for (int kt = 0; kt < num_k_tiles; ++kt) {
           int k_start = kt * tK;

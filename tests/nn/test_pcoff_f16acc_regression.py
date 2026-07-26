@@ -1,23 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression pin: F16-accumulator pcoff tiles at a narrow encoder shape.
+"""Regression pins: F16-accumulator pcoff tiles at a narrow encoder shape.
 
-At (C_in=32, C_out=32, K=3x3x3, N~250k), pcoff F16-accumulator tiles
-54/55/56 produce isolated output cells with `max_rel` up to several hundred
-against fp64 reference. `p99` stays at the noise floor (~1e-3), so prior
-per_algo_grad_sweep / per-tile tests missed it. This test asserts the failure
-mode is NOT silently re-introduced by:
+History, two eras:
 
-  1. Importing `_AB_MASK_GEMM_PCOFF_F16ACC` and confirming none of the tiles
-     enter the auto pool by default (env-default = 0 ceiling).
-  2. Running each tile directly at the failure shape and verifying max_rel
-     exceeds the pass tolerance the production code would use — confirming
-     the tile is genuinely unsafe at this shape, so the gate is load-bearing.
+- Era 1 (2026-05): at (C_in=32, C_out=32, K=3x3x3, N~250k) tiles 54/55/56
+  produced isolated output cells with max_rel up to several hundred (observed
+  5 / 12 / 525) against an fp64 reference. p99 stayed at the noise floor, so
+  sweep-style tests missed it. This file originally pinned the tiles as
+  GENUINELY BROKEN to prove the small-channel gate was load-bearing.
+- Era 2 (2026-07-25): root-caused as the single-k-tile (k_tiles==1, C_in<=32)
+  cp.async under-synchronization in the shared warpgemm mainloop emission and
+  fixed at the family root (racecheck 0 hazards, cross-arch). The corruption
+  arm below is therefore INVERTED: it now pins the FIX at the exact historical
+  failure shape, so the race cannot silently return where it hurt most
+  (post-fix max_rel observed at the fp16 noise floor, 2.0e-03..3.3e-03, on
+  both sm_103 and sm_120).
 
-If WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL is ever flipped back to >0 default,
-or if a future tile lands in `_AB_MASK_GEMM_PCOFF_F16ACC` without gating,
-this test fails at import time / the second arm catches numerical drift.
+The pool gate (WARPCONVNET_PCOFF_F16ACC_SMALL_CH_CEIL default 0) is RETAINED
+for now: the corruption rationale is gone, but F16-accumulator PRECISION at
+training scale is a separate standing concern, and relaxing the default
+re-admits F16-accum candidates to auto pools — that requires an N>=3
+ScanNet-class training validation (see variance discipline), not just this
+kernel-level pass. Arms 1-2 continue to pin the gate's default and opt-in
+contract.
 """
 
 import os
@@ -124,8 +131,15 @@ def test_pcoff_f16acc_opt_in_admits_tiles():
 
 
 @pytest.mark.parametrize("tile_id", _FAIL_TILES, ids=lambda t: f"tile{t}")
-def test_pcoff_f16acc_genuinely_unsafe_at_failure_shape(tile_id):
-    """Confirm the gated tiles ARE numerically broken at this shape — gate is load-bearing."""
+def test_pcoff_f16acc_fixed_at_historical_failure_shape(tile_id):
+    """Pin the 2026-07-25 race fix at the exact shape where the tiles used to corrupt.
+
+    Pre-fix these tiles hit max_rel 5 / 12 / 525 (tiles 54/55/56) here; the
+    single-k-tile mainloop race fix brings all three to the fp16 noise floor.
+    A regression of the k_tiles==1 synchronization discipline re-fires this
+    test at its most sensitive known shape (complementing the racecheck CI
+    lane, which catches the hazard even when it does not numerically land).
+    """
     in16, w16, kmap, N_out, in64, w64 = _build_problem()
     ref = _explicit_gemm_forward_logic(in64, w64, kmap, N_out, torch.float64)
     out = _execute_forward(
@@ -142,12 +156,12 @@ def test_pcoff_f16acc_genuinely_unsafe_at_failure_shape(tile_id):
     rel = diff / (ref.float().abs() + 1e-12)
     rel = rel[torch.isfinite(rel)]
     max_rel = rel.max().item()
-    # If this fails (max_rel < 1.0), either the kernel was fixed upstream or
-    # the failure shape changed — in either case investigate before relaxing
-    # the gate. Lower bound of 1.0 is deliberately conservative; observed
-    # values were 5 / 12 / 525 for tiles 54 / 55 / 56 respectively.
-    assert max_rel > 1.0, (
-        f"Tile {tile_id} unexpectedly safe at C={_C} K=3x3x3 N~{_N_TARGET} "
-        f"(max_rel={max_rel:.2e}). If the kernel was fixed, update the gate "
-        f"and remove this regression pin."
+    # Observed post-fix: 2.0e-03..3.3e-03 on sm_103 and sm_120. 0.05 leaves
+    # generous fp16 headroom while sitting orders of magnitude below the
+    # pre-fix corruption (>=5).
+    assert max_rel < 0.05, (
+        f"Tile {tile_id} regressed at the historical failure shape C={_C} "
+        f"K=3x3x3 N~{_N_TARGET}: max_rel={max_rel:.2e} (post-fix noise floor "
+        f"is ~3e-3; pre-fix corruption was >=5). Suspect the k_tiles==1 "
+        f"mainloop synchronization was weakened — run the racecheck lane."
     )

@@ -287,69 +287,40 @@ struct MaskGemm_dgrad_128x64x32_2s_pipelined {
     if (!_mw_has_next()) goto epilogue;
 
     if (num_k_tiles == 1) {
-      int smem_stage = 0;
-
-      // Prolog: load first offset
-      int k_cur = _mw_next();
-      _update_A_indices(a_state,
-                        pair_table,
-                        storage.real_rows,
-                        storage.row_masks,
-                        N_out,
-                        N_in,
-                        C_out,
-                        k_cur,
-                        K,
-                        stride_A);
-      _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_out, stride_A);
-      _load_B_tile(ptr_B + k_cur * stride_B_K,
-                   sB(_, _, 0),
-                   gmem_thr_copy_B,
-                   n_start,
-                   0,
-                   C_in,
-                   C_out,
-                   n_full_tile);
-      cute::cp_async_fence();
-      cute::cp_async_wait<0>();
-      __syncthreads();
-
-      while (true) {
-        if (_mw_has_next()) {
-          int k_next = _mw_next();
-          int write_stage = 1 - smem_stage;
-
-          // Pipelined: load NEXT offset (async) then MMA CURRENT (overlapped)
-          _update_A_indices(a_state,
-                            pair_table,
-                            storage.real_rows,
-                            storage.row_masks,
-                            N_out,
-                            N_in,
-                            C_out,
-                            k_next,
-                            K,
-                            stride_A);
-          _load_A_with_offsets(ptr_A, a_state, sA(_, _, write_stage), 0, C_out, stride_A);
-          _load_B_tile(ptr_B + k_next * stride_B_K,
-                       sB(_, _, write_stage),
-                       gmem_thr_copy_B,
-                       n_start,
-                       0,
-                       C_in,
-                       C_out,
-                       n_full_tile);
-          cute::cp_async_fence();
-
-          MMA_DOUBLE_BUFFERED(smem_stage)
-
-          cute::cp_async_wait<0>();
-          __syncthreads();
-          smem_stage = write_stage;
-        } else {
-          MMA_DOUBLE_BUFFERED(smem_stage)
-          break;
-        }
+      // --- Single k-tile per offset: non-pipelined single-buffer ---
+      // See the forward pipelined mainloop for the full rationale: the former
+      // cross-offset 2-stage pipeline raced on Blackwell (ldmatrix reads of the
+      // current stage overlapped the neighbouring offset's stage writes / the
+      // smem epilogue with only a post-MMA barrier). Use the race-free
+      // load -> wait -> sync -> MMA -> sync pattern (identical to the multi-k-tile
+      // branch): every stage write is separated from every stage read by a
+      // __syncthreads. One extra sync per offset at C<=32; larger C unaffected.
+      while (_mw_has_next()) {
+        int k = _mw_next();
+        _update_A_indices(a_state,
+                          pair_table,
+                          storage.real_rows,
+                          storage.row_masks,
+                          N_out,
+                          N_in,
+                          C_out,
+                          k,
+                          K,
+                          stride_A);
+        _load_A_with_offsets(ptr_A, a_state, sA(_, _, 0), 0, C_out, stride_A);
+        _load_B_tile(ptr_B + k * stride_B_K,
+                     sB(_, _, 0),
+                     gmem_thr_copy_B,
+                     n_start,
+                     0,
+                     C_in,
+                     C_out,
+                     n_full_tile);
+        cute::cp_async_fence();
+        cute::cp_async_wait<0>();
+        __syncthreads();
+        MMA_DOUBLE_BUFFERED(0)
+        __syncthreads();
       }
     } else {
       // Multi k-tile: flat loop (no cross-offset pipelining)

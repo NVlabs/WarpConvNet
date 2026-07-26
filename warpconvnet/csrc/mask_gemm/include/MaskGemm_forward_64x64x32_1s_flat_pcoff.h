@@ -314,9 +314,26 @@ struct MaskGemm_forward_64x64x32_1s_flat_pcoff {
         // Stage alternates per offset (not per k-tile) so consecutive offsets
         // use different smem buffers. This eliminates 1 __syncthreads per offset
         // for single-k-tile cases (common at small C).
+        //
+        // The offset-alternating optimization is ONLY sound when NumStages >= 2:
+        // it relies on a physically distinct "other" smem buffer so the next
+        // offset's load does not clobber the current offset's stage while the MMA
+        // is still reading it. For NumStages == 1 (the "1s" flat tiles) there is
+        // only one buffer, so `sA(_, _, 1)` does not name a separate stage and the
+        // alternation cannot separate the reuse. In that case we MUST single-buffer
+        // (stage 0) and re-add the post-MMA __syncthreads() — otherwise a faster
+        // warp races ahead to the next offset and overwrites smem_a/smem_b (and,
+        // via the out-of-range stage index, the trailing row_masks/real_rows
+        // metadata) while a slower warp is still consuming the tile in the MMA.
+        // This WAR hazard is latency-exposed on Blackwell (deeper memory pipeline,
+        // higher concurrent-block count) and produced wrong-but-plausible results
+        // at C_in <= 32 (num_k_tiles == 1). Both branches fold at compile time
+        // because NumStages is a static constant.
         if (num_k_tiles == 1) {
-          // Single k-tile: alternate stage per offset, skip post-MMA sync
-          int smem_stage = _offset_idx & 1;
+          // Single k-tile. NumStages>=2: alternate stage per offset, skip
+          // post-MMA sync (double-buffered). NumStages==1: single-buffer stage 0
+          // and sync after the MMA before the next offset reuses the buffer.
+          int smem_stage = (NumStages > 1) ? (_offset_idx & 1) : 0;
           _load_A_with_offsets(ptr_A, a_state, sA(_, _, smem_stage), 0, C_in, stride_A);
           _load_B_tile(
               ptr_Bk, sB(_, _, smem_stage), gmem_thr_copy_B, n_start, 0, C_out, C_in, n_full_tile);
@@ -324,7 +341,12 @@ struct MaskGemm_forward_64x64x32_1s_flat_pcoff {
           cute::cp_async_wait<0>();
           __syncthreads();
           MMA_DOUBLE_BUFFERED(smem_stage)
-          // No __syncthreads here — next offset uses the OTHER stage
+          if (NumStages == 1) {
+            // Single buffer: the next offset writes this same stage, so the MMA
+            // must be globally complete before that write may begin.
+            __syncthreads();
+          }
+          // NumStages>=2: no __syncthreads here — next offset uses the OTHER stage
         } else {
           // Multi k-tile: stage alternates per k-tile within offset
           for (int kt = 0; kt < num_k_tiles; ++kt) {
