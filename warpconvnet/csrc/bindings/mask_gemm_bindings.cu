@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <limits>
+#include <string>
 
 #include "../include/gemm_error_codes.h"
 #include "../include/gemm_mma_tiles.h"        // canonical tile_tag struct decls
@@ -81,6 +82,199 @@ struct MaskGemmKernelEntry {
 #include "../mask_gemm/mask_gemm_dispatch_table.inc"
 #undef MASK_GEMM_KERNEL
 };
+
+// =============================================================================
+// kMaskGemmDispatchTruth[] — wcn-OWNED map of the kernel struct each launchable
+// (op, tile_id) binding arm ACTUALLY dispatches, per mask_words branch.
+//
+// This is the authority the drift test enforces (tests/csrc/
+// test_mask_gemm_dispatch_truth.py): it is hand-mirrored to the fwd/dgrad/wgrad
+// switch arms below, exposed via mask_gemm.dispatch_truth() /
+// mask_gemm.dispatched_kernel(), and asserted against canonical kMaskGemmTable
+// kernel_struct. The test FAILS on any (op, tile_id) whose actual kernel differs
+// from canonical metadata UNLESS the divergence is documented here (note != "")
+// AND allow-listed in the test. If you change a dispatch arm, update the matching
+// row here or the test fails.
+//
+// Why the deviations exist (canonical warpgemm kernel_struct is a SINGLE field
+// that cannot express either case):
+//   * fwd 2 / dgrad 0,1,24: canonical names a "_2s" kernel that DOES NOT EXIST
+//     in-tree; the fused / 1s_flat(_direpi) kernel is its evolved replacement and
+//     the only kernel for that shape. (See report: upstream registry should read
+//     the evolved name.)
+//   * fwd 41: MW-DEPENDENT dispatch — 2s_pipelined at MW1, 1s_flat at MW>1 (both
+//     aligned/vectorized). Canonical "..._1s_flat_sa" names the SCALAR-A variant,
+//     which actually executes only via wcn tile 71 (misaligned C). A single
+//     kernel_struct field cannot represent an MW-dependent arm.
+//   * dgrad_wt 900-911: intentional aliases that launch the FORWARD kernel with a
+//     pre-transposed weight; their canonical metadata lives under op=forward at
+//     tile_id-500. 900/902 additionally inherit the fwd 41/2 deviations.
+// mw_lo/mw_hi are the inclusive mask_words range the row applies to (K in
+// (32*(mw-1), 32*mw]); a query outside every row's range returns "" (= not
+// launchable at that MW, e.g. native dgrad tiles are MW1-only).
+// =============================================================================
+
+struct MaskGemmArmTruth {
+  const char *op;             // "forward" | "dgrad" | "wgrad" (binding entrypoint)
+  int tile_id;                // tile_id passed to mask_gemm.{fwd,dgrad,wgrad}
+  int mw_lo;                  // inclusive low mask_words this row covers
+  int mw_hi;                  // inclusive high mask_words
+  const char *kernel_struct;  // kernel struct the arm ACTUALLY launches
+  const char *note;           // "" if matches canonical; else deviation reason
+};
+
+namespace truth_notes {
+constexpr const char *kNone = "";
+constexpr const char *kWcnOnly = "wcn-only tile; absent from canonical warpgemm metadata";
+constexpr const char *kWcnOnlyF32 =
+    "wcn-only f32-output tile; absent from canonical warpgemm metadata";
+constexpr const char *kDevFused2 =
+    "canonical 'MaskGemm_forward_128x64x32_2s' is stale: the non-fused 128x64 fwd "
+    "kernel does not exist in-tree; '_2s_fused' is its evolved replacement and the "
+    "only 128x64 fwd kernel";
+constexpr const char *kDevMwdep41 =
+    "MW-dependent: 2s_pipelined at MW1, 1s_flat at MW>1 (both aligned/vectorized); "
+    "canonical '..._1s_flat_sa' is the scalar-A variant (reachable only via wcn tile "
+    "71); a single kernel_struct field cannot express this";
+constexpr const char *kDev2sName =
+    "canonical names a '_2s' dgrad kernel that does not exist in-tree; wcn dispatches "
+    "the 1s_flat/1s_flat_direpi kernel by design (native dgrad is MW1; MW>1 routes to "
+    "scalar tile 70)";
+constexpr const char *kDevWt =
+    "dgrad_wt alias: launches the forward kernel with pre-transposed weight; canonical "
+    "metadata is op=forward at tile_id-500";
+constexpr const char *kDevWt41 =
+    "dgrad_wt alias of fwd tile 41 (see tile_id-500=400); launches fwd 2s_pipelined, "
+    "inheriting the MW-dependent/scalar-name deviation";
+constexpr const char *kDevWt2 =
+    "dgrad_wt alias of fwd tile 2 (see tile_id-500=402); launches fwd 128x64 2s_fused, "
+    "inheriting the stale-'_2s'-name deviation";
+constexpr const char *kDevIdOverload =
+    "id-space overload: warpgemm's forward metadata assigns this id to an experimental "
+    "128x128 8-warp tile, but wcn reuses the id as a scalar fallback kernel; the binding "
+    "handles it as a raw-integer scalar arm BEFORE the canonical FwdTile switch. Nothing "
+    "may trust canonical metadata for this id";
+}  // namespace truth_notes
+
+[[maybe_unused]] constexpr MaskGemmArmTruth kMaskGemmDispatchTruth[] = {
+    // ---- forward (mask_gemm.fwd) ---------------------------------------------
+    {"forward", 2, 1, 12, "MaskGemm_forward_128x64x32_2s_fused", truth_notes::kDevFused2},
+    {"forward", 3, 1, 12, "MaskGemm_forward_64x128x32_3s", truth_notes::kNone},
+    {"forward", 19, 1, 12, "MaskGemm_forward_64x128x32_2s_fused", truth_notes::kNone},
+    {"forward", 28, 1, 4, "MaskGemm_forward_32x32x32_1s_flat", truth_notes::kNone},
+    {"forward", 41, 1, 1, "MaskGemm_forward_64x64x32_2s_pipelined", truth_notes::kDevMwdep41},
+    {"forward", 41, 2, 12, "MaskGemm_forward_64x64x32_1s_flat", truth_notes::kDevMwdep41},
+    // fwd pcoff (E1), MW1 only
+    {"forward", 54, 1, 1, "MaskGemm_forward_64x64x32_1s_flat_pcoff", truth_notes::kNone},
+    {"forward", 55, 1, 1, "MaskGemm_forward_64x64x32_1s_flat_pcoff", truth_notes::kNone},
+    {"forward", 56, 1, 1, "MaskGemm_forward_64x128x32_1s_flat_pcoff", truth_notes::kNone},
+    {"forward", 57, 1, 1, "MaskGemm_forward_64x128x32_1s_flat_pcoff", truth_notes::kNone},
+    {"forward", 58, 1, 1, "MaskGemm_forward_64x64x32_3s_pcoff", truth_notes::kNone},
+    {"forward", 59, 1, 1, "MaskGemm_forward_64x64x32_2s_warp_spec_pcoff", truth_notes::kNone},
+    {"forward", 63, 1, 1, "MaskGemm_forward_64x128x32_2s_warp_spec_pcoff", truth_notes::kNone},
+    // fwd strided downsample (wcn-only; absent from canonical .inc)
+    {"forward",
+     300,
+     1,
+     12,
+     "MaskGemm_forward_64x64x32_2s_pipelined_strided",
+     truth_notes::kWcnOnly},
+    {"forward",
+     301,
+     1,
+     12,
+     "MaskGemm_forward_64x64x32_3s_pipelined_strided",
+     truth_notes::kWcnOnly},
+    {"forward",
+     302,
+     1,
+     12,
+     "MaskGemm_forward_64x128x32_2s_pipelined_strided",
+     truth_notes::kWcnOnly},
+    {"forward",
+     303,
+     1,
+     12,
+     "MaskGemm_forward_64x128x32_3s_pipelined_strided",
+     truth_notes::kWcnOnly},
+    {"forward",
+     304,
+     1,
+     12,
+     "MaskGemm_forward_128x64x32_2s_pipelined_strided",
+     truth_notes::kWcnOnly},
+    {"forward", 305, 1, 12, "MaskGemm_forward_64x64x32_2s_fused_strided", truth_notes::kWcnOnly},
+    {"forward", 306, 1, 12, "MaskGemm_forward_64x128x32_2s_fused_strided", truth_notes::kWcnOnly},
+    {"forward", 307, 1, 12, "MaskGemm_forward_128x64x32_2s_fused_strided", truth_notes::kWcnOnly},
+    // fwd wcn-only scalar (unaligned C) + f32-output
+    {"forward", 70, 1, 12, "MaskGemm_forward_64x64x32_1s_flat_sab_se", truth_notes::kDevIdOverload},
+    {"forward", 71, 1, 12, "MaskGemm_forward_64x64x32_1s_flat_sa", truth_notes::kDevIdOverload},
+    {"forward", 72, 1, 12, "MaskGemm_forward_64x64x32_1s_flat_sb_se", truth_notes::kDevIdOverload},
+    {"forward", 80, 1, 12, "MaskGemm_forward_64x64x32_1s_flat", truth_notes::kWcnOnlyF32},
+    {"forward", 82, 1, 12, "MaskGemm_forward_64x64x32_1s_flat_direpi_sb", truth_notes::kWcnOnlyF32},
+    // ---- dgrad (mask_gemm.dgrad), native -------------------------------------
+    {"dgrad", 0, 1, 12, "MaskGemm_dgrad_64x64x32_1s_flat", truth_notes::kDev2sName},
+    {"dgrad", 1, 1, 1, "MaskGemm_dgrad_64x128x32_1s_flat_direpi", truth_notes::kDev2sName},
+    {"dgrad", 12, 1, 1, "MaskGemm_dgrad_32x32x32_1s_flat", truth_notes::kNone},
+    {"dgrad", 22, 1, 1, "MaskGemm_dgrad_64x64x32_1s_flat", truth_notes::kNone},
+    {"dgrad", 24, 1, 1, "MaskGemm_dgrad_64x128x32_1s_flat_direpi", truth_notes::kDev2sName},
+    {"dgrad", 30, 1, 1, "MaskGemm_dgrad_64x64x32_2s_pipelined", truth_notes::kNone},
+    {"dgrad", 31, 1, 1, "MaskGemm_dgrad_64x128x32_2s_pipelined", truth_notes::kNone},
+    {"dgrad", 32, 1, 1, "MaskGemm_dgrad_128x64x32_2s_pipelined", truth_notes::kNone},
+    // dgrad pcoff (native), MW1 only
+    {"dgrad", 64, 1, 1, "MaskGemm_dgrad_64x64x32_1s_flat_pcoff", truth_notes::kNone},
+    {"dgrad", 65, 1, 1, "MaskGemm_dgrad_64x64x32_1s_flat_pcoff", truth_notes::kNone},
+    {"dgrad", 66, 1, 1, "MaskGemm_dgrad_64x128x32_1s_flat_pcoff", truth_notes::kNone},
+    {"dgrad", 67, 1, 1, "MaskGemm_dgrad_64x128x32_1s_flat_pcoff", truth_notes::kNone},
+    {"dgrad", 68, 1, 1, "MaskGemm_dgrad_64x64x32_3s_pcoff", truth_notes::kNone},
+    {"dgrad", 69, 1, 1, "MaskGemm_dgrad_64x128x32_3s_pcoff", truth_notes::kNone},
+    // dgrad wcn-only scalar + f32-output
+    {"dgrad", 70, 1, 12, "MaskGemm_dgrad_64x64x32_1s_flat_sab_se", truth_notes::kWcnOnly},
+    {"dgrad", 71, 1, 12, "MaskGemm_dgrad_64x64x32_1s_flat_sa", truth_notes::kWcnOnly},
+    {"dgrad", 72, 1, 12, "MaskGemm_dgrad_64x64x32_1s_flat_sb_se", truth_notes::kWcnOnly},
+    {"dgrad", 81, 1, 12, "MaskGemm_dgrad_64x64x32_1s_flat_direpi_sb", truth_notes::kWcnOnlyF32},
+    // ---- dgrad_wt aliases (mask_gemm.dgrad, launch fwd kernel) ----------------
+    {"dgrad", 900, 1, 1, "MaskGemm_forward_64x64x32_2s_pipelined", truth_notes::kDevWt41},
+    {"dgrad", 901, 1, 1, "MaskGemm_forward_64x128x32_3s", truth_notes::kDevWt},
+    {"dgrad", 902, 1, 1, "MaskGemm_forward_128x64x32_2s_fused", truth_notes::kDevWt2},
+    {"dgrad", 903, 1, 1, "MaskGemm_forward_32x32x32_1s_flat", truth_notes::kDevWt},
+    {"dgrad", 904, 1, 1, "MaskGemm_forward_64x128x32_2s_fused", truth_notes::kDevWt},
+    {"dgrad", 905, 1, 1, "MaskGemm_forward_64x64x32_1s_flat_pcoff", truth_notes::kDevWt},
+    {"dgrad", 906, 1, 1, "MaskGemm_forward_64x64x32_1s_flat_pcoff", truth_notes::kDevWt},
+    {"dgrad", 907, 1, 1, "MaskGemm_forward_64x128x32_1s_flat_pcoff", truth_notes::kDevWt},
+    {"dgrad", 908, 1, 1, "MaskGemm_forward_64x128x32_1s_flat_pcoff", truth_notes::kDevWt},
+    {"dgrad", 909, 1, 1, "MaskGemm_forward_64x64x32_3s_pcoff", truth_notes::kDevWt},
+    {"dgrad", 910, 1, 1, "MaskGemm_forward_64x64x32_2s_warp_spec_pcoff", truth_notes::kDevWt},
+    {"dgrad", 911, 1, 1, "MaskGemm_forward_64x128x32_2s_warp_spec_pcoff", truth_notes::kDevWt},
+    // ---- wgrad (mask_gemm.wgrad) ---------------------------------------------
+    {"wgrad", 0, 1, 12, "MaskGemm_wgrad_64x64x32_2s_f32", truth_notes::kNone},
+    {"wgrad", 1, 1, 12, "MaskGemm_wgrad_64x64x32_2s_f32_workspace", truth_notes::kNone},
+    {"wgrad", 2, 1, 12, "MaskGemm_wgrad_64x64x32_3s_f32_workspace", truth_notes::kNone},
+    {"wgrad", 3, 1, 12, "MaskGemm_wgrad_64x128x32_2s_f32_workspace", truth_notes::kNone},
+    {"wgrad", 4, 1, 12, "MaskGemm_wgrad_64x64x32_2s_f32_atomic", truth_notes::kNone},
+    {"wgrad", 7, 1, 12, "MaskGemm_wgrad_64x128x32_2s_f32_atomic", truth_notes::kNone},
+    {"wgrad", 9, 1, 12, "MaskGemm_wgrad_64x64x32_3s_f32_atomic", truth_notes::kNone},
+    {"wgrad", 73, 1, 12, "MaskGemm_wgrad_64x64x32_2s_f32_sab", truth_notes::kWcnOnly},
+};
+
+// Actual kernel struct the (op, tile_id) arm dispatches at `mask_words`, or ""
+// if that (op, tile_id, mask_words) triple is not launchable.
+inline const char *dispatched_kernel_struct(const std::string &op, int tile_id, int mask_words) {
+  for (const auto &r : kMaskGemmDispatchTruth) {
+    if (op == r.op && tile_id == r.tile_id && mask_words >= r.mw_lo && mask_words <= r.mw_hi)
+      return r.kernel_struct;
+  }
+  return "";
+}
+
+// Canonical warpgemm kernel_struct for (op, tile_id) from kMaskGemmTable (the
+// .inc sidecar), or "" if that tile has no metadata record.
+inline const char *canonical_kernel_struct(const std::string &op, int tile_id) {
+  for (const auto &e : kMaskGemmTable) {
+    if (op == e.op && tile_id == e.tile_id) return e.kernel_struct;
+  }
+  return "";
+}
 
 }  // namespace cute_gemm
 }  // namespace warpconvnet
@@ -1928,6 +2122,51 @@ void register_mask_gemm(py::module &m) {
            py::arg("mask_argsort"),
            py::arg("tK") = 32,
            py::arg("mask_words") = 1);
+
+  // -- Dispatch introspection (see kMaskGemmDispatchTruth). The drift test
+  //    tests/csrc/test_mask_gemm_dispatch_truth.py enforces these against the
+  //    canonical kMaskGemmTable metadata so a re-keyed arm cannot silently
+  //    launch a kernel other than the one its metadata names.
+  prod.def(
+      "dispatched_kernel",
+      [](const std::string &op, int tile_id, int mask_words) {
+        return std::string(cute_gemm::dispatched_kernel_struct(op, tile_id, mask_words));
+      },
+      py::arg("op"),
+      py::arg("tile_id"),
+      py::arg("mask_words") = 1,
+      "Kernel struct the (op, tile_id) binding arm actually launches at mask_words, "
+      "or '' if not launchable there. op is 'forward'/'dgrad'/'wgrad'.");
+
+  prod.def(
+      "canonical_kernel_struct",
+      [](const std::string &op, int tile_id) {
+        return std::string(cute_gemm::canonical_kernel_struct(op, tile_id));
+      },
+      py::arg("op"),
+      py::arg("tile_id"),
+      "Canonical warpgemm kernel_struct for (op, tile_id) from the compiled-in "
+      "metadata sidecar, or '' if the tile has no metadata record.");
+
+  prod.def(
+      "dispatch_truth",
+      []() {
+        py::list out;
+        for (const auto &r : cute_gemm::kMaskGemmDispatchTruth) {
+          py::dict d;
+          d["op"] = r.op;
+          d["tile_id"] = r.tile_id;
+          d["mask_words_lo"] = r.mw_lo;
+          d["mask_words_hi"] = r.mw_hi;
+          d["kernel_struct"] = r.kernel_struct;
+          d["note"] = r.note;
+          out.append(std::move(d));
+        }
+        return out;
+      },
+      "Full wcn dispatch truth table: every launchable (op, tile_id) arm -> the "
+      "kernel struct it actually launches, per mask_words range, with a note "
+      "documenting any deviation from canonical metadata.");
 }
 }  // namespace bindings
 }  // namespace warpconvnet

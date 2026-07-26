@@ -197,3 +197,55 @@ def test_mw1_authorized_tiles_are_guarded(id_lo, id_hi, authored):
         f"[{id_lo},{id_hi}]: {sorted(missing)}. The selector could dispatch them "
         "at MW>1 and crash — add them to the MW1-only set in mask_gemm.py."
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-truth constraint override (addition #2 of the launcher name-keying
+# change-set). Deviating tiles whose canonical metadata describes a different
+# kernel than the binding launches must expose the ACTUAL kernel's alignment/
+# scalar constraints, so a gate reading TileMetadata.accepts/handles_c_in cannot
+# trust a permissive-but-false claim (e.g. flat_sa's c_in_alignment=1 for tile
+# 41). See warpconvnet/nn/functional/sparse_conv/detail/tile_metadata.py.
+# ---------------------------------------------------------------------------
+
+from warpconvnet.nn.functional.sparse_conv.detail import tile_metadata as _tmwrap
+
+
+def test_tile41_constraint_override_reflects_actual_kernel():
+    """Tile 41 canonically names scalar-A flat_sa (c_in_alignment=1, scalar_a);
+    the arm launches the vectorized 2s_pipelined kernel. After the override the
+    corrected record must advertise the vectorized (sibling tile 8) constraints,
+    so handles_c_in rejects a misaligned C_in that the real kernel cannot service.
+    """
+    idx = _tmwrap._metadata_index("forward")
+    t41, t8 = idx[41], _tmwrap._raw_index("forward")[8]
+    assert t41.c_in_alignment == t8.c_in_alignment == 8
+    assert t41.scalar_a is False
+    assert t41.min_per_group_c_in == t8.min_per_group_c_in
+    # kernel_struct is intentionally NOT rewritten (snapshot-drift compatibility).
+    assert t41.kernel_struct == "MaskGemm_forward_64x64x32_1s_flat_sa"
+    # The behavioral point: the permissive lie is gone.
+    assert t41.handles_c_in(31) is False
+    assert t41.handles_c_in(64) is True
+    # Raw (uncorrected) source still shows the canonical permissive values.
+    assert _tmwrap._raw_index("forward")[41].c_in_alignment == 1
+
+
+def test_dgrad_native_deviation_overrides():
+    idx = _tmwrap._metadata_index("dgrad")
+    raw = _tmwrap._raw_index("dgrad")
+    for tid, sib in ((0, 7), (1, 25), (24, 25)):
+        assert idx[tid].c_in_alignment == raw[sib].c_in_alignment
+        assert idx[tid].min_per_group_c_in == raw[sib].min_per_group_c_in
+        assert idx[tid].scalar_a == raw[sib].scalar_a
+
+
+def test_non_deviating_tiles_untouched_by_override():
+    """Tiles not in the override map keep their canonical constraint fields."""
+    idx = _tmwrap._metadata_index("forward")
+    raw = _tmwrap._raw_index("forward")
+    for tid in (3, 8, 14, 19, 28):
+        for f in _tmwrap._OVERRIDE_FIELDS:
+            assert getattr(idx[tid], f) == getattr(
+                raw[tid], f
+            ), f"non-deviating forward tile {tid} field {f} was altered by the override"

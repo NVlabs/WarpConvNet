@@ -15,6 +15,7 @@ snapshot and live warpgemm is asserted by tests/csrc/test_warpgemm_drift.py.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Iterable
 
 from warpconvnet.csrc.mask_gemm.tile_metadata import (
@@ -104,6 +105,82 @@ def _tile_arch_allowed(meta, device_arch: int) -> bool:
     return any(_arch_is_binary_compatible(a, device_arch) for a in archs)
 
 
+# ---------------------------------------------------------------------------
+# wcn dispatch-truth constraint override.
+#
+# Some (op, tile_id) binding arms launch a kernel whose canonical warpgemm
+# metadata (kernel_struct + alignment/scalar constraints) describes a DIFFERENT
+# kernel — the disease documented in ``kMaskGemmDispatchTruth`` (see
+# mask_gemm_bindings.cu) and ``tests/csrc/test_mask_gemm_dispatch_truth.py``.
+# The canonical single ``kernel_struct`` field cannot express wcn's evolved
+# replacement (fused) or MW-dependent dispatch, so its correctness/alignment
+# fields can be permissive lies. Example: tile 41 canonically names the scalar-A
+# ``1s_flat_sa`` kernel (``c_in_alignment=1``, ``scalar_a=True``,
+# ``min_per_group_c_in=1`` — "handles any C_in"), but the arm actually launches
+# the vectorized ``2s_pipelined``/``1s_flat`` kernel, which REQUIRES 16B-aligned
+# C_in. A gate reading the canonical fields (``TileMetadata.accepts`` /
+# ``handles_c_in``) would wrongly admit tile 41 for a misaligned/small C_in.
+#
+# The wcn truth table is the authority: for each deviating tile, adopt the
+# alignment/scalar CONSTRAINT fields of the canonical SIBLING tile that names the
+# kernel actually launched. Only the constraint fields are corrected here —
+# kernel_struct/tier/backend/compile_archs are left untouched so the warpgemm
+# snapshot-drift guards (test_warpgemm_drift.py) still compare like-for-like and
+# arch/backend authorization is unaffected.
+#
+# Practical exposure is low (the fwd/dgrad selectors use hard-coded alignment
+# ladders, and the binding already rejects misaligned C loudly for these tiles),
+# but this makes the override explicit so nothing upstream of the binding trusts
+# a permissive-but-false alignment claim. See addition #2 of the launcher
+# name-keying change-set.
+#
+# Not corrected: fwd ids 70/71/72 are an id-space OVERLOAD (canonical = an
+# experimental 128x128 8-warp tile, wcn reuses the id as a scalar fallback). They
+# are experimental-tier canonically (never production candidates) and routed
+# before the canonical switch, so no gate reads them; the truth table documents
+# them.
+_CONSTRAINT_OVERRIDE_SIBLING: dict[tuple[str, int], int] = {
+    ("forward", 41): 8,  # actual 2s_pipelined (MW1) / 1s_flat (MW>1) — both aligned
+    ("forward", 2): 14,  # actual 128x64x32_2s_fused (constraints already match; explicit)
+    ("dgrad", 0): 7,  # actual 64x64x32_1s_flat
+    ("dgrad", 1): 25,  # actual 64x128x32_1s_flat_direpi
+    ("dgrad", 24): 25,  # actual 64x128x32_1s_flat_direpi
+}
+_OVERRIDE_FIELDS = (
+    "c_in_alignment",
+    "c_out_alignment",
+    "min_per_group_c_in",
+    "min_per_group_c_out",
+    "scalar_a",
+    "scalar_b",
+    "scalar_epi",
+)
+
+_RAW_INDEX: dict[str, dict[int, object]] = {}
+
+
+def _raw_index(op: str) -> dict[int, object]:
+    """Uncorrected full-registry index for ``op`` (sibling source for overrides)."""
+    idx = _RAW_INDEX.get(op)
+    if idx is None:
+        idx = {t.tile_id: t for t in build_tile_metadata(active_only=False, ops=(op,))}
+        _RAW_INDEX[op] = idx
+    return idx
+
+
+def _corrected(op: str, meta):
+    """Return ``meta`` with constraint fields corrected to the actually-launched
+    kernel's, per ``_CONSTRAINT_OVERRIDE_SIBLING``. No-op for non-deviating tiles."""
+    sibling_id = _CONSTRAINT_OVERRIDE_SIBLING.get((op, meta.tile_id))
+    if sibling_id is None:
+        return meta
+    sibling = _raw_index(op).get(sibling_id)
+    if sibling is None:
+        # Sibling absent (unexpected): leave canonical rather than guess.
+        return meta
+    return dataclasses.replace(meta, **{f: getattr(sibling, f) for f in _OVERRIDE_FIELDS})
+
+
 def _get_tiles(op: str, filter_arch: bool = True):
     """Return active tile records for ``op``.
 
@@ -111,6 +188,10 @@ def _get_tiles(op: str, filter_arch: bool = True):
     — prevents arch-pinned tiles (e.g. 10/22/24/48/49 with compile_archs=(80,))
     from appearing in dispatch candidates on Ada. See ``_tile_arch_allowed`` for
     why this is not plain membership.
+
+    Constraint fields for dispatch-truth deviating tiles are corrected via
+    ``_corrected`` so ``accepts``/``handles_c_in`` reflect the kernel actually
+    launched, not the canonical name's (see ``_CONSTRAINT_OVERRIDE_SIBLING``).
     """
     if get_schema_version() < _MIN_SCHEMA_VERSION:
         raise RuntimeError(
@@ -118,7 +199,7 @@ def _get_tiles(op: str, filter_arch: bool = True):
             f"{get_schema_version()} < required {_MIN_SCHEMA_VERSION}"
         )
     tiles = [
-        t
+        _corrected(op, t)
         for t in build_tile_metadata(active_only=True, ops=(op,))
         if t.backend in _LAUNCHABLE_BACKENDS
     ]
@@ -144,7 +225,9 @@ def _metadata_index(op: str) -> dict[int, object]:
                 f"tile_metadata schema_version "
                 f"{get_schema_version()} < required {_MIN_SCHEMA_VERSION}"
             )
-        idx = {t.tile_id: t for t in build_tile_metadata(active_only=False, ops=(op,))}
+        # Constraint-correct deviating tiles (see _CONSTRAINT_OVERRIDE_SIBLING);
+        # no-op for the vast majority. Sibling source is the uncorrected raw index.
+        idx = {tid: _corrected(op, t) for tid, t in _raw_index(op).items()}
         _METADATA_INDEX[op] = idx
     return idx
 
