@@ -28,8 +28,8 @@ from warpconvnet.nn.functional.sparse_conv.detail.cutlass import (
     _cutlass_implicit_gemm_backward_logic,
 )
 from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import (
-    _mask_implicit_gemm_forward_logic,
-    _mask_implicit_gemm_backward_logic,
+    _mask_gemm_forward_logic,
+    _mask_gemm_backward_logic,
     _get_mask_data,
 )
 from warpconvnet.nn.functional.sparse_conv.detail.algo_params import (
@@ -516,145 +516,48 @@ class TestCuteGroupedSM90:
 
 
 @pytest.mark.skipif(
-    not hasattr(_C.gemm, "cute_gemm_mask_fwd"),
+    not hasattr(_C, "mask_gemm") or not hasattr(_C.mask_gemm, "fwd"),
     reason="CuTe mask kernel not compiled",
 )
 class TestMaskImplicitGemmCuTe:
-    @pytest.mark.parametrize("mma_tile", [0, 1, 2, 3])
-    def test_forward(self, conv_data, mma_tile):
-        d = conv_data
-        fwd = _mask_implicit_gemm_forward_logic(
-            d["in_feats"].half(),
-            d["weight"].half(),
-            d["kmap"],
-            d["N_out"],
-            compute_dtype=torch.float16,
-            mma_tile=mma_tile,
-        )
-        _assert_close(f"mask_fwd tile={mma_tile}", fwd, d["fwd_ref"], FP16_TOL)
-
-    @pytest.mark.parametrize("mma_tile", [0, 1, 2, 3])
-    def test_dgrad_reverse(self, conv_data, mma_tile):
-        """Dgrad via reverse pair_table + forward kernel (no atomicAdd)."""
-        d = conv_data
-        gi, _ = _mask_implicit_gemm_backward_logic(
-            d["grad_out"].half(),
-            d["in_feats"].half(),
-            d["weight"].half(),
-            d["kmap"],
-            d["N_out"],
-            compute_dtype=torch.float16,
-            needs_input_grad=(True, False),
-            mma_tile=mma_tile,
-        )
-        _assert_close(f"mask_dgrad_reverse tile={mma_tile}", gi, d["gi_ref"], FP16_TOL)
-
-    def test_wgrad(self, conv_data):
-        d = conv_data
-        _, gw = _mask_implicit_gemm_backward_logic(
-            d["grad_out"].half(),
-            d["in_feats"].half(),
-            d["weight"].half(),
-            d["kmap"],
-            d["N_out"],
-            compute_dtype=torch.float16,
-            needs_input_grad=(False, True),
-        )
-        _assert_close("mask_wgrad", gw, d["gw_ref"], FP16_TOL)
-
-
-# ==========================================================================
-# Tests: Mask-based SIMT kernels (raw _C.gemm calls)
-# ==========================================================================
-
-
-@pytest.mark.skipif(
-    not hasattr(_C.gemm, "mask_implicit_gemm_fwd"),
-    reason="SIMT mask kernel not compiled",
-)
-class TestMaskImplicitGemmSIMT:
     def test_forward(self, conv_data):
         d = conv_data
-        pair_table, pair_mask, mask_argsort = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
-        output = torch.zeros(d["N_out"], d["weight"].shape[2], dtype=torch.float16, device=DEVICE)
-        status = _C.gemm.mask_implicit_gemm_fwd(
+        fwd = _mask_gemm_forward_logic(
             d["in_feats"].half(),
             d["weight"].half(),
-            output,
-            pair_table,
-            pair_mask,
-            mask_argsort,
-            27,
-            16,
+            d["kmap"],
+            d["N_out"],
+            params={"tile_id": 41},
         )
-        assert status == 0, f"mask_fwd_SIMT failed: {status}"
-        _assert_close("mask_fwd_SIMT", output, d["fwd_ref"], FP16_TOL)
+        _assert_close("mask_fwd", fwd, d["fwd_ref"], FP16_TOL)
 
-    def test_dgrad(self, conv_data):
+    def test_dgrad_reverse(self, conv_data):
+        """Dgrad via reverse pair_table + forward kernel (no atomicAdd)."""
         d = conv_data
-        N_in = d["in_feats"].shape[0]
-        C_in = d["in_feats"].shape[1]
-        pair_table, pair_mask, mask_argsort = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
-        gi = torch.zeros(N_in, C_in, dtype=torch.float16, device=DEVICE)
-        status = _C.gemm.mask_implicit_gemm_bwd_dgrad(
+        gi, _ = _mask_gemm_backward_logic(
+            "mask_gemm",
             d["grad_out"].half(),
+            d["in_feats"].half(),
             d["weight"].half(),
-            gi,
-            pair_table,
-            pair_mask,
-            mask_argsort,
-            27,
-            16,
+            d["kmap"],
+            d["N_out"],
+            DEVICE,
+            needs_input_grad=(True, False),
+            params={},
         )
-        assert status == 0, f"mask_dgrad_SIMT failed: {status}"
-        _assert_close("mask_dgrad_SIMT", gi, d["gi_ref"], FP16_TOL)
+        _assert_close("mask_dgrad_reverse", gi, d["gi_ref"], FP16_TOL)
 
     def test_wgrad(self, conv_data):
         d = conv_data
-        K, C_in, C_out = d["weight"].shape
-        pair_table, pair_mask, _ = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
-        gw = torch.zeros(K, C_in, C_out, dtype=torch.float16, device=DEVICE)
-        status = _C.gemm.mask_implicit_gemm_bwd_wgrad(
+        _, gw = _mask_gemm_backward_logic(
+            "mask_gemm",
+            d["grad_out"].half(),
             d["in_feats"].half(),
-            d["grad_out"].half(),
-            gw,
-            pair_table,
-            pair_mask,
-            K,
-            16,
+            d["weight"].half(),
+            d["kmap"],
+            d["N_out"],
+            DEVICE,
+            needs_input_grad=(False, True),
+            params={},
         )
-        assert status == 0, f"mask_wgrad_SIMT failed: {status}"
-        _assert_close("mask_wgrad_SIMT", gw, d["gw_ref"], FP16_TOL)
-
-
-# ==========================================================================
-# Tests: Old atomicAdd dgrad kernel (CuTe)
-# ==========================================================================
-
-
-@pytest.mark.skipif(
-    not hasattr(_C.gemm, "cute_gemm_mask_dgrad"),
-    reason="CuTe mask dgrad kernel not compiled",
-)
-class TestMaskDgradAtomic:
-    def test_dgrad(self, conv_data):
-        d = conv_data
-        N_in = d["in_feats"].shape[0]
-        C_in = d["in_feats"].shape[1]
-        pair_table, pair_mask, mask_argsort = _get_mask_data(d["kmap"], d["N_out"], DEVICE)
-        w_T = d["weight"].half().transpose(1, 2).contiguous()
-        gi = torch.zeros(N_in, C_in, dtype=torch.float16, device=DEVICE)
-        status = _C.gemm.cute_gemm_mask_dgrad(
-            d["grad_out"].half(),
-            w_T,
-            gi,
-            pair_table,
-            pair_mask,
-            mask_argsort,
-            27,
-            3,
-            1.0,
-        )
-        if status != 0:
-            pytest.skip(f"cute_gemm_mask_dgrad unsupported (status={status})")
-        _assert_close("mask_dgrad_atomic", gi, d["gi_ref"], FP16_TOL)
+        _assert_close("mask_wgrad", gw, d["gw_ref"], FP16_TOL)

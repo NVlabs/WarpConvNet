@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-present NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Test mask-based implicit GEMM correctness against explicit_gemm reference."""
 
 import os
@@ -7,7 +9,7 @@ import pytest
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.sparse_conv.detail.mask_gemm import (
     _kernel_map_to_mask_data,
-    _mask_implicit_gemm_forward_logic,
+    _mask_gemm_forward_logic,
 )
 from warpconvnet.nn.functional.sparse_conv.detail.explicit import (
     _explicit_gemm_forward_logic,
@@ -53,11 +55,9 @@ def test_mask_implicit_gemm_forward(C_in, C_out, kernel_size, dtype):
     """Test that mask_implicit_gemm produces the same output as explicit_gemm."""
     torch.manual_seed(42)
     voxels = _make_test_data(num_voxels=500, C_in=C_in, batch_size=2)
-    voxels = voxels.replace(
-        batched_features=voxels.feature_tensor.to(dtype=dtype)
-    )
+    voxels = voxels.replace(batched_features=voxels.feature_tensor.to(dtype=dtype))
 
-    K = kernel_size ** 3
+    K = kernel_size**3
     weight = torch.randn(K, C_in, C_out, device="cuda", dtype=dtype)
 
     kernel_map, num_out = _get_kernel_map(voxels, kernel_size)
@@ -72,23 +72,24 @@ def test_mask_implicit_gemm_forward(C_in, C_out, kernel_size, dtype):
     )
 
     # Test: mask implicit GEMM
-    test_output = _mask_implicit_gemm_forward_logic(
+    test_output = _mask_gemm_forward_logic(
         voxels.feature_tensor,
         weight,
         kernel_map,
         num_out,
-        compute_dtype=None,
-        block_size=16,
+        params={"tile_id": 41},
     )
 
-    if dtype == torch.float16:
-        atol, rtol = 0.5, 0.1  # relaxed for fp16 SIMT kernel
-    else:
-        atol, rtol = 1e-3, 1e-3
+    # The mask-GEMM kernel computes in fp16/bf16 regardless of the input dtype
+    # (fp32 inputs are power-of-two rescaled into fp16), so even the fp32 path
+    # carries fp16 mantissa rounding — tolerances reflect the fp16 tensor core.
+    atol, rtol = 0.5, 0.1
 
     torch.testing.assert_close(test_output, ref_output, atol=atol, rtol=rtol)
-    print(f"PASS: C_in={C_in}, C_out={C_out}, K={K}, dtype={dtype}, "
-          f"max_diff={torch.max(torch.abs(test_output - ref_output)).item():.6f}")
+    print(
+        f"PASS: C_in={C_in}, C_out={C_out}, K={K}, dtype={dtype}, "
+        f"max_diff={torch.max(torch.abs(test_output - ref_output)).item():.6f}"
+    )
 
 
 def test_mask_data_generation():
@@ -133,26 +134,24 @@ def benchmark_mask_vs_existing():
     for N in [10000, 50000, 100000]:
         for C in [32, 64, 96]:
             voxels = _make_test_data(num_voxels=N, C_in=C, batch_size=4, spatial_range=200)
-            voxels = voxels.replace(
-                batched_features=voxels.feature_tensor.to(dtype=torch.float16)
-            )
+            voxels = voxels.replace(batched_features=voxels.feature_tensor.to(dtype=torch.float16))
             kernel_map, num_out = _get_kernel_map(voxels, kernel_size=3)
             K = 27
             weight = torch.randn(K, C, C, device="cuda", dtype=torch.float16)
 
             # Warmup
             for _ in range(3):
-                _ = _mask_implicit_gemm_forward_logic(
-                    voxels.feature_tensor, weight, kernel_map, num_out, block_size=16
+                _ = _mask_gemm_forward_logic(
+                    voxels.feature_tensor, weight, kernel_map, num_out, params={"tile_id": 41}
                 )
             torch.cuda.synchronize()
 
-            # Benchmark mask_implicit_gemm
+            # Benchmark mask_gemm
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             for _ in range(10):
-                _ = _mask_implicit_gemm_forward_logic(
-                    voxels.feature_tensor, weight, kernel_map, num_out, block_size=16
+                _ = _mask_gemm_forward_logic(
+                    voxels.feature_tensor, weight, kernel_map, num_out, params={"tile_id": 41}
                 )
             torch.cuda.synchronize()
             t_mask = (time.perf_counter() - t0) / 10
@@ -172,7 +171,9 @@ def benchmark_mask_vs_existing():
             t_explicit = (time.perf_counter() - t0) / 10
 
             ratio = t_mask / t_explicit
-            print(f"N={num_out:>7,} C={C:>3} | mask={t_mask*1000:.2f}ms  explicit={t_explicit*1000:.2f}ms  ratio={ratio:.2f}x")
+            print(
+                f"N={num_out:>7,} C={C:>3} | mask={t_mask*1000:.2f}ms  explicit={t_explicit*1000:.2f}ms  ratio={ratio:.2f}x"
+            )
 
 
 if __name__ == "__main__":

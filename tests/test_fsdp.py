@@ -10,14 +10,15 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from warpconvnet.geometry.coords.search.search_configs import RealSearchConfig, RealSearchMode
 from warpconvnet.geometry.types.points import Points
-from warpconvnet.nn.functional.point_pool import (
-    FEATURE_POOLING_MODE,
-    FeaturePoolingArgs,
-)
+from warpconvnet.nn.modules.mlp import MLPBlock
 from warpconvnet.nn.modules.point_conv import PointConv
-from warpconvnet.nn.modules.transforms import MLP
+from warpconvnet.ops.reductions import REDUCTIONS
 
 
+@unittest.skipUnless(
+    dist.is_available() and dist.is_initialized(),
+    "requires an initialized torch.distributed process group (run via torchrun)",
+)
 class TestFSDP(unittest.TestCase):
     def setUp(self):
         self.B, min_N, max_N, self.C = 3, 1000, 10000, 7
@@ -36,21 +37,17 @@ class TestFSDP(unittest.TestCase):
             mode=RealSearchMode.RADIUS,
             radius=0.4,
         )
-        pooling_arg = FeaturePoolingArgs(
-            pooling_mode=FEATURE_POOLING_MODE.REDUCTIONS,
-            reductions=["mean"],
-            downsample_voxel_size=0.2,
-        )
         torch.cuda.set_device(device)
         model = nn.Sequential(
             PointConv(
                 in_channels,
                 out_channels,
                 neighbor_search_args=search_arg,
-                pooling_args=pooling_arg,
+                pooling_reduction=REDUCTIONS.MEAN,
+                pooling_voxel_size=0.2,
                 out_point_type="downsample",
             ),
-            MLP(out_channels, hidden_channels=32, out_channels=out_channels),
+            MLPBlock(out_channels, hidden_channels=32, out_channels=out_channels),
         ).to(device)
 
         fsdp_model = FSDP(model)

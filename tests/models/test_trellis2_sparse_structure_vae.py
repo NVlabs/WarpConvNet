@@ -13,15 +13,14 @@ import pytest
 import torch
 
 from warpconvnet.models.trellis2.sparse_structure_vae import (
-    ChannelLayerNorm32,
     DownsampleBlock3d,
-    GroupNorm32,
     ResBlock3d,
     SparseStructureDecoder,
     SparseStructureEncoder,
     UpsampleBlock3d,
     pixel_shuffle_3d,
 )
+from warpconvnet.nn.modules.normalizations import ChannelLayerNorm32, GroupNorm32
 
 _TRELLIS2_PATH = os.environ.get("TRELLIS2_PATH")
 _HAS_REF = False
