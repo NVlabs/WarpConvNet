@@ -34,7 +34,7 @@ from warpconvnet.constants import (
     WARPCONVNET_AUTOTUNE_LOG,
 )
 from warpconvnet.utils.logger import get_logger
-from warpconvnet.utils.dist import _get_current_rank, _is_rank_zero
+from warpconvnet.utils.dist import _get_current_rank
 
 logger = get_logger(__name__, rank_zero_only=False)
 
@@ -759,20 +759,27 @@ class GenericBenchmarkCache(Generic[K, V]):
         with self.lock:
             current_time = time.time()
             try:
-                on_disk = self._load_disk_namespaces()
+                # Same cross-process discipline as _do_save: read-merge-write
+                # under the file lock so concurrent savers cannot lose each
+                # other's entries (atomic replace alone only prevents torn
+                # files, not lost updates).
+                lock_path = self.cache_file.with_suffix(".lock")
+                with _FileLock(lock_path):
+                    on_disk = self._load_disk_namespaces()
 
-                merged: Dict[str, Dict[K, V]] = {}
-                for ns, kv in on_disk.items():
-                    merged[ns] = dict(kv)
-                for ns, kv in cache_results.items():
-                    for v in kv.values():
-                        self._validate_value(ns, v)
-                    base = merged.get(ns, {})
-                    base.update(kv)
-                    merged[ns] = base
+                    merged: Dict[str, Dict[K, V]] = {}
+                    for ns, kv in on_disk.items():
+                        merged[ns] = dict(kv)
+                    for ns, kv in cache_results.items():
+                        for v in kv.values():
+                            self._validate_value(ns, v)
+                        base = merged.get(ns, {})
+                        base.update(kv)
+                        merged[ns] = base
+
+                    self._write_cache_to_disk(merged, current_time)
 
                 self._results = merged
-                self._write_cache_to_disk(merged, current_time)
                 self.last_save_time = current_time
                 self.pending_changes = False
                 total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
@@ -780,6 +787,15 @@ class GenericBenchmarkCache(Generic[K, V]):
                     logger.info(
                         f"Force saved generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {len(self._results)} namespaces, {total_entries} total entries"
                     )
+
+                # Notify consumers so they refresh their in-memory caches
+                # (same contract as the background _do_save path).
+                for cb in self._on_merge_callbacks:
+                    try:
+                        for ns, ns_dict in merged.items():
+                            cb(ns, ns_dict)
+                    except Exception as cb_err:
+                        logger.debug(f"on_merge callback error: {cb_err}")
             except Exception as e:
                 if not suppress_logging:
                     logger.warning(
@@ -787,8 +803,10 @@ class GenericBenchmarkCache(Generic[K, V]):
                     )
 
     def update_entry(self, namespace: str, key: K, value: V, force: bool = False) -> None:
-        if not _is_rank_zero():
-            return
+        # Every rank records its own auto-tune results; the background saver
+        # on each rank merges them into the shared cache file under a file
+        # lock, so ranks parallelize the tuning search and inherit each
+        # other's winners on the next cross-rank refresh.
         with self.lock:
             ns = self._results.setdefault(namespace, {})
             self._validate_value(namespace, value)
@@ -828,8 +846,6 @@ class GenericBenchmarkCache(Generic[K, V]):
         return result
 
     def mark_dirty(self) -> None:
-        if not _is_rank_zero():
-            return
         with self._save_condition:
             self.pending_changes = True
             self._save_condition.notify()

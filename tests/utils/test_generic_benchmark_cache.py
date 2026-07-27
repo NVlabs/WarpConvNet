@@ -100,24 +100,6 @@ def test_merge_on_save_does_not_clobber(tmp_cache_dir: Path, monkeypatch: pytest
     cache_r._save_on_exit()
 
 
-def test_rank_gating_does_not_write_on_non_zero_rank(
-    tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
-):
-    # Simulate non-zero rank
-    monkeypatch.setenv("RANK", "1")
-
-    cache = GenericBenchmarkCache(cache_dir=str(tmp_cache_dir))
-    cache.update_entry("ns", (9, 9, 9), {"p": 9}, force=True)
-    cache.save_cache({"ns": {(8, 8, 8): {"p": 8}}}, force=True)
-
-    # No file should be created when rank != 0
-    cache_file = tmp_cache_dir / "benchmark_cache_generic.msgpack"
-    assert not cache_file.exists()
-
-    # Cleanup
-    cache._save_on_exit()
-
-
 def test_value_validation_rejects_invalid(tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch):
     _clear_rank_env(monkeypatch)  # rank 0
 
@@ -141,4 +123,68 @@ def test_value_validation_rejects_invalid(tmp_cache_dir: Path, monkeypatch: pyte
             "implicit_gemm", (3, 3, 3), {"mma_tile": 1, "split_k_slices": "8"}, force=True
         )
 
+    cache._save_on_exit()
+
+
+def test_nonzero_rank_results_persist_and_merge(
+    tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Every rank's auto-tune results must reach the shared cache file.
+
+    The multi-rank design parallelizes the tuning search: each rank records
+    its own winners and the (file-locked) read-merge-write unions them, so
+    ranks inherit each other's results on refresh. A rank gate on the write
+    path silently discards every non-zero rank's work — this test pins the
+    all-ranks-contribute contract by writing from a simulated rank 3.
+    """
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+
+    # "rank 3" records a winner and force-saves.
+    cache_r3 = GenericBenchmarkCache(cache_dir=str(tmp_cache_dir))
+    cache_r3.update_entry("ns", (7, 7, 7), {"p": "rank3"}, force=True)
+
+    # "rank 0" (separate process in real training) records a different key.
+    monkeypatch.setenv("RANK", "0")
+    cache_r0 = GenericBenchmarkCache(cache_dir=str(tmp_cache_dir))
+    cache_r0.update_entry("ns", (8, 8, 8), {"p": "rank0"}, force=True)
+
+    # A fresh reader sees BOTH ranks' results merged.
+    cache_r = GenericBenchmarkCache(cache_dir=str(tmp_cache_dir))
+    ns = cache_r.get_namespace("ns")
+    assert ns[(7, 7, 7)]["p"] == "rank3", "non-zero rank's result was dropped"
+    assert ns[(8, 8, 8)]["p"] == "rank0"
+
+    cache_r3._save_on_exit()
+    cache_r0._save_on_exit()
+    cache_r._save_on_exit()
+
+
+def test_forced_save_fires_on_merge_callbacks(
+    tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Forced saves must refresh consumers exactly like the background saver.
+
+    Consumers (autotune) mirror the cache into module-level dicts via
+    on_merge callbacks; both save paths merge disk state into memory, so
+    both must notify — otherwise entries absorbed from other ranks during a
+    forced save would be invisible to consumers until the next periodic save.
+    """
+    _clear_rank_env(monkeypatch)
+
+    # Another process left an entry on disk.
+    cache_other = GenericBenchmarkCache(cache_dir=str(tmp_cache_dir))
+    cache_other.update_entry("ns", (1, 1, 1), {"p": "other"}, force=True)
+
+    cache = GenericBenchmarkCache(cache_dir=str(tmp_cache_dir))
+    seen: dict = {}
+    cache.register_on_merge_callback(lambda ns, d: seen.setdefault(ns, {}).update(d))
+
+    # Forced save path must fire the callback with the merged (disk ∪ local) view.
+    cache.update_entry("ns", (2, 2, 2), {"p": "local"}, force=True)
+
+    assert (1, 1, 1) in seen.get("ns", {}), "disk entry missing from forced-save callback"
+    assert (2, 2, 2) in seen.get("ns", {}), "local entry missing from forced-save callback"
+
+    cache_other._save_on_exit()
     cache._save_on_exit()

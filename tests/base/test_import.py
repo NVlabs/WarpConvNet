@@ -77,7 +77,9 @@ def test_search_configs_import():
 
 def test_search_cache_import():
     assert is_dataclass(IntSearchCacheKey)
-    assert is_dataclass(IntSearchCache)
+    # IntSearchCache is a dict subclass keyed by IntSearchCacheKey, not a
+    # dataclass (it stopped being one when it became a container).
+    assert issubclass(IntSearchCache, dict)
 
     assert is_dataclass(RealSearchCache)
     assert is_dataclass(RealSearchCacheKey)
