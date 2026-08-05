@@ -20,7 +20,7 @@ python scripts/populate_benchmark_cache.py --forward-only --algo-mode all
 python scripts/populate_benchmark_cache.py --channels 32,32 64,128 128,256
 
 # Specific voxel counts:
-python scripts/populate_benchmark_cache.py --num-voxels 50000 200000 1000000
+python scripts/populate_benchmark_cache.py --num-voxels 50000 200000 2000000
 
 # Quick smoke test (small subset):
 python scripts/populate_benchmark_cache.py --preset quick
@@ -40,6 +40,48 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import torch
+
+
+def _log10_bin(n: int) -> int:
+    """Cache-key bin for a voxel count. Mirrors SpatiallySparseConvConfig.
+
+    See ``benchmark_cache.py``: ``max(ceil(log10(N)), 4)``.
+    """
+    return max(math.ceil(math.log10(max(n, 1))), 4)
+
+
+def _warn_on_bin_boundary(num_voxels_list: list[int]) -> None:
+    """Warn when a requested voxel count sits exactly on a cache-bin boundary.
+
+    Cache keys bin N by ``ceil(log10(N))``, so the bin is the UPPER edge of a decade:
+    bin 6 covers (100_000, 1_000_000] and bin 7 covers (1_000_000, 10_000_000]. An exact
+    power of ten therefore warms the decade BELOW itself -- ``--num-voxels 1000000`` warms
+    bin 6, leaving a real workload at N=1_072_764 (bin 7) stone cold.
+
+    That failure is silent: the run completes, reports success, and the shape you meant to
+    warm still pays a full auto-tune on its first step. The built-in presets avoid this by
+    using mid-decade values (5_000, 50_000, 500_000, 2_000_000), but a user typing a round
+    number gets no signal at all -- hence this warning.
+    """
+    for n in num_voxels_list:
+        if n <= 0:
+            continue
+        lg = math.log10(n)
+        if lg == int(lg) and n >= 10_000:
+            suggestion = int(5 * 10 ** int(lg))
+            print(
+                f"WARNING: --num-voxels {n} is an exact power of ten and sits on a cache-bin "
+                f"boundary.\n"
+                f"         It warms bin {_log10_bin(n)}, which covers N in "
+                f"({n // 10:,}, {n:,}] -- NOT workloads just above {n:,}.\n"
+                f"         A workload at N={n + 1:,} lands in bin {_log10_bin(n + 1)} and would "
+                f"stay cold.\n"
+                f"         If you meant 'around {n:,}', use a mid-decade value such as "
+                f"{suggestion:,} (bin {_log10_bin(suggestion)}),\n"
+                f"         or pass your workload's ACTUAL voxel count.",
+                file=sys.stderr,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Configuration presets
@@ -137,7 +179,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         nargs="+",
         default=None,
-        help="Override voxel counts (e.g. --num-voxels 100000 500000)",
+        help="Override voxel counts (e.g. --num-voxels 50000 500000). Avoid exact powers of "
+        "ten: cache bins are ceil(log10(N)), so 1000000 warms the decade BELOW it",
     )
     p.add_argument(
         "--channels",
@@ -327,7 +370,7 @@ def run_single_config(
     from warpconvnet.nn.functional.sparse_conv.detail.unified import (
         _BENCHMARK_AB_RESULTS,
         _BENCHMARK_ATB_RESULTS,
-        _get_adaptive_AB_params,
+        candidate_pool,
         _ATB_PARAMS_AUTO,
         SpatiallySparseConvConfig,
     )
@@ -391,7 +434,7 @@ def run_single_config(
             in_dtype=dtype,
         )
         had_cache = fwd_config in _BENCHMARK_AB_RESULTS
-        num_fwd_candidates = len(_get_adaptive_AB_params(c_in, c_out, kernel_volume))
+        num_fwd_candidates = len(candidate_pool("AB", "auto", c_in, c_out, kernel_volume))
 
         torch.cuda.synchronize(device)
         t0 = time.perf_counter()
@@ -608,6 +651,7 @@ def main():
 
     if args.num_voxels is not None:
         num_voxels_list = args.num_voxels
+        _warn_on_bin_boundary(num_voxels_list)
     if args.channels is not None:
         channel_pairs = [_parse_channel_pair(s) for s in args.channels]
     if args.kernel_sizes is not None:
@@ -707,6 +751,8 @@ def main():
     total = len(configs)
     num_done = 0
     num_skipped = 0
+    num_failed = 0
+    first_error = None
     start_time = time.time()
 
     for i, (nv, c_in, c_out, ks, dt) in enumerate(configs, 1):
@@ -772,6 +818,8 @@ def main():
             num_done += 1
 
         except Exception as e:
+            num_failed += 1
+            first_error = first_error or f"{e}"
             print(f"{tag}  ERROR: {e}", file=sys.stderr)
 
         # Free GPU memory between configs
@@ -780,20 +828,55 @@ def main():
     elapsed = time.time() - start_time
     print()
     print(
-        f"Done: {num_done} benchmarked, {num_skipped} skipped "
+        f"Done: {num_done} benchmarked, {num_skipped} skipped, {num_failed} failed "
         f"(resume={args.resume}) in {elapsed:.1f}s"
     )
 
-    # Print cache location
-    from warpconvnet.constants import WARPCONVNET_BENCHMARK_CACHE_DIR
+    # Every requested config must be accounted for. A per-config exception is caught and
+    # logged above so one bad shape cannot abort the grid -- but if NOTHING was benchmarked
+    # or skipped, the run did no work and must not look like success. Pre-warming exists to
+    # keep auto-tune out of collective-synchronised training steps; a pre-warm that silently
+    # warms nothing leaves that hazard fully in place while reporting that it is handled.
+    accounted = num_done + num_skipped
+    if num_failed or accounted != total:
+        print(
+            f"\nERROR: {total} configs requested but only {accounted} accounted for "
+            f"({num_done} benchmarked + {num_skipped} skipped); {num_failed} failed.",
+            file=sys.stderr,
+        )
+        if first_error:
+            print(f"       first error: {first_error}", file=sys.stderr)
+        print(
+            "       The cache was NOT fully populated. Do not treat this run as a warm cache.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    cache_dir = os.path.expanduser(WARPCONVNET_BENCHMARK_CACHE_DIR)
-    cache_file = os.path.join(cache_dir, "benchmark_cache_generic.msgpack")
+    # Print cache location. Ask the cache object for its own resolved path rather than
+    # recomputing the default-dir rule here -- that rule ignores
+    # WARPCONVNET_BENCHMARK_CACHE_DIR_OVERRIDE, so a recomputed path can point at a file
+    # this run never wrote (see GenericBenchmarkCache.__init__ for the precedence).
+    from warpconvnet.utils.benchmark_cache import get_generic_benchmark_cache
+
+    cache = get_generic_benchmark_cache()
+
+    # Flush before reporting. Entries reach disk via the background saver, which only runs
+    # every save_interval, so at this point most of what we just benchmarked is still in
+    # memory -- the atexit flush writes it moments AFTER this line. Reporting the file size
+    # first understated it several-fold (1.0 KB printed against 6.2 KB finally written).
+    # For a tool whose entire job is populating that file, the confirmation has to describe
+    # the finished state, so force the save and then stat it.
+    try:
+        cache.save_cache(cache._results, force=True, suppress_logging=True)
+    except Exception as e:  # never let the summary fail the run
+        print(f"  (warning: final cache flush failed: {e})", file=sys.stderr)
+
+    cache_file = cache.cache_file
     if os.path.exists(cache_file):
         size_kb = os.path.getsize(cache_file) / 1024
         print(f"Cache file: {cache_file} ({size_kb:.1f} KB)")
     else:
-        print(f"Cache file: {cache_file} (not yet written -- background saver pending)")
+        print(f"Cache file: {cache_file} (not written -- flush produced no file)")
 
 
 if __name__ == "__main__":
