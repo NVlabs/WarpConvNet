@@ -578,6 +578,7 @@ class GenericBenchmarkCache(Generic[K, V]):
         # auto-tune results.
         self._start_background_saver()
         atexit.register(self._save_on_exit)
+        self._install_sigterm_flush()
         logger.debug(f"[Rank {current_rank}] Started background saver")
 
         # If load_cache migrated an older on-disk version, persist the rewrite
@@ -924,6 +925,56 @@ class GenericBenchmarkCache(Generic[K, V]):
         with self._save_condition:
             self.pending_changes = True
             self._save_condition.notify()
+
+    def _install_sigterm_flush(self) -> None:
+        """Flush pending auto-tune results on SIGTERM, then re-raise to the previous handler.
+
+        ``atexit`` covers clean interpreter shutdown, but not the exit path that actually
+        matters for a distributed job. When one rank is slow, its peers time out and
+        torchrun tears the workers down: it sends SIGTERM first and escalates to SIGKILL
+        only after a grace period (``torch/distributed/elastic/multiprocessing/api.py``,
+        ``_get_default_signal`` -> SIGTERM, ``_get_kill_signal`` -> SIGKILL). Without a
+        handler, a rank that finished tuning but has not hit the 60s save interval loses
+        the result, and the next run re-tunes the same shapes.
+
+        Best effort by construction, and the limits are worth stating because they decide
+        when this helps:
+          - Python runs signal handlers only in the MAIN thread, between bytecodes. A rank
+            blocked inside a long C++ call (e.g. waiting on a CUDA event for a slow kernel)
+            runs no bytecodes, so the handler is deferred until that call returns -- possibly
+            past the grace period, after which SIGKILL arrives and nothing runs.
+          - Ranks killed by the NCCL watchdog's C++ abort path never reach Python at all.
+          - A tune still IN PROGRESS has nothing to save regardless.
+        So this recovers the completed-but-unflushed case on a responsive rank. It is not a
+        substitute for pre-warming the cache before training (see ``_warn_if_distributed``).
+
+        Only installs from the main thread, and chains to the previous handler so we do not
+        change process termination semantics for anyone else.
+        """
+        try:
+            import signal
+
+            if threading.current_thread() is not threading.main_thread():
+                return
+            previous = signal.getsignal(signal.SIGTERM)
+
+            def _flush_and_chain(signum, frame):
+                try:
+                    if self.pending_changes:
+                        self.save_cache(self._results, force=True, suppress_logging=True)
+                except Exception:
+                    pass  # Never let a cache save mask the shutdown itself.
+                if callable(previous):
+                    previous(signum, frame)
+                elif previous == signal.SIG_DFL:
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+            signal.signal(signal.SIGTERM, _flush_and_chain)
+        except Exception as e:
+            # Non-main-thread import, restricted environments, or a platform without
+            # SIGTERM: the atexit path still covers clean shutdown.
+            logger.debug(f"Could not install SIGTERM cache flush: {e}")
 
     def _save_on_exit(self) -> None:
         self._shutdown_requested = True
