@@ -35,7 +35,10 @@ from .backends import (
 )
 from warpconvnet.constants import WARPCONVNET_AUTOTUNE_NUMERIC_CHECK
 
-logger = get_logger(__name__)
+# rank_zero_only=False: auto-tuning is a per-rank, shape-dependent event, so it is
+# precisely the thing that does NOT happen uniformly across ranks. Filtering to rank 0
+# makes a tuning (or hanging) non-zero rank indistinguishable from one that never tuned.
+logger = get_logger(__name__, rank_zero_only=False)
 
 # ---------------------------------------------------------------------------
 # Backward numeric self-check thresholds
@@ -82,6 +85,48 @@ _BENCHMARK_TIE_BREAK_THRESHOLD = 1.10
 
 # Track whether auto-tune banner has been shown (once per process)
 _AUTOTUNE_BANNER_SHOWN = False
+_DISTRIBUTED_WARNING_SHOWN = False
+
+
+def _warn_if_distributed() -> None:
+    """Warn once when auto-tuning runs inside an initialized distributed context.
+
+    Auto-tuning is per-rank and shape-dependent: only the rank that sees a novel shape
+    tunes, and while it does so it performs host-side CUDA syncs inside the autograd
+    backward. Its peers meanwhile proceed to the next collective. A long tune on one rank
+    therefore shows up as a collective timeout on every OTHER rank -- and because the
+    tuning rank is not itself inside a collective, its own NCCL watchdog never fires, so
+    the default traceback blames the innocent ranks.
+
+    We cannot bound the tune from here without changing which kernel gets picked, but we
+    can make sure the rank that is doing it says so.
+    """
+    global _DISTRIBUTED_WARNING_SHOWN
+    if _DISTRIBUTED_WARNING_SHOWN:
+        return
+    try:
+        import torch.distributed as dist
+
+        if not (dist.is_available() and dist.is_initialized()):
+            return
+        rank = dist.get_rank()
+        world = dist.get_world_size()
+    except Exception:
+        return
+    _DISTRIBUTED_WARNING_SHOWN = True
+    logger.warning(
+        f"WarpConvNet: auto-tuning inside a distributed context (rank {rank}/{world}). "
+        "Only ranks seeing a novel shape tune, and while one rank tunes its peers sit in "
+        "the next collective -- a sweep that is merely SLOW under that contention can "
+        "still exceed their collective timeout. Measured in the field: a backward sweep "
+        "costing ~5s standalone took >600s alongside 15 ranks spinning in allreduce. "
+        "This does NOT self-heal: a sweep killed by the timeout never completes, so it "
+        "never caches, so the next run re-tunes and dies the same way. Pre-warm instead: "
+        "python scripts/populate_benchmark_cache.py --num-voxels <your N> "
+        "--channels <C_in>,<C_out> --dtypes <dtype>   (single process, no peers), or pin "
+        "WARPCONVNET_{FWD,DGRAD,WGRAD}_ALGO_MODE to bound the candidate set."
+    )
+
 
 # ---------------------------------------------------------------------------
 # In-memory benchmark result caches (config -> sorted list of results)
@@ -614,6 +659,7 @@ def _run_forward_benchmarks(
             "Results are cached to ~/.cache/warpconvnet/ for future runs."
         )
         _AUTOTUNE_BANNER_SHOWN = True
+    _warn_if_distributed()
     logger.info(
         f"Auto-tuning forward (N={N_in}, C_in={C_in_val}, C_out={C_out_val}, "
         f"{num_candidates} candidates)..."
@@ -1011,6 +1057,7 @@ def _run_backward_benchmarks(
             "Results are cached to ~/.cache/warpconvnet/ for future runs."
         )
         _AUTOTUNE_BANNER_SHOWN = True
+    _warn_if_distributed()
     logger.info(
         f"Auto-tuning backward (N={N_in}, C_in={C_in_val}, C_out={C_out_val}, "
         f"{num_candidates} candidates)..."

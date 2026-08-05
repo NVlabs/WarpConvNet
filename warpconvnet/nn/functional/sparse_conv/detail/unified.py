@@ -69,7 +69,9 @@ if _HAS_CUTE_GROUPED_SM90:
         _cute_grouped_sm90_backward_logic,
     )
 
-logger = get_logger(__name__)
+# rank_zero_only=False: see the note in autotune.py -- dispatch and auto-tune events are
+# per-rank and shape-dependent, so rank-0-only filtering hides the rank that is stuck.
+logger = get_logger(__name__, rank_zero_only=False)
 
 
 # Algorithms that tolerate a non-16B-aligned weight (operand B) base:

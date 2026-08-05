@@ -46,6 +46,11 @@ if not WARPCONVNET_AUTOTUNE_LOG:
 
 # Rank detection is now handled by the dist module
 
+# Bound on cache-file lock acquisition. The cache often lives on a shared filesystem and
+# every rank contends for one lock, so an unbounded wait is a training-wide liveness
+# hazard. A skipped save costs a re-tune; a blocked save costs the job.
+_FILE_LOCK_TIMEOUT_S = 10.0
+
 
 def _int_sequence_hash(arr: Sequence[int]) -> int:  # noqa: F821
     """Hash a sequence of ints into a single 32‑bit value."""
@@ -92,24 +97,56 @@ def _atomic_msgpack_replace(target_path: Path, data: Any) -> None:
     temp_file.replace(target_path)
 
 
-class _FileLock:
-    """Cross-process file lock using fcntl for atomic cache read-modify-write."""
+class LockAcquisitionTimeout(Exception):
+    """Raised when the cache file lock could not be acquired within the deadline."""
 
-    def __init__(self, lock_path: Path):
+
+class _FileLock:
+    """Cross-process file lock using fcntl for atomic cache read-modify-write.
+
+    Acquisition is **bounded**. A blocking ``LOCK_EX`` here is a liveness hazard: the
+    cache commonly lives on a shared filesystem (``~/.cache/warpconvnet`` on a Lustre or
+    NFS home), and every rank of a multi-node job contends for the same lock over the
+    network. An unbounded wait turns a slow save into a training-wide stall, because
+    callers hold Python-level state while waiting.
+
+    Saving the benchmark cache is *best effort* -- a skipped save costs a re-tune later,
+    while a blocked save costs the job. So we poll ``LOCK_NB`` with backoff and raise
+    ``LockAcquisitionTimeout`` rather than wait forever.
+    """
+
+    def __init__(self, lock_path: Path, timeout: float = _FILE_LOCK_TIMEOUT_S):
         self.lock_path = lock_path
+        self.timeout = timeout
+        self._fd = None
 
     def __enter__(self):
         import fcntl
 
         self._fd = open(self.lock_path, "w")
-        fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
-        return self
+        deadline = time.monotonic() + self.timeout
+        delay = 0.01
+        while True:
+            try:
+                fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self._fd.close()
+                    self._fd = None
+                    raise LockAcquisitionTimeout(
+                        f"could not acquire {self.lock_path} within {self.timeout:.1f}s"
+                    )
+                time.sleep(delay)
+                delay = min(delay * 2.0, 0.5)
 
     def __exit__(self, *args):
         import fcntl
 
-        fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
-        self._fd.close()
+        if self._fd is not None:
+            fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+            self._fd.close()
+            self._fd = None
 
 
 def _sanitize_for_pickle(value: Any) -> Any:
@@ -585,6 +622,8 @@ class GenericBenchmarkCache(Generic[K, V]):
 
     def _background_save_worker(self) -> None:
         while not self._shutdown_requested:
+            should_save = False
+            snapshot: Dict[str, Dict[K, V]] = {}
             with self._save_condition:
                 self._save_condition.wait(timeout=self.save_interval)
                 if self._shutdown_requested:
@@ -594,7 +633,11 @@ class GenericBenchmarkCache(Generic[K, V]):
                     self.pending_changes
                     and (current_time - self.last_save_time) >= self.save_interval
                 ):
-                    self._do_save()
+                    should_save = True
+                    # Snapshot under the lock; do the file I/O without it (see _do_save).
+                    snapshot = {ns: dict(kv) for ns, kv in self._results.items()}
+            if should_save:
+                self._do_save(snapshot)
 
     def _load_disk_namespaces(self) -> Dict[str, Dict[K, V]]:
         """Load namespaces from disk, returning empty dict on any failure."""
@@ -636,9 +679,17 @@ class GenericBenchmarkCache(Generic[K, V]):
         }
         _atomic_msgpack_replace(self.cache_file, cache_data)
 
-    def _do_save(self) -> None:
-        if not self.pending_changes:
-            return
+    def _do_save(self, snapshot: Dict[str, Dict[K, V]]) -> None:
+        """Merge ``snapshot`` into the on-disk cache. Must run WITHOUT ``self.lock`` held.
+
+        ``self.lock`` guards in-memory state only. Holding it across the file lock and the
+        read-merge-write below would block every caller of ``get_namespace`` -- i.e. the
+        training thread, on every autotuned op -- for as long as the shared-filesystem I/O
+        takes. That is a priority inversion that turns a slow save into a training stall.
+
+        So: the caller snapshots under the lock, this method does I/O lock-free, and only
+        the short write-back of merged results re-takes the lock.
+        """
         try:
             current_time = time.time()
             lock_path = self.cache_file.with_suffix(".lock")
@@ -652,22 +703,28 @@ class GenericBenchmarkCache(Generic[K, V]):
                 # Start with disk contents (includes other ranks' results)
                 for ns, kv in on_disk.items():
                     merged[ns] = dict(kv)
-                # Overlay our in-memory results (our auto-tune wins)
-                for ns, kv in self._results.items():
+                # Overlay our snapshotted results (our auto-tune wins)
+                for ns, kv in snapshot.items():
                     base = merged.get(ns, {})
                     base.update(kv)
                     merged[ns] = base
 
                 self._write_cache_to_disk(merged, current_time)
 
-            # Update in-memory cache with the full merged result.
-            # This picks up auto-tune results from other ranks.
-            self._results = merged
-            self.last_save_time = current_time
-            self.pending_changes = False
-            total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
+            # Update in-memory cache with the full merged result. This picks up auto-tune
+            # results from other ranks. Re-take the lock only for this short assignment,
+            # and preserve entries recorded while we were doing I/O.
+            with self.lock:
+                for ns, kv in self._results.items():
+                    base = merged.get(ns, {})
+                    base.update(kv)
+                    merged[ns] = base
+                self._results = merged
+                self.last_save_time = current_time
+                self.pending_changes = False
+            total_entries = sum(len(ns_dict) for ns_dict in merged.values())
             logger.info(
-                f"Background saved generic benchmark cache: {len(self._results)} namespaces, {total_entries} total entries"
+                f"Background saved generic benchmark cache: {len(merged)} namespaces, {total_entries} total entries"
             )
 
             # Notify consumers so they refresh their in-memory caches
@@ -677,6 +734,9 @@ class GenericBenchmarkCache(Generic[K, V]):
                         cb(ns, ns_dict)
                 except Exception as cb_err:
                     logger.debug(f"on_merge callback error: {cb_err}")
+        except LockAcquisitionTimeout as e:
+            # Best effort: leave pending_changes set so the next tick retries.
+            logger.debug(f"Skipped background cache save: {e}")
         except Exception as e:
             logger.warning(f"Failed to save generic benchmark cache in background: {e}")
 
@@ -756,51 +816,66 @@ class GenericBenchmarkCache(Generic[K, V]):
                 self._save_condition.notify()
             return
 
+        # NOTE: self.lock is deliberately NOT held across the file I/O below -- see the
+        # docstring on _do_save. Validate and snapshot under the lock, then release it.
         with self.lock:
-            current_time = time.time()
-            try:
-                # Same cross-process discipline as _do_save: read-merge-write
-                # under the file lock so concurrent savers cannot lose each
-                # other's entries (atomic replace alone only prevents torn
-                # files, not lost updates).
-                lock_path = self.cache_file.with_suffix(".lock")
-                with _FileLock(lock_path):
-                    on_disk = self._load_disk_namespaces()
+            snapshot: Dict[str, Dict[K, V]] = {}
+            for ns, kv in cache_results.items():
+                for v in kv.values():
+                    self._validate_value(ns, v)
+                snapshot[ns] = dict(kv)
 
-                    merged: Dict[str, Dict[K, V]] = {}
-                    for ns, kv in on_disk.items():
-                        merged[ns] = dict(kv)
-                    for ns, kv in cache_results.items():
-                        for v in kv.values():
-                            self._validate_value(ns, v)
-                        base = merged.get(ns, {})
-                        base.update(kv)
-                        merged[ns] = base
+        current_time = time.time()
+        try:
+            # Same cross-process discipline as _do_save: read-merge-write
+            # under the file lock so concurrent savers cannot lose each
+            # other's entries (atomic replace alone only prevents torn
+            # files, not lost updates).
+            lock_path = self.cache_file.with_suffix(".lock")
+            with _FileLock(lock_path):
+                on_disk = self._load_disk_namespaces()
 
-                    self._write_cache_to_disk(merged, current_time)
+                merged: Dict[str, Dict[K, V]] = {}
+                for ns, kv in on_disk.items():
+                    merged[ns] = dict(kv)
+                for ns, kv in snapshot.items():
+                    base = merged.get(ns, {})
+                    base.update(kv)
+                    merged[ns] = base
 
+                self._write_cache_to_disk(merged, current_time)
+
+            with self.lock:
+                # Preserve entries recorded while we were doing I/O.
+                for ns, kv in self._results.items():
+                    base = merged.get(ns, {})
+                    base.update(kv)
+                    merged[ns] = base
                 self._results = merged
                 self.last_save_time = current_time
                 self.pending_changes = False
-                total_entries = sum(len(ns_dict) for ns_dict in self._results.values())
-                if not suppress_logging:
-                    logger.info(
-                        f"Force saved generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {len(self._results)} namespaces, {total_entries} total entries"
-                    )
+            total_entries = sum(len(ns_dict) for ns_dict in merged.values())
+            if not suppress_logging:
+                logger.info(
+                    f"Force saved generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {len(merged)} namespaces, {total_entries} total entries"
+                )
 
-                # Notify consumers so they refresh their in-memory caches
-                # (same contract as the background _do_save path).
-                for cb in self._on_merge_callbacks:
-                    try:
-                        for ns, ns_dict in merged.items():
-                            cb(ns, ns_dict)
-                    except Exception as cb_err:
-                        logger.debug(f"on_merge callback error: {cb_err}")
-            except Exception as e:
-                if not suppress_logging:
-                    logger.warning(
-                        f"Failed to force save generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
-                    )
+            # Notify consumers so they refresh their in-memory caches
+            # (same contract as the background _do_save path).
+            for cb in self._on_merge_callbacks:
+                try:
+                    for ns, ns_dict in merged.items():
+                        cb(ns, ns_dict)
+                except Exception as cb_err:
+                    logger.debug(f"on_merge callback error: {cb_err}")
+        except LockAcquisitionTimeout as e:
+            if not suppress_logging:
+                logger.warning(f"Skipped forced cache save: {e}")
+        except Exception as e:
+            if not suppress_logging:
+                logger.warning(
+                    f"Failed to force save generic benchmark cache v{WARPCONVNET_BENCHMARK_CACHE_VERSION}: {e}"
+                )
 
     def update_entry(self, namespace: str, key: K, value: V, force: bool = False) -> None:
         # Every rank records its own auto-tune results; the background saver
