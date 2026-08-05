@@ -375,9 +375,28 @@ def _cute_grouped_backward_logic(  # noqa: F811
     # --- Weight gradient: fused grouped TrAB ---
     grad_weight = None
     if requires_grad[1]:
-        grad_weight = torch.zeros_like(weight, dtype=out_dtype, device=device)
+        # Accumulate dW in fp32 regardless of compute dtype, then cast to the parameter
+        # dtype at the end -- the same discipline as the mask_gemm wgrad path.
+        #
+        # Storing dW directly in the compute dtype overflows: a weight gradient sums over N
+        # rows of GradScaler-scaled activations, and field values reach ~2.5e6 against an
+        # fp16 max of 65504. The kernel accumulator was already fp32 -- only the STORE
+        # narrowed -- so this cost nothing but correctness. It also made the surviving-ness
+        # of a parameter gradient depend on which algorithm autotune happened to pick, since
+        # the mask path emitted fp32 for the same inputs.
+        wgrad_dtype = torch.float32
+        grad_weight = torch.zeros_like(weight, dtype=wgrad_dtype, device=device)
         if iden_idx is not None:
-            grad_weight[iden_idx] = torch.matmul(_in_features.T, _grad_output).to(dtype=out_dtype)
+            # Chunked so the fp32 upcast stays bounded: at training N a whole-tensor
+            # .float() on both operands is a multi-hundred-MB transient, and this runs
+            # inside a backward that is already near its memory peak.
+            acc = grad_weight[iden_idx]
+            chunk = 1 << 16
+            for s in range(0, _in_features.shape[0], chunk):
+                acc += torch.matmul(
+                    _in_features[s : s + chunk].T.float(),
+                    _grad_output[s : s + chunk].float(),
+                )
 
         trAB_params = _prepare_grouped_trAB_params(kernel_map, grad_weight, iden_idx, device)
 
@@ -398,11 +417,16 @@ def _cute_grouped_backward_logic(  # noqa: F811
                 C_out,
                 mma_tile,
                 1.0,
-                _DTYPE_TO_SCALAR_TYPE_INT[out_dtype],
+                _DTYPE_TO_SCALAR_TYPE_INT[wgrad_dtype],
                 splits,
             )
             if status != 0:
                 return status, -2
+
+        # Match the parameter dtype, as autograd requires. Under AMP `weight` is the
+        # fp32 parameter, so this is a no-op; under genuine fp16 params it narrows
+        # exactly where mask_gemm does.
+        grad_weight = grad_weight.to(dtype=weight.dtype)
 
     return grad_in_features, grad_weight
 
