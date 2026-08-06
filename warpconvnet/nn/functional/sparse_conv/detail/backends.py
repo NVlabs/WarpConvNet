@@ -293,6 +293,7 @@ def _bwd_cutlass(ctx: BwdCtx) -> BwdResult:
         ctx.weight,
         ctx.kernel_map,
         accumulator_type=ctx.params.get("accumulator_type", torch.float32),
+        requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
         device=ctx.device,
     )
 
@@ -331,6 +332,7 @@ def _bwd_cutlass_grouped(ctx: BwdCtx) -> BwdResult:
         ctx.weight,
         ctx.kernel_map,
         accumulator_type=ctx.params.get("accumulator_type", torch.float32),
+        requires_grad=(ctx.needs_input_grad[0], ctx.needs_input_grad[1]),
         device=ctx.device,
         saturation_m=ctx.params.get("saturation_m", 5000),
     )

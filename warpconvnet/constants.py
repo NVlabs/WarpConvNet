@@ -184,7 +184,7 @@ WARPCONVNET_BENCHMARK_CACHE_DIR = _get_env_string(
 # before the forward numeric self-check existed may be poisoned (tile 41
 # was the cached C=32 forward winner); force every config back through
 # the guarded sweeps.
-WARPCONVNET_BENCHMARK_CACHE_VERSION = 16.0
+WARPCONVNET_BENCHMARK_CACHE_VERSION = 17.0
 
 # Additional cache directory for explicit override (useful for debugging multi-GPU issues)
 # If set, this takes precedence over the default cache directory

@@ -1305,10 +1305,32 @@ def make_status_timing_runner(
     """
 
     def _clone_outputs_for_args(args: Tuple[Any, ...]) -> Tuple[Any, ...]:
+        """Clone output tensors, PRESERVING aliasing between output positions.
+
+        Callers legitimately pass the same tensor at more than one output position: the
+        sparse-conv dgrad path hands ``grad_in_features`` to CUTLASS as both ``tensor_c``
+        and ``tensor_d`` so the kernel accumulates in place (``D = alpha*A@B + beta*C``
+        with ``beta=1``, C and D aliased).
+
+        Cloning each position independently broke that in two ways:
+          - it produced TWO clones of one tensor per timed iteration, and for an
+            ``[N, C_in]`` gradient at training N those copies can rival the GEMM being
+            timed, so candidates got ranked partly on clone cost rather than kernel cost;
+          - worse, the clones were distinct objects, so the timed call ran with C and D
+            UNALIASED -- a different accumulation regime from the production call. The
+            tuner was therefore not timing the thing it was selecting.
+
+        Cloning by identity fixes both: one clone per distinct tensor, and positions that
+        shared a tensor still share its clone.
+        """
         args_list = list(args)
+        clones: Dict[int, torch.Tensor] = {}
         for pos in output_positions:
             if 0 <= pos < len(args_list) and isinstance(args_list[pos], torch.Tensor):
-                args_list[pos] = args_list[pos].clone()
+                key = id(args_list[pos])
+                if key not in clones:
+                    clones[key] = args_list[pos].clone()
+                args_list[pos] = clones[key]
         return tuple(args_list)
 
     def _runner(
