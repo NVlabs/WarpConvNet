@@ -93,8 +93,12 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . /tmp/buildenv/bin/activate
           echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
-          # Get base version without local segment, then append torch tag
-          BASE_VERSION=$(SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version python -c "from setuptools_scm import get_version; print(get_version())")
+          # Get base version without local segment, then append torch tag.
+          # local_scheme must be passed as a keyword: setuptools-scm ignores the
+          # SETUPTOOLS_SCM_LOCAL_SCHEME env var, so off-tag builds would keep
+          # their "+gHASH" segment and produce a PEP 440-invalid double-local
+          # version like "1.8.1.dev1+gHASH+torch2.11cu130".
+          BASE_VERSION=$(python -c "from setuptools_scm import get_version; print(get_version(local_scheme='no-local-version'))")
           export SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+torch${{ matrix.torch_short }}${{ matrix.cuda }}"
           echo "Building version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
           python setup.py bdist_wheel
@@ -135,8 +139,12 @@ jobs:
       - name: Build sdist
         run: |
           pip install build 'setuptools-scm<10'
-          # Suppress local version segment (+g1234567) — PyPI rejects local identifiers
-          export SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version
+          # Suppress local version segment (+g1234567) — PyPI rejects local
+          # identifiers. Must go through PRETEND_VERSION: setuptools-scm ignores
+          # the SETUPTOOLS_SCM_LOCAL_SCHEME env var.
+          SETUPTOOLS_SCM_PRETEND_VERSION=$(python -c "from setuptools_scm import get_version; print(get_version(local_scheme='no-local-version'))")
+          export SETUPTOOLS_SCM_PRETEND_VERSION
+          echo "Building sdist version: ${SETUPTOOLS_SCM_PRETEND_VERSION}"
           python -m build --sdist
 
       - uses: actions/upload-artifact@v4
@@ -148,6 +156,11 @@ jobs:
     name: Upload wheels to GitHub Release
     needs: build_wheels
     runs-on: ubuntu-latest
+    # Tag pushes only. A workflow_dispatch run is a build test; without this
+    # guard it would cut a public release named after the off-tag dev version
+    # (e.g. v1.8.1.dev1). Dispatch runs still expose every wheel as a run
+    # artifact. Matches the guard on publish_pypi below.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
@@ -166,7 +179,7 @@ jobs:
         id: version
         run: |
           pip install 'setuptools-scm<10'
-          VERSION=$(SETUPTOOLS_SCM_LOCAL_SCHEME=no-local-version python -c "from setuptools_scm import get_version; print(get_version())")
+          VERSION=$(python -c "from setuptools_scm import get_version; print(get_version(local_scheme='no-local-version'))")
           TAG="v${VERSION}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}, Tag: ${TAG}"
