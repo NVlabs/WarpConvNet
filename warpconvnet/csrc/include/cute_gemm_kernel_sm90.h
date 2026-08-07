@@ -31,6 +31,7 @@
 #include "cute/tensor.hpp"  // MUST precede cute/algorithm/* for nvcc 12.9 (else Copy_Atom undefined)
 #include "cute/algorithm/copy.hpp"
 #include "cute/algorithm/gemm.hpp"
+#include "cute/arch/config.hpp"         // CUTE_ARCH_TMA_SM120_ENABLED
 #include "cute/arch/copy_sm80.hpp"      // cp_async_fence, cp_async_wait
 #include "cute/arch/mma_sm90_gmma.hpp"  // warpgroup_arrive, warpgroup_commit_batch, etc.
 #include "cute/atom/copy_atom.hpp"
@@ -484,6 +485,16 @@ private:
                    "r"(tma_bytes));
 
       // Single TMA load for the entire tile (tN == kTmaBoxN guaranteed by UseTmaLoadB)
+      //
+      // The destination state space is arch-dependent, mirroring
+      // cute::SM90_TMA_LOAD_2D. Blackwell consumer parts (sm_120) have no
+      // cluster DSMEM and take the .shared::cta form, which requires PTX ISA
+      // 8.6 (CUDA 12.8+). Every other target -- including sm_90a, which the
+      // cu124/cu126 wheel builds must still assemble -- takes .shared::cluster;
+      // on Hopper a non-clustered CTA is a cluster of one, so the semantics are
+      // identical. Emitting .shared::cta unconditionally made ptxas 12.4/12.6
+      // reject the sm_90a pass with "State space incorrect".
+#if defined(CUTE_ARCH_TMA_SM120_ENABLED)
       asm volatile(
           "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes"
           " [%0], [%1, {%2, %3}], [%4];\n" ::"r"(smem_addr),
@@ -491,6 +502,15 @@ private:
           "r"(n_start),
           "r"(k_start),
           "r"(barrier_addr));
+#else
+      asm volatile(
+          "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"
+          " [%0], [%1, {%2, %3}], [%4];\n" ::"r"(smem_addr),
+          "l"(&tma_desc_B),
+          "r"(n_start),
+          "r"(k_start),
+          "r"(barrier_addr));
+#endif
     }
   }
 
