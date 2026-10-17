@@ -525,7 +525,7 @@ class PointMinkUNetBase(MinkUNetBase):
             pc,
             reduction="mean",
             downsample_voxel_size=self.voxel_size,
-            return_type="sparse",
+            return_type="voxel",
             return_to_unique=True,
         )
         st = super().forward(st)

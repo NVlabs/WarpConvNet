@@ -31,7 +31,7 @@ class PointPoolBase(BaseSpatialModule):
         Maximum number of points to keep when downsampling.
     downsample_voxel_size : float, optional
         Size of voxels used for downsampling.
-    return_type : {"point", "sparse"}, optional
+    return_type : {"point", "voxel"}, optional
         Output geometry type. Defaults to ``"point"``.
     unique_method : {"torch", "ravel", "morton"}, optional
         Method used to find unique voxel indices. Defaults to ``"torch"``.
@@ -46,7 +46,7 @@ class PointPoolBase(BaseSpatialModule):
         reduction: Union[str, REDUCTIONS] = REDUCTIONS.MAX,
         downsample_max_num_points: Optional[int] = None,
         downsample_voxel_size: Optional[float] = None,
-        return_type: Literal["point", "sparse"] = "point",
+        return_type: Literal["point", "voxel"] = "point",
         unique_method: Literal["torch", "ravel", "morton"] = "torch",
         avereage_pooled_coordinates: bool = False,
         return_neighbor_search_result: bool = False,
@@ -84,7 +84,7 @@ class PointMaxPool(PointPoolBase):
         Maximum number of points to keep when downsampling.
     downsample_voxel_size : float, optional
         Size of voxels used for downsampling.
-    return_type : {"point", "sparse"}, optional
+    return_type : {"point", "voxel"}, optional
         Output geometry type. Defaults to ``"point"``.
     return_neighbor_search_result : bool, optional
         If ``True`` also return the neighbor search result. Defaults to ``False``.
@@ -94,7 +94,7 @@ class PointMaxPool(PointPoolBase):
         self,
         downsample_max_num_points: Optional[int] = None,
         downsample_voxel_size: Optional[float] = None,
-        return_type: Literal["point", "sparse"] = "point",
+        return_type: Literal["point", "voxel"] = "point",
         return_neighbor_search_result: bool = False,
     ):
         super().__init__(
@@ -115,7 +115,7 @@ class PointAvgPool(PointPoolBase):
         Maximum number of points to keep when downsampling.
     downsample_voxel_size : float, optional
         Size of voxels used for downsampling.
-    return_type : {"point", "sparse"}, optional
+    return_type : {"point", "voxel"}, optional
         Output geometry type. Defaults to ``"point"``.
     return_neighbor_search_result : bool, optional
         If ``True`` also return the neighbor search result. Defaults to ``False``.
@@ -125,7 +125,7 @@ class PointAvgPool(PointPoolBase):
         self,
         downsample_max_num_points: Optional[int] = None,
         downsample_voxel_size: Optional[float] = None,
-        return_type: Literal["point", "sparse"] = "point",
+        return_type: Literal["point", "voxel"] = "point",
         return_neighbor_search_result: bool = False,
     ):
         super().__init__(
@@ -146,7 +146,7 @@ class PointSumPool(PointPoolBase):
         Maximum number of points to keep when downsampling.
     downsample_voxel_size : float, optional
         Size of voxels used for downsampling.
-    return_type : {"point", "sparse"}, optional
+    return_type : {"point", "voxel"}, optional
         Output geometry type. Defaults to ``"point"``.
     return_neighbor_search_result : bool, optional
         If ``True`` also return the neighbor search result. Defaults to ``False``.
@@ -156,7 +156,7 @@ class PointSumPool(PointPoolBase):
         self,
         downsample_max_num_points: Optional[int] = None,
         downsample_voxel_size: Optional[float] = None,
-        return_type: Literal["point", "sparse"] = "point",
+        return_type: Literal["point", "voxel"] = "point",
         return_neighbor_search_result: bool = False,
     ):
         super().__init__(

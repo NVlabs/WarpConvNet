@@ -216,7 +216,7 @@ def point_pool(
     Pool points in a point cloud.
     When downsample_max_num_points is provided, the point cloud will be downsampled to the number of points.
     When downsample_voxel_size is provided, the point cloud will be downsampled to the voxel size.
-    When both are provided, the point cloud will be downsampled to the voxel size.
+    When both are provided, ``downsample_max_num_points`` takes precedence over ``downsample_voxel_size``.
 
     Args:
         pc: Points
