@@ -53,14 +53,14 @@ class TestIssue11Rejection:
                 return_type="voxel",
             )
 
-    def test_voxel_return_alone_rejected_too(self, setup_points):
-        """Also rejected when only downsample_max_num_points is provided
-        (no downsample_voxel_size anywhere)."""
+    def test_voxel_return_with_both_arguments_rejected(self, setup_points):
+        """Voxel size does not override the max-point-count branch's rejection."""
         with pytest.raises(ValueError, match="voxel"):
             point_pool(
                 setup_points,
                 reduction="max",
                 downsample_max_num_points=32,
+                downsample_voxel_size=0.1,
                 return_type="voxel",
             )
 
@@ -69,7 +69,7 @@ class TestIssue11SupportedCombinations:
     """Supported combinations still work after the rejection was added."""
 
     def test_max_num_points_with_point_return_type_works(self, setup_points):
-        out, _ = point_pool(
+        out = point_pool(
             setup_points,
             reduction="mean",
             downsample_max_num_points=64,
@@ -77,22 +77,23 @@ class TestIssue11SupportedCombinations:
         )
         # Should return a Points instance, not Voxels, and not error
         assert isinstance(out, Points)
+        assert out.batch_size == setup_points.batch_size
         # Coordinates stay continuous (float) — no silent voxelisation
         assert out.coordinate_tensor.dtype in (torch.float32, torch.float64)
         # Output is smaller than input per-batch (pooling actually happened)
         per_batch_in = (setup_points.offsets.diff()).cpu()
         per_batch_out = (out.offsets.diff()).cpu()
-        assert (per_batch_out <= per_batch_in).all(), (
-            f"max-num-points branch should not grow; in={per_batch_in} out={per_batch_out}"
-        )
-        assert (per_batch_out <= 64).all(), (
-            f"each batch should sample at most 64 points; got {per_batch_out}"
-        )
+        assert (
+            per_batch_out <= per_batch_in
+        ).all(), f"max-num-points branch should not grow; in={per_batch_in} out={per_batch_out}"
+        assert (
+            per_batch_out <= 64
+        ).all(), f"each batch should sample at most 64 points; got {per_batch_out}"
 
     def test_max_num_points_with_both_args_still_point(self, setup_points):
         """When both args are given + return_type='point', max-points path
         (with continuous output) is taken — preserves issue-#9 precedence."""
-        out, _ = point_pool(
+        out = point_pool(
             setup_points,
             reduction="mean",
             downsample_max_num_points=32,
@@ -100,17 +101,19 @@ class TestIssue11SupportedCombinations:
             return_type="point",
         )
         assert isinstance(out, Points)
+        assert out.batch_size == setup_points.batch_size
         assert out.coordinate_tensor.dtype in (torch.float32, torch.float64)
 
     def test_voxel_size_path_returns_voxels(self, setup_points):
         """Sanity: the supported way to get a Voxels output still works."""
-        out, _ = point_pool(
+        out = point_pool(
             setup_points,
             reduction="mean",
             downsample_voxel_size=0.1,
             return_type="voxel",
         )
         assert isinstance(out, Voxels)
+        assert out.batch_size == setup_points.batch_size
         # Voxels coordinates must be integer
         assert out.coordinate_tensor.dtype in (
             torch.int32,
@@ -135,13 +138,14 @@ class TestIssue11DtypeContract:
         """Regression guard: the fix must not silently cast continuous
         coordinates to integers on the 'point' return_type path. The
         spatial semantics (and downstream kNN / cdist) rely on float."""
-        out, _ = point_pool(
+        out = point_pool(
             setup_points,
             reduction="mean",
             downsample_max_num_points=48,
             return_type="point",
         )
         # Same dtype as input coordinates
+        assert out.batch_size == setup_points.batch_size
         assert out.coordinate_tensor.dtype == setup_points.coordinate_tensor.dtype
         # Coordinates must be a subset of the input's coordinates
         # (the branch samples; it does not voxelise/average).
