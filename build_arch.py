@@ -38,6 +38,9 @@ class CudaArchError(ValueError):
 # code's cubin: every token continues to map to exactly one gencode target, so
 # asking for 10.0 gets an sm_100 cubin and nothing else.
 CERTIFIED_ARCH_CODES = frozenset({70, 75, 80, 86, 87, 89, 90, 100, 103, 120, 121})
+# Only these certified architectures also have an architecture-specific "a"
+# target. Older architectures such as sm_80 have no corresponding sm_80a.
+CERTIFIED_ACCELERATED_ARCH_CODES = frozenset({90, 100, 103, 120, 121})
 
 
 @dataclass(frozen=True)
@@ -102,9 +105,10 @@ def parse_cuda_arch_token(token: str) -> CudaArchTarget:
     ``+PTX`` (case-insensitive) that additionally emits PTX for that target.
 
     The trailing ``a`` is an identity marker for an accelerated target; it is
-    never inferred.  CUDA family names such as ``Blackwell`` are rejected
-    because they would expand to more than one exact target, and any base code
-    outside ``CERTIFIED_ARCH_CODES`` is rejected by name.
+    never inferred, and is only accepted for architectures in
+    ``CERTIFIED_ACCELERATED_ARCH_CODES``.  CUDA family names such as
+    ``Blackwell`` are rejected because they would expand to more than one exact
+    target, and any base code outside ``CERTIFIED_ARCH_CODES`` is rejected by name.
     """
 
     original = token
@@ -148,6 +152,14 @@ def parse_cuda_arch_token(token: str) -> CudaArchTarget:
         raise CudaArchError(
             f"uncertified CUDA architecture token {original!r} "
             f"(base code {target.base_code}); certified base codes: {known}"
+        )
+
+    if target.accelerated and target.base_code not in CERTIFIED_ACCELERATED_ARCH_CODES:
+        plain_target = replace(target, accelerated=False)
+        raise CudaArchError(
+            f"invalid accelerated CUDA architecture token {original!r}; "
+            f"sm_{target.code} is not supported; use "
+            f"{plain_target.canonical_token!r} without the 'a' suffix"
         )
 
     return target

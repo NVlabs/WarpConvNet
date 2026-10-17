@@ -102,6 +102,71 @@ def test_rejection_names_the_token():
     assert "10.5" in str(exc.value)
 
 
+@pytest.mark.parametrize("base_code", [70, 75, 80, 86, 87, 89])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{major}.{minor}a",
+        "{code}a",
+        "sm_{code}a",
+        "compute_{code}a",
+        "{major}.{minor}A+PTX",
+        "{code}a+ptx",
+        "SM_{code}A",
+        "COMPUTE_{code}A+PTX",
+    ],
+)
+def test_pre_hopper_accelerated_targets_rejected(base_code, template):
+    major, minor = divmod(base_code, 10)
+    token = template.format(major=major, minor=minor, code=base_code)
+    with pytest.raises(CudaArchError) as exc:
+        parse_cuda_arch_token(token)
+    assert repr(token) in str(exc.value)
+
+
+def test_accelerated_rejection_suggests_plain_target_with_ptx():
+    with pytest.raises(CudaArchError) as exc:
+        parse_cuda_arch_token("SM_80A+PTX")
+    assert "8.0+PTX" in str(exc.value)
+
+
+def test_arch_list_rejects_invalid_accelerated_target():
+    with pytest.raises(CudaArchError) as exc:
+        parse_cuda_arch_list("8.0;sm_80a;9.0a")
+    assert "sm_80a" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "70",
+        "75",
+        "80",
+        "86",
+        "87",
+        "89",
+        "90",
+        "100",
+        "103",
+        "120",
+        "121",
+        "90a",
+        "100a",
+        "103a",
+        "120a",
+        "121a",
+    ],
+)
+@pytest.mark.parametrize("emit_ptx", [False, True])
+def test_certified_targets_keep_exact_gencode_flags(code, emit_ptx):
+    token = f"sm_{code}" + ("+PTX" if emit_ptx else "")
+    targets = parse_cuda_arch_list(token)
+    expected = [f"-gencode=arch=compute_{code},code=sm_{code}"]
+    if emit_ptx:
+        expected.append(f"-gencode=arch=compute_{code},code=compute_{code}")
+    assert cuda_gencode_flags(targets) == expected
+
+
 # --------------------------------------------------------------------------- #
 # GB-series build targets
 #

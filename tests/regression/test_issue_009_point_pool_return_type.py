@@ -72,7 +72,7 @@ class TestIssue9PrecedenceDocumentation:
 
         # Seed both identically to make random sampling deterministic
         torch.manual_seed(42)
-        out_max_only, _ = point_pool(
+        out_max_only = point_pool(
             setup_points,
             reduction="mean",
             downsample_max_num_points=max_pts,
@@ -81,7 +81,7 @@ class TestIssue9PrecedenceDocumentation:
         )
 
         torch.manual_seed(42)
-        out_both, _ = point_pool(
+        out_both = point_pool(
             setup_points,
             reduction="mean",
             downsample_max_num_points=max_pts,
@@ -91,6 +91,9 @@ class TestIssue9PrecedenceDocumentation:
         )
 
         # If voxel-size had won, out_both would differ from out_max_only.
+        assert out_max_only.batch_size == setup_points.batch_size
+        assert out_both.batch_size == setup_points.batch_size
+        assert torch.equal(out_both.offsets, out_max_only.offsets)
         assert len(out_both.features) == len(out_max_only.features), (
             f"max-num-points branch should produce identical output with/without "
             f"downsample_voxel_size; got {len(out_both.features)} vs "
@@ -105,13 +108,14 @@ class TestIssue9PrecedenceDocumentation:
 
         # Sanity: voxel-only produces a *different* output size, proving
         # the two branches actually differ.
-        out_voxel_only, _ = point_pool(
+        out_voxel_only = point_pool(
             setup_points,
             reduction="mean",
             downsample_voxel_size=voxel_size,
             return_type="point",
             return_to_unique=False,
         )
+        assert out_voxel_only.batch_size == setup_points.batch_size
         assert len(out_voxel_only.features) != len(out_max_only.features), (
             f"voxel-only path produced same output as max-points path "
             f"({len(out_voxel_only.features)}); test no longer discriminates"

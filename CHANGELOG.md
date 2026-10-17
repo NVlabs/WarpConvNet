@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix `warpconvnet-build-docs` failing on obsolete, missing generator scripts.
+
 - Benchmark cache version bumped to **17.0**; all existing entries are discarded and
   re-benchmarked on first use. There is no v16 -> v17 migration, by design.
 
@@ -51,3 +53,5 @@
   identity `(op, backend, tile_id)`. Existing warm cache entries under
   `cute_gemm_sm90_AD_gather_scatter` are intentionally not migrated and will be
   rebenchmarked under `nonmask_gemm_ad_gather_scatter.cute_sm90` after upgrade.
+
+- Reject unsupported architecture-specific `a` suffixes for pre-Hopper CUDA build targets.
