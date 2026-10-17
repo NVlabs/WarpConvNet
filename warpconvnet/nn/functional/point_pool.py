@@ -115,16 +115,28 @@ def _pool_by_max_num_points(
     return_type: Literal["point", "voxel"] = "point",
     return_neighbor_search_result: bool = False,
 ) -> Geometry:
-    """Downsample points by randomly selecting a fixed number per batch."""
+    """Downsample points by randomly selecting a fixed number per batch.
+
+    Max-point-count sampling operates on continuous coordinates (random
+    subset + nearest-neighbour reduction over floats). It has no defined
+    voxel grid to discretise onto, so ``return_type='voxel'`` is not
+    supported on this path — request ``return_type='voxel'`` only when
+    supplying ``downsample_voxel_size``, which produces a true integer
+    grid via ``floor(coords / voxel_size)``.
+    """
     from warpconvnet.geometry.types.points import Points
     from warpconvnet.geometry.types.voxels import Voxels
 
     if isinstance(reduction, str):
         reduction = REDUCTIONS(reduction)
     if return_type == "voxel":
-        RETURN_CLS = Voxels
-    else:
-        RETURN_CLS = Points
+        raise ValueError(
+            "return_type='voxel' is not supported with downsample_max_num_points. "
+            "The max-point-count branch returns continuously-valued sampled coordinates "
+            "and has no voxel grid to discretise onto. Provide downsample_voxel_size "
+            "(and omit downsample_max_num_points) to obtain a Voxels output."
+        )
+    RETURN_CLS = Points
 
     sample_idx, sampled_offsets = random_sample_per_batch(
         offsets=pc.offsets,
@@ -218,12 +230,18 @@ def point_pool(
     When downsample_voxel_size is provided, the point cloud will be downsampled to the voxel size.
     When both are provided, ``downsample_max_num_points`` takes precedence over ``downsample_voxel_size``.
 
+    ``return_type='voxel'`` is only supported when ``downsample_voxel_size`` is supplied
+    (and takes effect, i.e. when ``downsample_max_num_points`` is ``None``). The
+    max-point-count branch operates on continuous coordinates and has no voxel grid
+    to discretise onto, so the combination
+    ``downsample_max_num_points=...`` + ``return_type='voxel'`` is rejected.
+
     Args:
         pc: Points
         reduction: Reduction type
         downsample_max_num_points: Number of points to downsample to
         downsample_voxel_size: Voxel size to downsample to
-        return_type: Return type
+        return_type: Return type. ``'voxel'`` requires ``downsample_voxel_size``.
         return_neighbor_search_result: Return neighbor search result
         return_to_unique: Return to unique object
     Returns:
@@ -242,6 +260,13 @@ def point_pool(
         "point",
         "voxel",
     ], "return_type must be either point or voxel."
+    if return_type == "voxel" and downsample_max_num_points is not None:
+        raise ValueError(
+            "return_type='voxel' is not supported with downsample_max_num_points. "
+            "The max-point-count branch returns continuously-valued sampled coordinates "
+            "and has no voxel grid to discretise onto. Provide downsample_voxel_size "
+            "(and omit downsample_max_num_points) to obtain a Voxels output."
+        )
     if return_type == "voxel":
         assert (
             not average_pooled_coordinates
