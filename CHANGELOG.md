@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix `warpconvnet-build-docs` failing on obsolete, missing generator scripts.
+
 - Benchmark cache version bumped to **17.0**; all existing entries are discarded and
   re-benchmarked on first use. There is no v16 -> v17 migration, by design.
 
