@@ -338,7 +338,7 @@ def voxel_encode(
     else:
         perm = torch.argsort(codes)
         if return_counts:
-            counts = torch.unique_consecutive(codes, return_counts=True)[1]
+            counts = torch.unique_consecutive(codes[perm], return_counts=True)[1]
 
     inverse_perm = None
     if return_inverse:
